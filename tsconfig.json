@@ -13,6 +13,8 @@
     "moduleResolution": "Bundler",
     "paths": {
       "@core/*": ["./packages/core/src/*"],
+      "@instrumentation-sdk": ["./packages/instrumentation-sdk/src/index.ts"],
+      "@instrumentation-sdk/*": ["./packages/instrumentation-sdk/src/*"],
       "@renderer/*": ["./apps/desktop/src/renderer/src/*"],
       "@ui-shared/*": ["./packages/ui-shared/src/*"]
     },

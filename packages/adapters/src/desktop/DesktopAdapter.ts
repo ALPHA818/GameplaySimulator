@@ -1,6 +1,2 @@
-import type { GameAdapter } from '../base/GameAdapter';
-
-export interface DesktopAdapter extends GameAdapter {
-  executablePath?: string;
-  workingDirectory?: string;
-}
+export { DesktopWindowAdapter as DesktopAdapter, DesktopWindowAdapter } from './DesktopWindowAdapter';
+export type { DesktopWindowAdapterOptions as DesktopAdapterOptions, DesktopWindowAdapterOptions } from './DesktopWindowAdapter';

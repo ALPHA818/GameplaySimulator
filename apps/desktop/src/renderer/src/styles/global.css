@@ -371,7 +371,7 @@ h2 {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -405,10 +405,11 @@ h2 {
   overflow: hidden;
 }
 
-.allocation-row {
+.allocation-row,
+.launch-plan-row,
+.instance-row {
   min-height: 46px;
   display: grid;
-  grid-template-columns: 1fr 0.7fr 0.8fr 2fr;
   gap: 12px;
   align-items: center;
   border-top: 1px solid #2d3037;
@@ -416,11 +417,27 @@ h2 {
   color: #d8e0eb;
 }
 
-.allocation-row:first-child {
+.allocation-row {
+  grid-template-columns: 1fr 0.7fr 0.8fr 2fr;
+}
+
+.launch-plan-row {
+  grid-template-columns: 0.5fr 1fr 1.2fr 0.9fr 1fr;
+}
+
+.instance-row {
+  grid-template-columns: 1fr 0.8fr 2fr 0.7fr 1.2fr;
+}
+
+.allocation-row:first-child,
+.launch-plan-row:first-child,
+.instance-row:first-child {
   border-top: 0;
 }
 
-.allocation-row--head {
+.allocation-row--head,
+.launch-plan-row--head,
+.instance-row--head {
   min-height: 38px;
   background: #20232a;
   color: #aeb8c7;
@@ -563,12 +580,16 @@ h2 {
   .table-row--bot,
   .table-row--report,
   .allocation-row,
+  .launch-plan-row,
+  .instance-row,
   .bot-pool-row {
     grid-template-columns: 1fr;
   }
 
   .table-row--head,
-  .allocation-row--head {
+  .allocation-row--head,
+  .launch-plan-row--head,
+  .instance-row--head {
     display: none;
   }
 }

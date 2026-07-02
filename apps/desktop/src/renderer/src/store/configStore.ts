@@ -95,6 +95,30 @@ const seededBotProfiles: BotProfile[] = [
     defaultResourceWeight: 'very_heavy',
     tags: ['stress'],
     config: {}
+  },
+  {
+    profileId: 'ui-tester',
+    displayName: 'UI Tester Bot',
+    botType: 'ui',
+    description: 'Exercises menus, dialogs, HUD flows, and settings screens.',
+    goals: [],
+    recommendedMinCount: 1,
+    recommendedMaxCount: 8,
+    defaultResourceWeight: 'medium',
+    tags: ['ui', 'menus'],
+    config: { playstyle: 'ui-tester' }
+  },
+  {
+    profileId: 'completionist',
+    displayName: 'Completionist Bot',
+    botType: 'completionist',
+    description: 'Follows broad progression goals and tries to cover optional content.',
+    goals: [],
+    recommendedMinCount: 1,
+    recommendedMaxCount: 3,
+    defaultResourceWeight: 'heavy',
+    tags: ['progression', 'coverage'],
+    config: { playstyle: 'completionist' }
   }
 ];
 

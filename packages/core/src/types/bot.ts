@@ -77,9 +77,21 @@ export const BotStatusSchema = z.enum([
   'stopped'
 ]);
 
+export const BotLaunchPlanSchema = z.object({
+  botId: z.string().min(1),
+  profileId: z.string().min(1),
+  displayName: z.string().min(1),
+  playstyle: z.string().min(1),
+  assignedGameInstanceId: z.string().min(1).optional(),
+  seed: z.number().int().nonnegative(),
+  resourceWeight: ResourceWeightSchema,
+  launchIndex: z.number().int().min(1)
+});
+
 export type ResourceWeight = z.infer<typeof ResourceWeightSchema>;
 export type ScalingMode = z.infer<typeof ScalingModeSchema>;
 export type BotGoal = z.infer<typeof BotGoalSchema>;
 export type BotProfile = z.infer<typeof BotProfileSchema>;
 export type BotPoolConfig = z.infer<typeof BotPoolConfigSchema>;
 export type BotStatus = z.infer<typeof BotStatusSchema>;
+export type BotLaunchPlan = z.infer<typeof BotLaunchPlanSchema>;

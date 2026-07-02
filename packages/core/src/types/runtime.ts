@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LaunchConfigSchema } from './adapter';
+import { AdapterTypeSchema, LaunchConfigSchema } from './adapter';
 import { BotStatusSchema } from './bot';
 
 export const GameStateSnapshotSchema = z.object({
@@ -61,6 +61,33 @@ export const ResourceEstimateSchema = z.object({
   notes: z.array(z.string()).default([])
 });
 
+export const GameInstanceRuntimeStatusSchema = z.enum([
+  'starting',
+  'running',
+  'stopping',
+  'stopped',
+  'crashed',
+  'unresponsive'
+]);
+
+export const GameInstanceResourceUsageSchema = z.object({
+  cpuPercent: z.number().min(0).optional(),
+  ramMb: z.number().min(0).optional(),
+  gpuPercent: z.number().min(0).max(100).optional()
+});
+
+export const GameInstanceStatusSchema = z.object({
+  instanceId: z.string().min(1),
+  gameProfileId: z.string().min(1),
+  processId: z.number().int().positive().optional(),
+  adapterType: AdapterTypeSchema,
+  status: GameInstanceRuntimeStatusSchema,
+  assignedBots: z.array(z.string().min(1)).default([]),
+  startTime: z.string().min(1),
+  lastHeartbeat: z.string().min(1),
+  resourceUsage: GameInstanceResourceUsageSchema.optional()
+});
+
 export const BotAllocationSchema = z.object({
   profileId: z.string().min(1),
   requestedCount: z.number().int().min(0),
@@ -108,6 +135,9 @@ export type GameAction = z.infer<typeof GameActionSchema>;
 export type ActionResult = z.infer<typeof ActionResultSchema>;
 export type GameInstanceConfig = z.infer<typeof GameInstanceConfigSchema>;
 export type ResourceEstimate = z.infer<typeof ResourceEstimateSchema>;
+export type GameInstanceRuntimeStatus = z.infer<typeof GameInstanceRuntimeStatusSchema>;
+export type GameInstanceResourceUsage = z.infer<typeof GameInstanceResourceUsageSchema>;
+export type GameInstanceStatus = z.infer<typeof GameInstanceStatusSchema>;
 export type BotAllocation = z.infer<typeof BotAllocationSchema>;
 export type RuntimeViabilityReport = z.infer<typeof RuntimeViabilityReportSchema>;
 export type SessionStatus = z.infer<typeof SessionStatusSchema>;

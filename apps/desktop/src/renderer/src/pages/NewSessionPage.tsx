@@ -1,5 +1,13 @@
-import type { BotPoolConfig, RunMode, RuntimeViabilityReport, SimulationRunConfig } from '@core/types';
+import type {
+  BotLaunchPlan,
+  BotPoolConfig,
+  RunMode,
+  RuntimeViabilityReport,
+  SimulationRunConfig
+} from '@core/types';
 import { SimulationRunConfigSchema } from '@core/types';
+import { resolveBotPools } from '@core/bot/BotPoolResolver';
+import { planGameInstances } from '@core/sessions/GameInstanceManager';
 import { Play } from 'lucide-react';
 import type { FormEvent } from 'react';
 import { useEffect, useMemo, useState } from 'react';
@@ -78,22 +86,28 @@ function countRequestedBots(config: SimulationRunConfig): number {
   return config.botPools.reduce((total, pool) => total + (pool.enabled ? pool.desiredCount : 0), 0);
 }
 
-function applyRecommendedAutoCounts(
+function applyResolvedAutoCounts(
   config: SimulationRunConfig,
-  report: RuntimeViabilityReport
+  launchPlans: BotLaunchPlan[]
 ): SimulationRunConfig {
+  const resolvedCounts = launchPlans.reduce<Map<string, number>>((counts, plan) => {
+    counts.set(plan.profileId, (counts.get(plan.profileId) ?? 0) + 1);
+    return counts;
+  }, new Map());
+
   return {
     ...config,
     botPools: config.botPools.map((pool) => {
-      const allocation = report.botAllocation.find((item) => item.profileId === pool.profileId);
-
-      if (!allocation || pool.scalingMode !== 'auto') {
+      if (pool.scalingMode !== 'auto') {
         return pool;
       }
 
+      const resolvedCount = resolvedCounts.get(pool.profileId) ?? 0;
+
       return {
         ...pool,
-        desiredCount: allocation.recommendedCount
+        minCount: Math.min(pool.minCount, resolvedCount),
+        desiredCount: resolvedCount
       };
     })
   };
@@ -137,15 +151,49 @@ export function NewSessionPage() {
   const adapterType = selectedProfile?.adapter.type ?? 'custom';
   const videoSupported = selectedProfile?.adapter.supportsVideo ?? false;
 
-  const preview = useMemo(() => buildRunConfig(form, adapterType), [adapterType, form]);
+  const preview = useMemo(
+    () =>
+      buildRunConfig(
+        { ...form, saveVideo: videoSupported ? form.saveVideo : false },
+        adapterType
+      ),
+    [adapterType, form, videoSupported]
+  );
   const requestedBots = countRequestedBots(preview);
+  const resolvedLaunchPlans = useMemo<BotLaunchPlan[]>(() => {
+    const parsed = SimulationRunConfigSchema.safeParse(preview);
+
+    if (!parsed.success || !viabilityReport) {
+      return [];
+    }
+
+    return resolveBotPools({
+      runConfig: parsed.data,
+      botProfiles,
+      viabilityReport
+    });
+  }, [botProfiles, preview, viabilityReport]);
+  const plannedGameInstances = useMemo(() => {
+    const parsed = SimulationRunConfigSchema.safeParse(preview);
+
+    if (!parsed.success || !selectedProfile || resolvedLaunchPlans.length === 0) {
+      return null;
+    }
+
+    return planGameInstances({
+      runConfig: parsed.data,
+      gameProfile: selectedProfile,
+      launchPlans: resolvedLaunchPlans,
+      adapterCapabilities: {
+        supportsMultipleInstances: selectedProfile.adapter.supportsMultipleInstances,
+        supportsSaveIsolation: selectedProfile.adapter.supportsSaveIsolation
+      }
+    });
+  }, [preview, resolvedLaunchPlans, selectedProfile]);
 
   useEffect(() => {
     let cancelled = false;
-    const config = buildRunConfig(
-      { ...form, saveVideo: videoSupported ? form.saveVideo : false },
-      adapterType
-    );
+    const config = preview;
     const parsed = SimulationRunConfigSchema.safeParse(config);
 
     if (!parsed.success || !selectedProfile) {
@@ -225,7 +273,7 @@ export function NewSessionPage() {
       return;
     }
 
-    const adjustedConfig = applyRecommendedAutoCounts(result.data, viabilityReport);
+    const adjustedConfig = applyResolvedAutoCounts(result.data, resolvedLaunchPlans);
     const adjustedResult = SimulationRunConfigSchema.safeParse(adjustedConfig);
 
     if (!adjustedResult.success) {
@@ -234,10 +282,16 @@ export function NewSessionPage() {
       return;
     }
 
+    if (resolvedLaunchPlans.length === 0) {
+      setErrors({ form: 'No bots can be resolved from the current pool and resource settings.' });
+      setValidatedConfig(null);
+      return;
+    }
+
     setErrors({});
     setValidatedConfig(adjustedResult.data);
     saveRunConfig(adjustedResult.data);
-    setSessionPreview('Session config ready');
+    setSessionPreview(`Session config ready (${resolvedLaunchPlans.length} bots)`);
   }
 
   if (gameProfiles.length === 0) {
@@ -518,6 +572,14 @@ export function NewSessionPage() {
                 <strong>{viabilityReport.recommendedTotalBots}</strong>
               </div>
               <div className="metric-card">
+                <span>Final bots</span>
+                <strong>{resolvedLaunchPlans.length}</strong>
+              </div>
+              <div className="metric-card">
+                <span>Game instances</span>
+                <strong>{plannedGameInstances?.instances.length ?? 0}</strong>
+              </div>
+              <div className="metric-card">
                 <span>Estimated RAM</span>
                 <strong>{viabilityReport.estimatedRamMb} MB</strong>
               </div>
@@ -543,6 +605,68 @@ export function NewSessionPage() {
                 </div>
               ))}
             </div>
+
+            <div className="allocation-table">
+              <div className="launch-plan-row launch-plan-row--head">
+                <span>Launch</span>
+                <span>Bot ID</span>
+                <span>Display</span>
+                <span>Playstyle</span>
+                <span>Instance</span>
+              </div>
+              {resolvedLaunchPlans.length === 0 ? (
+                <div className="empty-row">No bots resolved from the current limits</div>
+              ) : (
+                resolvedLaunchPlans.map((plan) => (
+                  <div className="launch-plan-row" key={plan.botId}>
+                    <span>{plan.launchIndex}</span>
+                    <span>{plan.botId}</span>
+                    <span>{plan.displayName}</span>
+                    <span>{plan.playstyle}</span>
+                    <span>{plan.assignedGameInstanceId ?? 'Unassigned'}</span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="allocation-table">
+              <div className="instance-row instance-row--head">
+                <span>Instance</span>
+                <span>Status</span>
+                <span>Active bots</span>
+                <span>Max bots</span>
+                <span>Save/profile</span>
+              </div>
+              {!plannedGameInstances || plannedGameInstances.instances.length === 0 ? (
+                <div className="empty-row">No game instances planned yet</div>
+              ) : (
+                plannedGameInstances.instances.map((instance) => (
+                  <div className="instance-row" key={instance.instanceId}>
+                    <span>{instance.instanceId}</span>
+                    <span>{instance.status.status}</span>
+                    <span>{instance.status.assignedBots.join(', ') || 'None'}</span>
+                    <span>{instance.config.maxBots}</span>
+                    <span>{instance.config.saveProfileId ?? 'Shared/default'}</span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {plannedGameInstances && plannedGameInstances.queuedBotIds.length > 0 ? (
+              <div className="notice-list notice-list--warning">
+                <strong>Queued bots</strong>
+                <span>{plannedGameInstances.queuedBotIds.join(', ')}</span>
+              </div>
+            ) : null}
+
+            {plannedGameInstances && plannedGameInstances.warnings.length > 0 ? (
+              <div className="notice-list notice-list--warning">
+                <strong>Instance planning</strong>
+                {plannedGameInstances.warnings.map((warning) => (
+                  <span key={warning}>{warning}</span>
+                ))}
+              </div>
+            ) : null}
 
             {viabilityReport.warnings.length > 0 ? (
               <div className="notice-list notice-list--warning">

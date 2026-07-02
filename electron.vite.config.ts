@@ -6,6 +6,7 @@ const root = process.cwd();
 const alias = {
   '@renderer': resolve(root, 'apps/desktop/src/renderer/src'),
   '@core': resolve(root, 'packages/core/src'),
+  '@instrumentation-sdk': resolve(root, 'packages/instrumentation-sdk/src'),
   '@ui-shared': resolve(root, 'packages/ui-shared/src')
 };
 

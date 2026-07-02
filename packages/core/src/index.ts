@@ -1,5 +1,6 @@
 export * from './types';
 export * from './bot/BotDefinition';
+export * from './bot/BotPoolResolver';
 export * from './config/runConfig';
 export * from './detection/Issue';
 export * from './engine/SimulatorEngine';
@@ -7,4 +8,5 @@ export * from './logging/LogEntry';
 export * from './reports/Report';
 export * from './resources/ResourceBudget';
 export * from './resources/ResourceManager';
+export * from './sessions/GameInstanceManager';
 export * from './sessions/Session';
