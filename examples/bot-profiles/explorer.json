@@ -1,0 +1,21 @@
+{
+  "profileId": "explorer",
+  "displayName": "Explorer Bot",
+  "botType": "explorer",
+  "description": "General-purpose bot profile for navigation, menu, and interaction coverage.",
+  "goals": [
+    {
+      "goalId": "map-coverage",
+      "name": "Map Coverage",
+      "description": "Move through reachable areas and report blocked progression.",
+      "priority": 10,
+      "successCriteria": ["Discover reachable screens", "Avoid repeated dead-end loops"],
+      "targetIssueCategories": ["navigation", "progression", "gameplay"]
+    }
+  ],
+  "recommendedMinCount": 1,
+  "recommendedMaxCount": 20,
+  "defaultResourceWeight": "medium",
+  "tags": ["navigation", "smoke"],
+  "config": {}
+}

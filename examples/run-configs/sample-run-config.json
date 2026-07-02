@@ -1,0 +1,60 @@
+{
+  "sessionId": "sample-smoke-test",
+  "gameProfilePath": "examples/game-profiles/sample-game-profile.json",
+  "adapterType": "browser",
+  "runMode": "parallel",
+  "runUntilStopped": false,
+  "maxRuntimeMinutes": 15,
+  "stopOnCriticalIssue": true,
+  "saveScreenshots": true,
+  "saveVideo": false,
+  "saveActionTimeline": true,
+  "saveStateSnapshots": true,
+  "botPools": [
+    {
+      "profileId": "explorer",
+      "enabled": true,
+      "minCount": 1,
+      "desiredCount": 2,
+      "maxCount": 20,
+      "scalingMode": "auto",
+      "priority": 10,
+      "resourceWeight": "medium",
+      "notes": "General navigation, menu, and world exploration."
+    },
+    {
+      "profileId": "combat-tester",
+      "enabled": true,
+      "minCount": 1,
+      "desiredCount": 1,
+      "maxCount": 10,
+      "scalingMode": "auto",
+      "priority": 7,
+      "resourceWeight": "heavy",
+      "notes": "Exercises combat loops when a profile exposes combat controls."
+    },
+    {
+      "profileId": "chaos-monkey",
+      "enabled": false,
+      "minCount": 0,
+      "desiredCount": 0,
+      "maxCount": 5,
+      "scalingMode": "auto",
+      "priority": 1,
+      "resourceWeight": "very_heavy",
+      "notes": "Reserved for noisy random-input testing in permitted offline builds."
+    }
+  ],
+  "globalBotLimit": 16,
+  "perGameInstanceBotLimit": 4,
+  "actionDelayMs": 250,
+  "maxActionsPerBot": 500,
+  "resourceLimits": {
+    "maxCpuPercent": 80,
+    "maxRamPercent": 75,
+    "maxGpuPercent": 80,
+    "reserveRamMb": 2048,
+    "maxGameInstances": 4,
+    "allowAutoScaling": true
+  }
+}

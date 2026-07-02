@@ -1,0 +1,73 @@
+{
+  "gameId": "sample-browser-game",
+  "gameName": "Sample Browser Game",
+  "version": "0.1.0",
+  "buildId": "local-dev",
+  "engine": {
+    "type": "browser"
+  },
+  "launch": {
+    "url": "https://example.local/game",
+    "arguments": [],
+    "platform": "browser"
+  },
+  "adapter": {
+    "type": "browser",
+    "supportsMultipleInstances": true,
+    "supportsStateRead": false,
+    "supportsDirectActions": false,
+    "supportsScreenshots": true,
+    "supportsVideo": false,
+    "supportsSaveIsolation": true
+  },
+  "controls": [
+    {
+      "controlId": "move-left",
+      "label": "Move Left",
+      "inputType": "keyboard",
+      "binding": "ArrowLeft",
+      "action": "move_left"
+    },
+    {
+      "controlId": "confirm",
+      "label": "Confirm",
+      "inputType": "keyboard",
+      "binding": "Enter",
+      "action": "confirm"
+    }
+  ],
+  "testingTargets": [
+    {
+      "targetId": "smoke-navigation",
+      "name": "Basic navigation",
+      "description": "Verify bots can move through the initial screen flow.",
+      "priority": 10,
+      "tags": ["smoke", "navigation"]
+    }
+  ],
+  "progressSignals": [
+    {
+      "signalId": "main-screen-visible",
+      "name": "Main screen visible",
+      "source": "visual",
+      "description": "The playable screen is visible and responsive."
+    }
+  ],
+  "failureSignals": [
+    {
+      "signalId": "crash-dialog",
+      "name": "Crash dialog",
+      "source": "visual",
+      "severity": "critical",
+      "description": "A crash or fatal error dialog is visible."
+    }
+  ],
+  "knownContent": {
+    "locations": ["Start area"],
+    "characters": [],
+    "items": [],
+    "quests": [],
+    "mechanics": ["movement", "menu confirmation"],
+    "notes": ["Placeholder profile for local or permitted QA testing."]
+  }
+}

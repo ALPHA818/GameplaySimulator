@@ -1,0 +1,114 @@
+import { z } from 'zod';
+import { LaunchConfigSchema } from './adapter';
+import { BotStatusSchema } from './bot';
+
+export const GameStateSnapshotSchema = z.object({
+  snapshotId: z.string().min(1),
+  sessionId: z.string().min(1),
+  gameId: z.string().min(1),
+  gameInstanceId: z.string().min(1),
+  botId: z.string().min(1).optional(),
+  capturedAt: z.string().min(1),
+  tick: z.number().int().min(0).optional(),
+  scene: z.string().optional(),
+  state: z.record(z.string(), z.unknown()).default({}),
+  metrics: z.record(z.string(), z.number()).default({}),
+  screenshotPath: z.string().optional()
+});
+
+export const GameActionSchema = z.object({
+  actionId: z.string().min(1),
+  sessionId: z.string().min(1),
+  gameInstanceId: z.string().min(1),
+  botId: z.string().min(1),
+  type: z.string().min(1),
+  target: z.string().optional(),
+  payload: z.record(z.string(), z.unknown()).default({}),
+  requestedAt: z.string().min(1),
+  timeoutMs: z.number().int().positive().optional()
+});
+
+export const ActionResultSchema = z.object({
+  actionId: z.string().min(1),
+  botId: z.string().min(1),
+  status: z.enum(['queued', 'running', 'succeeded', 'failed', 'skipped', 'timed_out']),
+  startedAt: z.string().min(1).optional(),
+  completedAt: z.string().min(1).optional(),
+  durationMs: z.number().min(0).optional(),
+  message: z.string().optional(),
+  stateSnapshotId: z.string().min(1).optional(),
+  issueIds: z.array(z.string().min(1)).default([])
+});
+
+export const GameInstanceConfigSchema = z.object({
+  instanceId: z.string().min(1),
+  gameProfileId: z.string().min(1),
+  launch: LaunchConfigSchema,
+  saveProfileId: z.string().min(1).optional(),
+  isolatedSaveDirectory: z.string().min(1).optional(),
+  maxBots: z.number().int().min(1),
+  environment: z.record(z.string(), z.string()).default({})
+});
+
+export const ResourceEstimateSchema = z.object({
+  cpuPercent: z.number().min(0).max(100),
+  ramMb: z.number().min(0),
+  gpuPercent: z.number().min(0).max(100).optional(),
+  vramMb: z.number().min(0).optional(),
+  gameInstanceCount: z.number().int().min(0),
+  botCount: z.number().int().min(0),
+  confidence: z.enum(['low', 'medium', 'high']),
+  notes: z.array(z.string()).default([])
+});
+
+export const BotAllocationSchema = z.object({
+  profileId: z.string().min(1),
+  requestedCount: z.number().int().min(0),
+  recommendedCount: z.number().int().min(0),
+  reason: z.string().min(1)
+});
+
+export const RuntimeViabilityReportSchema = z.object({
+  canRun: z.boolean(),
+  recommendedTotalBots: z.number().int().min(0),
+  recommendedGameInstances: z.number().int().min(0),
+  warnings: z.array(z.string()).default([]),
+  blockers: z.array(z.string()).default([]),
+  estimatedCpuPercent: z.number().min(0),
+  estimatedRamMb: z.number().min(0),
+  estimatedGpuPercent: z.number().min(0).max(100).optional(),
+  botAllocation: z.array(BotAllocationSchema).default([])
+});
+
+export const SessionStatusSchema = z.enum([
+  'idle',
+  'created',
+  'starting',
+  'running',
+  'paused',
+  'stopping',
+  'stopped',
+  'completed',
+  'failed',
+  'cancelled'
+]);
+
+export const RuntimeBotSnapshotSchema = z.object({
+  botId: z.string().min(1),
+  profileId: z.string().min(1),
+  status: BotStatusSchema,
+  gameInstanceId: z.string().min(1).optional(),
+  currentGoalId: z.string().min(1).optional(),
+  lastActionId: z.string().min(1).optional(),
+  message: z.string().optional()
+});
+
+export type GameStateSnapshot = z.infer<typeof GameStateSnapshotSchema>;
+export type GameAction = z.infer<typeof GameActionSchema>;
+export type ActionResult = z.infer<typeof ActionResultSchema>;
+export type GameInstanceConfig = z.infer<typeof GameInstanceConfigSchema>;
+export type ResourceEstimate = z.infer<typeof ResourceEstimateSchema>;
+export type BotAllocation = z.infer<typeof BotAllocationSchema>;
+export type RuntimeViabilityReport = z.infer<typeof RuntimeViabilityReportSchema>;
+export type SessionStatus = z.infer<typeof SessionStatusSchema>;
+export type RuntimeBotSnapshot = z.infer<typeof RuntimeBotSnapshotSchema>;

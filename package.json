@@ -1,0 +1,33 @@
+{
+  "name": "gameplay-simulator",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Desktop-first, game-agnostic QA simulator for controlled gameplay testing.",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "node scripts/electron-vite.mjs dev",
+    "desktop": "node scripts/electron-vite.mjs dev",
+    "build": "tsc --noEmit && electron-vite build && npm run build:runner",
+    "build:runner": "vite build --config apps/runner/vite.config.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "lucide-react": "^1.23.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "zod": "^4.4.3",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@swc/core": "^1.15.43",
+    "@types/node": "^26.1.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^43.0.0",
+    "electron-vite": "^5.0.0",
+    "typescript": "^6.0.3",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.9"
+  }
+}
