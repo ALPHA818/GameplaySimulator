@@ -1,4 +1,4 @@
-import type { AdapterType, EngineType, GameProfile, LaunchPlatform } from '@core/types';
+import type { AdapterType, EngineType, GameProfile, KnownContent, LaunchPlatform } from '@core/types';
 import { GameProfileSchema } from '@core/types';
 import { ArrowLeft, Save } from 'lucide-react';
 import type { FormEvent } from 'react';
@@ -36,6 +36,51 @@ const platformOptions: Array<{ value: LaunchPlatform; label: string }> = [
   { value: 'browser', label: 'Browser' }
 ];
 
+type KnownContentEditorKey = keyof Pick<
+  KnownContent,
+  | 'scenes'
+  | 'levels'
+  | 'quests'
+  | 'mainQuests'
+  | 'sideQuests'
+  | 'optionalStories'
+  | 'npcs'
+  | 'shops'
+  | 'bosses'
+  | 'items'
+  | 'menus'
+  | 'dialogueBranches'
+  | 'minigames'
+  | 'endings'
+  | 'hiddenAreas'
+  | 'postGameContent'
+  | 'collectibles'
+  | 'achievements'
+  | 'notes'
+>;
+
+const knownContentFields: Array<{ key: KnownContentEditorKey; label: string }> = [
+  { key: 'scenes', label: 'Scenes' },
+  { key: 'levels', label: 'Levels' },
+  { key: 'quests', label: 'Quests' },
+  { key: 'mainQuests', label: 'Main Quests' },
+  { key: 'sideQuests', label: 'Side Quests' },
+  { key: 'optionalStories', label: 'Optional Stories' },
+  { key: 'npcs', label: 'NPCs' },
+  { key: 'shops', label: 'Shops' },
+  { key: 'bosses', label: 'Bosses' },
+  { key: 'items', label: 'Items' },
+  { key: 'menus', label: 'Menus' },
+  { key: 'dialogueBranches', label: 'Dialogue Branches' },
+  { key: 'minigames', label: 'Minigames' },
+  { key: 'endings', label: 'Endings' },
+  { key: 'hiddenAreas', label: 'Hidden Areas' },
+  { key: 'postGameContent', label: 'Post-Game Content' },
+  { key: 'collectibles', label: 'Collectibles' },
+  { key: 'achievements', label: 'Achievements' },
+  { key: 'notes', label: 'Notes' }
+];
+
 interface GameProfileFormState {
   gameId: string;
   gameName: string;
@@ -55,6 +100,11 @@ interface GameProfileFormState {
   supportsScreenshots: boolean;
   supportsVideo: boolean;
   supportsSaveIsolation: boolean;
+  knownContent: Record<KnownContentEditorKey, string>;
+}
+
+function contentText(profile: GameProfile | undefined, key: KnownContentEditorKey): string {
+  return (profile?.knownContent[key] ?? []).join('\n');
 }
 
 function formFromProfile(profile?: GameProfile): GameProfileFormState {
@@ -76,12 +126,20 @@ function formFromProfile(profile?: GameProfile): GameProfileFormState {
     supportsDirectActions: profile?.adapter.supportsDirectActions ?? false,
     supportsScreenshots: profile?.adapter.supportsScreenshots ?? true,
     supportsVideo: profile?.adapter.supportsVideo ?? false,
-    supportsSaveIsolation: profile?.adapter.supportsSaveIsolation ?? false
+    supportsSaveIsolation: profile?.adapter.supportsSaveIsolation ?? false,
+    knownContent: knownContentFields.reduce<Record<KnownContentEditorKey, string>>((content, field) => {
+      content[field.key] = contentText(profile, field.key);
+      return content;
+    }, {} as Record<KnownContentEditorKey, string>)
   };
 }
 
 function buildProfile(form: GameProfileFormState): GameProfile {
   const gameId = optionalText(form.gameId) ?? slugify(form.gameName);
+  const knownContent = knownContentFields.reduce<Record<KnownContentEditorKey, string[]>>((content, field) => {
+    content[field.key] = splitArguments(form.knownContent[field.key]);
+    return content;
+  }, {} as Record<KnownContentEditorKey, string[]>);
 
   return {
     gameId,
@@ -113,12 +171,11 @@ function buildProfile(form: GameProfileFormState): GameProfile {
     progressSignals: [],
     failureSignals: [],
     knownContent: {
-      locations: [],
-      characters: [],
-      items: [],
-      quests: [],
-      mechanics: [],
-      notes: []
+      ...knownContent,
+      locations: knownContent.scenes,
+      characters: knownContent.npcs,
+      quests: [...new Set([...knownContent.quests, ...knownContent.mainQuests, ...knownContent.sideQuests])],
+      mechanics: []
     }
   };
 }
@@ -322,6 +379,29 @@ export function GameProfileEditorPage() {
                 onChange={(event) => update('supportsSaveIsolation', event.target.checked)}
               />
             </div>
+          </div>
+        </section>
+
+        <section className="form-section">
+          <h2>Known Content</h2>
+          <div className="field-grid">
+            {knownContentFields.map((field) => (
+              <TextareaInput
+                key={field.key}
+                label={field.label}
+                name={`knownContent.${field.key}`}
+                value={form.knownContent[field.key]}
+                onChange={(event) =>
+                  setForm((current) => ({
+                    ...current,
+                    knownContent: {
+                      ...current.knownContent,
+                      [field.key]: event.target.value
+                    }
+                  }))
+                }
+              />
+            ))}
           </div>
         </section>
 

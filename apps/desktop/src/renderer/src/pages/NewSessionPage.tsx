@@ -8,11 +8,11 @@ import type {
 import { SimulationRunConfigSchema } from '@core/types';
 import { resolveBotPools } from '@core/bot/BotPoolResolver';
 import { planGameInstances } from '@core/sessions/GameInstanceManager';
-import { Play } from 'lucide-react';
+import { Pause, Play, Plus, RotateCw, Square, Trash2 } from 'lucide-react';
 import type { FormEvent } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import { SelectInput, TextInput, ToggleInput } from '../components/FormFields';
-import { createDefaultBotPools, useConfigStore } from '../store/configStore';
+import { createBotPoolFromProfile, createDefaultBotPools, useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
 import type { FieldErrors } from '../utils/forms';
 import { optionalText, zodFieldErrors } from '../utils/forms';
@@ -26,6 +26,7 @@ interface RunFormState {
   stopOnCriticalIssue: boolean;
   saveScreenshots: boolean;
   saveVideo: boolean;
+  screenshotEveryNActions: string;
   saveActionTimeline: boolean;
   saveStateSnapshots: boolean;
   botPools: BotPoolConfig[];
@@ -64,6 +65,9 @@ function buildRunConfig(form: RunFormState, adapterType: SimulationRunConfig['ad
     stopOnCriticalIssue: form.stopOnCriticalIssue,
     saveScreenshots: form.saveScreenshots,
     saveVideo: form.saveVideo,
+    screenshotEveryNActions: optionalText(form.screenshotEveryNActions)
+      ? Number(form.screenshotEveryNActions)
+      : undefined,
     saveActionTimeline: form.saveActionTimeline,
     saveStateSnapshots: form.saveStateSnapshots,
     botPools: form.botPools,
@@ -119,6 +123,14 @@ export function NewSessionPage() {
   const saveRunConfig = useConfigStore((state) => state.saveRunConfig);
   const openGameProfileEditor = useConfigStore((state) => state.openGameProfileEditor);
   const setSessionPreview = useSessionStore((state) => state.setSessionPreview);
+  const sessionStatus = useSessionStore((state) => state.status);
+  const activeSessionId = useSessionStore((state) => state.activeSessionId);
+  const runtimeBotStatuses = useSessionStore((state) => state.botStatuses);
+  const runtimeInstanceStatuses = useSessionStore((state) => state.instanceStatuses);
+  const runtimeIssues = useSessionStore((state) => state.issues);
+  const runtimeLogs = useSessionStore((state) => state.logs);
+  const applySessionSnapshot = useSessionStore((state) => state.applySessionSnapshot);
+  const applyRuntimeDetails = useSessionStore((state) => state.applyRuntimeDetails);
   const [form, setForm] = useState<RunFormState>(() => ({
     sessionId: `session-${Date.now()}`,
     gameProfileId: gameProfiles[0]?.gameId ?? '',
@@ -128,6 +140,7 @@ export function NewSessionPage() {
     stopOnCriticalIssue: true,
     saveScreenshots: true,
     saveVideo: false,
+    screenshotEveryNActions: '25',
     saveActionTimeline: true,
     saveStateSnapshots: true,
     botPools: createDefaultBotPools(botProfiles),
@@ -147,9 +160,18 @@ export function NewSessionPage() {
   const [viabilityReport, setViabilityReport] = useState<RuntimeViabilityReport | null>(null);
   const [viabilityError, setViabilityError] = useState<string | null>(null);
   const [runAnyway, setRunAnyway] = useState(false);
+  const [addPoolProfileId, setAddPoolProfileId] = useState('');
   const selectedProfile = gameProfiles.find((profile) => profile.gameId === form.gameProfileId);
   const adapterType = selectedProfile?.adapter.type ?? 'custom';
   const videoSupported = selectedProfile?.adapter.supportsVideo ?? false;
+  const canPause = activeSessionId !== null && sessionStatus === 'running';
+  const canResume = activeSessionId !== null && sessionStatus === 'paused';
+  const canStop =
+    activeSessionId !== null && ['created', 'starting', 'running', 'paused'].includes(sessionStatus);
+  const availableBotProfiles = botProfiles.filter(
+    (profile) => !form.botPools.some((pool) => pool.profileId === profile.profileId)
+  );
+  const profileIdToAdd = addPoolProfileId || availableBotProfiles[0]?.profileId || '';
 
   const preview = useMemo(
     () =>
@@ -204,8 +226,8 @@ export function NewSessionPage() {
 
     setViabilityError(null);
 
-    window.gameplaySimulator.resources
-      .estimateViability({ runConfig: parsed.data, gameProfile: selectedProfile })
+    window.gameplaySimulator.simulation
+      .estimateViability({ runConfig: parsed.data, gameProfile: selectedProfile, botProfiles })
       .then((report) => {
         if (!cancelled) {
           setViabilityReport(report);
@@ -222,7 +244,7 @@ export function NewSessionPage() {
     return () => {
       cancelled = true;
     };
-  }, [adapterType, form, selectedProfile, videoSupported]);
+  }, [adapterType, botProfiles, form, selectedProfile, videoSupported]);
 
   function update<K extends keyof RunFormState>(key: K, value: RunFormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -232,8 +254,39 @@ export function NewSessionPage() {
     setForm((current) => ({
       ...current,
       botPools: current.botPools.map((pool, poolIndex) =>
-        poolIndex === index ? { ...pool, ...patch } : pool
+        poolIndex === index
+          ? {
+              ...pool,
+              ...patch,
+              ...(patch.scalingMode === 'fixed'
+                ? {
+                    minCount: patch.desiredCount ?? pool.desiredCount
+                  }
+                : {})
+            }
+          : pool
       )
+    }));
+  }
+
+  function addBotPool() {
+    const profile = botProfiles.find((item) => item.profileId === profileIdToAdd);
+
+    if (!profile) {
+      return;
+    }
+
+    setForm((current) => ({
+      ...current,
+      botPools: [...current.botPools, createBotPoolFromProfile(profile, current.botPools.length, true)]
+    }));
+    setAddPoolProfileId('');
+  }
+
+  function removeBotPool(index: number) {
+    setForm((current) => ({
+      ...current,
+      botPools: current.botPools.filter((_pool, poolIndex) => poolIndex !== index)
     }));
   }
 
@@ -241,7 +294,21 @@ export function NewSessionPage() {
     return errors[`botPools.${index}.${field}`];
   }
 
-  function onSubmit(event: FormEvent<HTMLFormElement>) {
+  async function refreshRuntimeDetails(sessionId: string) {
+    const [status, botStatuses, instanceStatuses, issues, logs, coverage] = await Promise.all([
+      window.gameplaySimulator.simulation.getSessionStatus(sessionId),
+      window.gameplaySimulator.simulation.getBotStatuses(sessionId),
+      window.gameplaySimulator.simulation.getInstanceStatuses(sessionId),
+      window.gameplaySimulator.simulation.getIssues(sessionId),
+      window.gameplaySimulator.simulation.getLogs(sessionId),
+      window.gameplaySimulator.simulation.getCoverage(sessionId)
+    ]);
+
+    applySessionSnapshot(status);
+    applyRuntimeDetails({ botStatuses, instanceStatuses, issues, logs, coverage });
+  }
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const config = buildRunConfig(
       { ...form, saveVideo: videoSupported ? form.saveVideo : false },
@@ -251,6 +318,12 @@ export function NewSessionPage() {
 
     if (!result.success) {
       setErrors(zodFieldErrors(result.error));
+      setValidatedConfig(null);
+      return;
+    }
+
+    if (!selectedProfile) {
+      setErrors({ form: 'Choose a game profile before starting a session.' });
       setValidatedConfig(null);
       return;
     }
@@ -288,10 +361,71 @@ export function NewSessionPage() {
       return;
     }
 
-    setErrors({});
-    setValidatedConfig(adjustedResult.data);
-    saveRunConfig(adjustedResult.data);
-    setSessionPreview(`Session config ready (${resolvedLaunchPlans.length} bots)`);
+    const payload = {
+      runConfig: adjustedResult.data,
+      gameProfile: selectedProfile,
+      botProfiles
+    };
+    const backendValidation = await window.gameplaySimulator.simulation.validateSessionConfig(payload);
+
+    if (!backendValidation.valid) {
+      setErrors({
+        form: backendValidation.errors.map((error) => `${error.path}: ${error.message}`).join(' ')
+      });
+      setValidatedConfig(null);
+      return;
+    }
+
+    try {
+      const created = await window.gameplaySimulator.simulation.createSession(payload);
+      const started = await window.gameplaySimulator.simulation.startSession(created.sessionId);
+
+      setErrors({});
+      setValidatedConfig(adjustedResult.data);
+      saveRunConfig(adjustedResult.data);
+      applySessionSnapshot(started);
+      applyRuntimeDetails({
+        botStatuses: created.botStatuses,
+        instanceStatuses: created.instanceStatuses,
+        logs: created.logs
+      });
+      setSessionPreview(started.label);
+      void refreshRuntimeDetails(created.sessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Backend session start failed.';
+      setErrors({ form: message });
+      setValidatedConfig(null);
+    }
+  }
+
+  async function stopActiveSession() {
+    if (!activeSessionId) {
+      return;
+    }
+
+    const status = await window.gameplaySimulator.simulation.stopSession(activeSessionId);
+    applySessionSnapshot(status);
+    await refreshRuntimeDetails(activeSessionId);
+  }
+
+  async function pauseActiveSession() {
+    if (!activeSessionId) {
+      return;
+    }
+
+    const status = await window.gameplaySimulator.simulation.pauseSession(activeSessionId);
+    applySessionSnapshot(status);
+    await refreshRuntimeDetails(activeSessionId);
+  }
+
+  async function resumeActiveSession() {
+    if (!activeSessionId) {
+      return;
+    }
+
+    const status = await window.gameplaySimulator.simulation.resumeSession(activeSessionId);
+    applySessionSnapshot(status);
+    await refreshRuntimeDetails(activeSessionId);
   }
 
   if (gameProfiles.length === 0) {
@@ -312,10 +446,35 @@ export function NewSessionPage() {
           <p className="eyebrow">Simulation</p>
           <h1>New Session</h1>
         </div>
-        <button className="primary-button" type="submit" form="new-session-form">
-          <Play size={18} aria-hidden="true" />
-          <span>Start Session</span>
-        </button>
+        <div className="page-actions">
+          <button
+            className="primary-button"
+            type="submit"
+            form="new-session-form"
+            disabled={sessionStatus === 'starting'}
+          >
+            <Play size={18} aria-hidden="true" />
+            <span>Start Session</span>
+          </button>
+          {canPause ? (
+            <button className="secondary-button" type="button" onClick={pauseActiveSession}>
+              <Pause size={18} aria-hidden="true" />
+              <span>Pause</span>
+            </button>
+          ) : null}
+          {canResume ? (
+            <button className="secondary-button" type="button" onClick={resumeActiveSession}>
+              <RotateCw size={18} aria-hidden="true" />
+              <span>Resume</span>
+            </button>
+          ) : null}
+          {canStop ? (
+            <button className="secondary-button" type="button" onClick={stopActiveSession}>
+              <Square size={18} aria-hidden="true" />
+              <span>Stop</span>
+            </button>
+          ) : null}
+        </div>
       </div>
 
       <form id="new-session-form" className="form-grid" onSubmit={onSubmit}>
@@ -381,6 +540,14 @@ export function NewSessionPage() {
               value={form.maxActionsPerBot}
               onChange={(event) => update('maxActionsPerBot', event.target.value)}
             />
+            <TextInput
+              label="Screenshot Every N Actions"
+              name="screenshotEveryNActions"
+              type="number"
+              min={1}
+              value={form.screenshotEveryNActions}
+              onChange={(event) => update('screenshotEveryNActions', event.target.value)}
+            />
           </div>
           <div className="toggle-grid">
             <ToggleInput
@@ -419,7 +586,36 @@ export function NewSessionPage() {
         </section>
 
         <section className="form-section">
-          <h2>Bot Pools</h2>
+          <div className="section-header-row">
+            <h2>Bot Pools</h2>
+            <div className="bot-pool-adder">
+              <SelectInput
+                label="Add Bot Type"
+                value={profileIdToAdd}
+                disabled={availableBotProfiles.length === 0}
+                onChange={(event) => setAddPoolProfileId(event.target.value)}
+              >
+                {availableBotProfiles.length === 0 ? (
+                  <option value="">All profiles added</option>
+                ) : (
+                  availableBotProfiles.map((profile) => (
+                    <option key={profile.profileId} value={profile.profileId}>
+                      {profile.displayName}
+                    </option>
+                  ))
+                )}
+              </SelectInput>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={availableBotProfiles.length === 0}
+                onClick={addBotPool}
+              >
+                <Plus size={18} aria-hidden="true" />
+                <span>Add Pool</span>
+              </button>
+            </div>
+          </div>
           <div className="bot-pool-grid">
             {form.botPools.map((pool, index) => {
               const profile = botProfiles.find((item) => item.profileId === pool.profileId);
@@ -445,9 +641,13 @@ export function NewSessionPage() {
                     min={0}
                     value={pool.desiredCount}
                     error={poolError(index, 'desiredCount')}
-                    onChange={(event) =>
-                      updatePool(index, { desiredCount: numericInput(event.target.value) })
-                    }
+                    onChange={(event) => {
+                      const desiredCount = numericInput(event.target.value);
+                      updatePool(index, {
+                        desiredCount,
+                        ...(pool.scalingMode === 'fixed' ? { minCount: desiredCount } : {})
+                      });
+                    }}
                   />
                   <TextInput
                     label="Max"
@@ -468,6 +668,14 @@ export function NewSessionPage() {
                     <option value="fixed">Fixed</option>
                     <option value="auto">Auto</option>
                   </SelectInput>
+                  <button
+                    className="icon-text-button bot-pool-remove"
+                    type="button"
+                    onClick={() => removeBotPool(index)}
+                  >
+                    <Trash2 size={17} aria-hidden="true" />
+                    <span>Remove</span>
+                  </button>
                 </div>
               );
             })}
@@ -696,6 +904,100 @@ export function NewSessionPage() {
               />
             ) : null}
           </>
+        ) : null}
+      </section>
+
+      <section className="viability-panel" aria-label="Backend session runtime">
+        <div className="viability-panel__header">
+          <div>
+            <p className="eyebrow">Backend Runtime</p>
+            <h2>Mock session state</h2>
+          </div>
+          <span className="status-pill">{sessionStatus}</span>
+        </div>
+
+        <div className="metric-grid">
+          <div className="metric-card">
+            <span>Active session</span>
+            <strong>{activeSessionId ?? 'None'}</strong>
+          </div>
+          <div className="metric-card">
+            <span>Runtime bots</span>
+            <strong>{runtimeBotStatuses.length}</strong>
+          </div>
+          <div className="metric-card">
+            <span>Instances</span>
+            <strong>{runtimeInstanceStatuses.length}</strong>
+          </div>
+          <div className="metric-card">
+            <span>Issues</span>
+            <strong>{runtimeIssues.length}</strong>
+          </div>
+          <div className="metric-card">
+            <span>Logs</span>
+            <strong>{runtimeLogs.length}</strong>
+          </div>
+          <div className="metric-card">
+            <span>Control</span>
+            <strong>{canStop ? 'Live' : 'Idle'}</strong>
+          </div>
+        </div>
+
+        <div className="allocation-table">
+          <div className="instance-row instance-row--head">
+            <span>Instance</span>
+            <span>Status</span>
+            <span>Assigned bots</span>
+            <span>Process</span>
+            <span>Heartbeat</span>
+          </div>
+          {runtimeInstanceStatuses.length === 0 ? (
+            <div className="empty-row">No backend instance state yet</div>
+          ) : (
+            runtimeInstanceStatuses.map((instance) => (
+              <div className="instance-row" key={instance.instanceId}>
+                <span>{instance.instanceId}</span>
+                <span>{instance.status}</span>
+                <span>{instance.assignedBots.join(', ') || 'None'}</span>
+                <span>{instance.processId ?? 'Mock'}</span>
+                <span>{new Date(instance.lastHeartbeat).toLocaleTimeString()}</span>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div className="allocation-table">
+          <div className="runtime-row runtime-row--head">
+            <span>Bot</span>
+            <span>Status</span>
+            <span>Instance</span>
+            <span>Last action</span>
+            <span>Message</span>
+          </div>
+          {runtimeBotStatuses.length === 0 ? (
+            <div className="empty-row">No backend bot state yet</div>
+          ) : (
+            runtimeBotStatuses.slice(0, 10).map((bot) => (
+              <div className="runtime-row" key={bot.botId}>
+                <span>{bot.botId}</span>
+                <span>{bot.status}</span>
+                <span>{bot.gameInstanceId ?? 'Queued'}</span>
+                <span>{bot.lastActionId ?? 'None'}</span>
+                <span>{bot.message ?? ''}</span>
+              </div>
+            ))
+          )}
+        </div>
+
+        {runtimeLogs.length > 0 ? (
+          <div className="notice-list">
+            <strong>Recent logs</strong>
+            {runtimeLogs.slice(-4).map((log) => (
+              <span key={log.id}>
+                [{log.level}] {log.message}
+              </span>
+            ))}
+          </div>
         ) : null}
       </section>
 

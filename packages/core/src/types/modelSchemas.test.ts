@@ -15,6 +15,8 @@ describe('core model schemas', () => {
 
     expect(profile.gameId).toBe('sample-browser-game');
     expect(profile.adapter.supportsScreenshots).toBe(true);
+    expect(profile.knownContent.sideQuests).toContain('Side quest');
+    expect(profile.knownContent.hiddenAreas).toContain('Hidden area');
   });
 
   it('validates the sample simulation run config with multiple bot pools', () => {

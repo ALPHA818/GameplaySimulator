@@ -24,6 +24,7 @@ export const SimulationRunConfigSchema = z
     stopOnCriticalIssue: z.boolean(),
     saveScreenshots: z.boolean(),
     saveVideo: z.boolean().optional(),
+    screenshotEveryNActions: z.number().int().positive().optional(),
     saveActionTimeline: z.boolean(),
     saveStateSnapshots: z.boolean(),
     botPools: z.array(BotPoolConfigSchema).min(1),

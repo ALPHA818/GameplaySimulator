@@ -1,4 +1,4 @@
-import { Bot, FileText, Gamepad2, LayoutDashboard, Play, Settings } from 'lucide-react';
+import { Activity, Bot, FileText, Gamepad2, LayoutDashboard, ListFilter, Play, Settings, Siren } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { PageId } from '../routes';
 import { useConfigStore } from '../store/configStore';
@@ -12,6 +12,9 @@ const navigation: Array<{ page: PageId; label: string; icon: typeof LayoutDashbo
   { page: 'gameProfiles', label: 'Game Profiles', icon: Gamepad2 },
   { page: 'botProfiles', label: 'Bot Profiles', icon: Bot },
   { page: 'newSession', label: 'New Session', icon: Play },
+  { page: 'liveSession', label: 'Live Session', icon: Activity },
+  { page: 'issues', label: 'Issues', icon: Siren },
+  { page: 'logs', label: 'Logs', icon: ListFilter },
   { page: 'reports', label: 'Reports', icon: FileText },
   { page: 'settings', label: 'Settings', icon: Settings }
 ];

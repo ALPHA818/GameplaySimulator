@@ -49,6 +49,10 @@ function seedFrom(...parts: Array<string | number>): number {
 }
 
 function playstyleFor(profile: BotProfile): string {
+  if (profile.playstyle && profile.playstyle.trim().length > 0) {
+    return profile.playstyle.trim();
+  }
+
   const configured = profile.config.playstyle;
   return typeof configured === 'string' && configured.trim().length > 0
     ? configured.trim()

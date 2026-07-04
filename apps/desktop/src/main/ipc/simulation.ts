@@ -1,0 +1,64 @@
+import { ipcMain } from 'electron';
+import { z } from 'zod';
+import type { SimulationService } from '../services/simulationService';
+
+const SessionIdSchema = z.string().min(1);
+
+export function registerSimulationIpc(service: SimulationService): void {
+  ipcMain.handle('simulation:createSession', (_event, payload: unknown) => service.createSession(payload));
+  ipcMain.handle('simulation:validateSessionConfig', (_event, payload: unknown) =>
+    service.validateSessionConfig(payload)
+  );
+  ipcMain.handle('simulation:estimateViability', (_event, payload: unknown) => service.estimateViability(payload));
+  ipcMain.handle('simulation:startSession', (_event, sessionId: unknown) =>
+    service.startSession(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:stopSession', (_event, sessionId: unknown) =>
+    service.stopSession(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:pauseSession', (_event, sessionId: unknown) =>
+    service.pauseSession(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:resumeSession', (_event, sessionId: unknown) =>
+    service.resumeSession(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:getSessionStatus', (_event, sessionId?: unknown) =>
+    service.getSessionStatus(typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined)
+  );
+  ipcMain.handle('simulation:getBotStatuses', (_event, sessionId: unknown) =>
+    service.getBotStatuses(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:stopBot', (_event, sessionId: unknown, botId: unknown) =>
+    service.stopBot(SessionIdSchema.parse(sessionId), SessionIdSchema.parse(botId))
+  );
+  ipcMain.handle('simulation:stopBotPool', (_event, sessionId: unknown, profileId: unknown) =>
+    service.stopBotPool(SessionIdSchema.parse(sessionId), SessionIdSchema.parse(profileId))
+  );
+  ipcMain.handle('simulation:getInstanceStatuses', (_event, sessionId: unknown) =>
+    service.getInstanceStatuses(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:getIssues', (_event, sessionId: unknown) =>
+    service.getIssues(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:getLogs', (_event, sessionId: unknown) =>
+    service.getLogs(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:getCoverage', (_event, sessionId: unknown) =>
+    service.getCoverage(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:getStructuredLogs', (_event, sessionId: unknown) =>
+    service.getStructuredLogs(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:openEvidence', (_event, sessionId: unknown, evidencePath: unknown) =>
+    service.openEvidence(SessionIdSchema.parse(sessionId), SessionIdSchema.parse(evidencePath))
+  );
+  ipcMain.handle('simulation:openReport', (_event, sessionId: unknown) =>
+    service.openReport(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:openLogs', (_event, sessionId: unknown) =>
+    service.openLogs(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:compareSessions', (_event, oldSessionId: unknown, newSessionId: unknown) =>
+    service.compareSessions(SessionIdSchema.parse(oldSessionId), SessionIdSchema.parse(newSessionId))
+  );
+}

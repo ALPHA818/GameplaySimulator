@@ -1,4 +1,5 @@
 import type { BotPoolConfig, BotProfile, GameProfile, SimulationRunConfig } from '@core/types';
+import { defaultBotProfiles } from '@core/bot/defaultBotProfiles';
 import { create } from 'zustand';
 import type { PageId } from '../routes';
 
@@ -41,99 +42,54 @@ const seededGameProfiles: GameProfile[] = [
     progressSignals: [],
     failureSignals: [],
     knownContent: {
+      scenes: ['Boot', 'Main Menu', 'Start Area', 'Traversal Loop', 'Interaction Check', 'Results Review'],
+      levels: ['Level 1', 'Level 2'],
       locations: ['Start area'],
-      characters: [],
-      items: [],
-      quests: [],
+      characters: ['Guide NPC'],
+      npcs: ['Guide NPC', 'Shopkeeper'],
+      items: ['Practice Sword', 'Health Potion'],
+      quests: ['Main objective', 'Side quest'],
+      mainQuests: ['Main objective'],
+      sideQuests: ['Side quest'],
+      optionalStories: ['Ambient optional story'],
+      shops: ['General shop'],
+      bosses: ['Enemy encounter'],
+      menus: ['Settings menu', 'Inventory menu'],
+      dialogueBranches: ['Dialogue branch'],
+      minigames: ['Minigame'],
+      endings: ['Demo ending'],
+      hiddenAreas: ['Hidden area'],
+      postGameContent: ['Post-game checkpoint'],
+      collectibles: ['Collectible'],
+      achievements: ['First run'],
       mechanics: ['movement', 'menu confirmation'],
       notes: ['Placeholder profile for local or permitted QA testing.']
     }
   }
 ];
 
-const seededBotProfiles: BotProfile[] = [
-  {
-    profileId: 'explorer',
-    displayName: 'Explorer Bot',
-    botType: 'explorer',
-    description: 'Navigation, menu, and interaction coverage.',
-    goals: [
-      {
-        goalId: 'map-coverage',
-        name: 'Map Coverage',
-        priority: 10,
-        successCriteria: ['Discover reachable screens'],
-        targetIssueCategories: ['navigation', 'progression', 'gameplay']
-      }
-    ],
-    recommendedMinCount: 1,
-    recommendedMaxCount: 20,
-    defaultResourceWeight: 'medium',
-    tags: ['navigation', 'smoke'],
-    config: {}
-  },
-  {
-    profileId: 'combat-tester',
-    displayName: 'Combat Tester Bot',
-    botType: 'combat',
-    description: 'Exercises attack, defense, targeting, and recovery loops.',
-    goals: [],
-    recommendedMinCount: 1,
-    recommendedMaxCount: 10,
-    defaultResourceWeight: 'heavy',
-    tags: ['combat'],
-    config: {}
-  },
-  {
-    profileId: 'chaos-monkey',
-    displayName: 'Chaos Monkey Bot',
-    botType: 'chaos',
-    description: 'High-noise random input profile for permitted offline builds.',
-    goals: [],
-    recommendedMinCount: 0,
-    recommendedMaxCount: 5,
-    defaultResourceWeight: 'very_heavy',
-    tags: ['stress'],
-    config: {}
-  },
-  {
-    profileId: 'ui-tester',
-    displayName: 'UI Tester Bot',
-    botType: 'ui',
-    description: 'Exercises menus, dialogs, HUD flows, and settings screens.',
-    goals: [],
-    recommendedMinCount: 1,
-    recommendedMaxCount: 8,
-    defaultResourceWeight: 'medium',
-    tags: ['ui', 'menus'],
-    config: { playstyle: 'ui-tester' }
-  },
-  {
-    profileId: 'completionist',
-    displayName: 'Completionist Bot',
-    botType: 'completionist',
-    description: 'Follows broad progression goals and tries to cover optional content.',
-    goals: [],
-    recommendedMinCount: 1,
-    recommendedMaxCount: 3,
-    defaultResourceWeight: 'heavy',
-    tags: ['progression', 'coverage'],
-    config: { playstyle: 'completionist' }
-  }
-];
+const seededBotProfiles: BotProfile[] = defaultBotProfiles;
 
-export function createDefaultBotPools(botProfiles: BotProfile[]): BotPoolConfig[] {
-  return botProfiles.map((profile, index) => ({
+export function createBotPoolFromProfile(profile: BotProfile, index: number, enabled = true): BotPoolConfig {
+  return {
     profileId: profile.profileId,
-    enabled: index < 2,
+    enabled,
     minCount: profile.recommendedMinCount,
     desiredCount: profile.recommendedMinCount,
     maxCount: profile.recommendedMaxCount,
     scalingMode: 'auto',
-    priority: 10 - index,
+    priority: Math.max(1, 20 - index),
     resourceWeight: profile.defaultResourceWeight,
     notes: ''
-  }));
+  };
+}
+
+export function createDefaultBotPools(botProfiles: BotProfile[]): BotPoolConfig[] {
+  const defaultProfileIds = new Set(['main-story-bot', 'explorer-bot', 'combat-tester-bot']);
+
+  return botProfiles
+    .filter((profile) => defaultProfileIds.has(profile.profileId))
+    .map((profile, index) => createBotPoolFromProfile(profile, index, true));
 }
 
 export const useConfigStore = create<ConfigState>((set) => ({

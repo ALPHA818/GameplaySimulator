@@ -3,9 +3,13 @@ import { join } from 'node:path';
 import { registerAppIpc } from './ipc/app';
 import { registerResourceIpc } from './ipc/resources';
 import { registerSessionIpc } from './ipc/sessions';
-import { sessionService } from './services/sessionService';
+import { registerSimulationIpc } from './ipc/simulation';
+import { SimulationService } from './services/simulationService';
 
 let mainWindow: BrowserWindow | null = null;
+const simulationService = new SimulationService({
+  openPath: (path) => shell.openPath(path)
+});
 
 app.disableHardwareAcceleration();
 
@@ -41,8 +45,9 @@ function createMainWindow(): void {
 
 app.whenReady().then(() => {
   registerAppIpc();
-  registerResourceIpc();
-  registerSessionIpc(sessionService);
+  registerSimulationIpc(simulationService);
+  registerResourceIpc(simulationService);
+  registerSessionIpc(simulationService);
   createMainWindow();
 
   app.on('activate', () => {

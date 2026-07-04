@@ -1,5 +1,9 @@
 import { useConfigStore } from '../store/configStore';
 
+function percent(value: number | undefined): string {
+  return `${Math.round((value ?? 0) * 100)}%`;
+}
+
 export function BotProfilesPage() {
   const botProfiles = useConfigStore((state) => state.botProfiles);
 
@@ -15,10 +19,10 @@ export function BotProfilesPage() {
       <div className="table-surface table-surface--compact">
         <div className="table-row table-row--head table-row--bot">
           <span>Bot</span>
-          <span>Type</span>
+          <span>Playstyle</span>
+          <span>Traits</span>
+          <span>Actions</span>
           <span>Counts</span>
-          <span>Weight</span>
-          <span>Tags</span>
         </div>
         {botProfiles.map((profile) => (
           <div className="table-row table-row--bot" key={profile.profileId}>
@@ -26,12 +30,27 @@ export function BotProfilesPage() {
               <strong>{profile.displayName}</strong>
               <small>{profile.description}</small>
             </span>
-            <span>{profile.botType}</span>
+            <span>
+              {profile.playstyle ?? profile.botType}
+              <small>{profile.tags.join(', ')}</small>
+            </span>
+            <span>
+              A {percent(profile.aggression)} / C {percent(profile.curiosity)}
+              <small>
+                Risk {percent(profile.riskTolerance)} / Bugs {percent(profile.bugHuntingBias)}
+              </small>
+            </span>
+            <span>
+              {profile.preferredActions?.slice(0, 3).join(', ') ?? 'Any'}
+              <small>Avoids {profile.avoidedActions?.slice(0, 2).join(', ') ?? 'None'}</small>
+            </span>
             <span>
               {profile.recommendedMinCount}-{profile.recommendedMaxCount}
+              <small>
+                {profile.defaultResourceWeight} / {profile.goals.length} goal
+                {profile.goals.length === 1 ? '' : 's'}
+              </small>
             </span>
-            <span>{profile.defaultResourceWeight}</span>
-            <span>{profile.tags.join(', ')}</span>
           </div>
         ))}
       </div>

@@ -8,9 +8,23 @@ The UI is the main way to use GameplaySimulator. It will provide workflows for c
 
 This project is for legitimate QA, regression testing, accessibility-style exploration, and reliability testing. It is not for cheating in public online games, bypassing anti-cheat, exploiting multiplayer systems, or violating a game's rules.
 
-## Current Phase
+## Current Status
 
-Phase 0 creates the Electron, React, Vite, and TypeScript skeleton. The dashboard launches and shows the first desktop UI shell. Real simulator and bot logic are intentionally not implemented yet.
+GameplaySimulator now has the desktop shell, shared data models, mock backend simulation service, bot pools, live session monitoring, issue/log viewers, readable reports, content coverage tracking, evidence capture, exploit detection, and placeholder adapter architecture. Real engine integrations are still expected to be connected through adapters and optional instrumentation.
+
+## Adapter Documentation
+
+Use the adapter docs to decide how to connect a game build:
+
+- [Adapter overview](docs/adapters/overview.md)
+- [Unity](docs/adapters/unity.md)
+- [Godot](docs/adapters/godot.md)
+- [Unreal](docs/adapters/unreal.md)
+- [Browser games](docs/adapters/browser.md)
+- [Desktop window fallback](docs/adapters/desktop-window.md)
+- [Custom engines](docs/adapters/custom-engine.md)
+
+In short: instrumented adapters give the best results, `DesktopWindowAdapter` works for many desktop games with weaker state awareness, and `BrowserAdapter` is only one adapter for browser-based games rather than the center of the architecture.
 
 ## Scripts
 

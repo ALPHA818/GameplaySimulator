@@ -4,6 +4,9 @@ export type PageId =
   | 'gameProfileEditor'
   | 'botProfiles'
   | 'newSession'
+  | 'liveSession'
+  | 'issues'
+  | 'logs'
   | 'reports'
   | 'settings';
 
@@ -13,6 +16,9 @@ export const routes = {
   gameProfileEditor: 'gameProfileEditor',
   botProfiles: 'botProfiles',
   newSession: 'newSession',
+  liveSession: 'liveSession',
+  issues: 'issues',
+  logs: 'logs',
   reports: 'reports',
   settings: 'settings'
 } as const satisfies Record<PageId, PageId>;

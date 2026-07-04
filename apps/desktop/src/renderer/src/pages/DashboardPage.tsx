@@ -1,10 +1,11 @@
-import { Bot, FileText, Gamepad2, PlusCircle, Settings } from 'lucide-react';
+import { Activity, Bot, FileText, Gamepad2, PlusCircle, Settings } from 'lucide-react';
 import { DashboardButton } from '../components/DashboardButton';
 import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
 
 const actions = [
   { label: 'New Session', icon: PlusCircle, page: 'newSession' },
+  { label: 'Live Session', icon: Activity, page: 'liveSession' },
   { label: 'Game Profiles', icon: Gamepad2, page: 'gameProfiles' },
   { label: 'Bot Profiles', icon: Bot, page: 'botProfiles' },
   { label: 'Reports', icon: FileText, page: 'reports' },

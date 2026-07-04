@@ -30,13 +30,54 @@ export const SignalDefinitionSchema = z.object({
 });
 
 export const KnownContentSchema = z.object({
+  scenes: z.array(z.string().min(1)).default([]),
+  levels: z.array(z.string().min(1)).default([]),
   locations: z.array(z.string().min(1)).default([]),
   characters: z.array(z.string().min(1)).default([]),
+  npcs: z.array(z.string().min(1)).default([]),
   items: z.array(z.string().min(1)).default([]),
   quests: z.array(z.string().min(1)).default([]),
+  mainQuests: z.array(z.string().min(1)).default([]),
+  sideQuests: z.array(z.string().min(1)).default([]),
+  optionalStories: z.array(z.string().min(1)).default([]),
+  shops: z.array(z.string().min(1)).default([]),
+  bosses: z.array(z.string().min(1)).default([]),
+  menus: z.array(z.string().min(1)).default([]),
+  dialogueBranches: z.array(z.string().min(1)).default([]),
+  minigames: z.array(z.string().min(1)).default([]),
+  endings: z.array(z.string().min(1)).default([]),
+  hiddenAreas: z.array(z.string().min(1)).default([]),
+  postGameContent: z.array(z.string().min(1)).default([]),
+  collectibles: z.array(z.string().min(1)).default([]),
+  achievements: z.array(z.string().min(1)).default([]),
   mechanics: z.array(z.string().min(1)).default([]),
   notes: z.array(z.string().min(1)).default([])
 });
+
+const emptyKnownContent = {
+  scenes: [],
+  levels: [],
+  locations: [],
+  characters: [],
+  npcs: [],
+  items: [],
+  quests: [],
+  mainQuests: [],
+  sideQuests: [],
+  optionalStories: [],
+  shops: [],
+  bosses: [],
+  menus: [],
+  dialogueBranches: [],
+  minigames: [],
+  endings: [],
+  hiddenAreas: [],
+  postGameContent: [],
+  collectibles: [],
+  achievements: [],
+  mechanics: [],
+  notes: []
+};
 
 export const GameProfileSchema = z.object({
   gameId: z.string().min(1),
@@ -61,14 +102,7 @@ export const GameProfileSchema = z.object({
   testingTargets: z.array(TestingTargetSchema).default([]),
   progressSignals: z.array(SignalDefinitionSchema).default([]),
   failureSignals: z.array(SignalDefinitionSchema).default([]),
-  knownContent: KnownContentSchema.default({
-    locations: [],
-    characters: [],
-    items: [],
-    quests: [],
-    mechanics: [],
-    notes: []
-  })
+  knownContent: KnownContentSchema.default(emptyKnownContent)
 });
 
 export type ControlBinding = z.infer<typeof ControlBindingSchema>;

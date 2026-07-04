@@ -8,6 +8,7 @@
   "stopOnCriticalIssue": true,
   "saveScreenshots": true,
   "saveVideo": false,
+  "screenshotEveryNActions": 25,
   "saveActionTimeline": true,
   "saveStateSnapshots": true,
   "botPools": [
