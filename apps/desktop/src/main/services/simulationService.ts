@@ -2,6 +2,8 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
+import { AdapterFactory, type AdapterFactoryOptions } from '../../../../../packages/adapters/src';
+import type { AdapterCapabilities, GameAdapter } from '../../../../../packages/adapters/src';
 import { type BotAdapter, type BotMemory } from '@core/bot/Bot';
 import { BotManager } from '@core/bot/BotManager';
 import { resolveBotPools } from '@core/bot/BotPoolResolver';
@@ -11,7 +13,7 @@ import { IssueDetectionRunner } from '@core/detection/IssueDetectors';
 import type { LogEntry } from '@core/logging/LogEntry';
 import { StructuredRunLogger, type BotReportInput } from '@core/logging/StructuredLoggers';
 import { resourceManager, type SystemResourceSnapshot } from '@core/resources/ResourceManager';
-import { planGameInstances } from '@core/sessions/GameInstanceManager';
+import { GameInstanceManager, planGameInstances } from '@core/sessions/GameInstanceManager';
 import type {
   BotProfile,
   GameAction,
@@ -208,6 +210,8 @@ export interface SimulationServiceOptions {
   reportRoot?: string;
   openPath?: (path: string) => Promise<string>;
   systemSnapshot?: SystemResourceSnapshot;
+  adapterFactory?: Pick<AdapterFactory, 'createAdapter'>;
+  useMockRuntime?: boolean;
 }
 
 const SimulationSessionRequestSchema = z.object({
@@ -264,7 +268,11 @@ interface SimulationSessionRecord {
   videoPathsByBot: Map<string, string>;
   sessionStartLogged: boolean;
   sessionStopLogged: boolean;
-  adapter: MockBotRuntimeAdapter;
+  botAdapter: BotAdapter;
+  gameAdapter?: GameAdapter;
+  gameInstanceManager?: GameInstanceManager;
+  useMockRuntime: boolean;
+  finalizing?: boolean;
   startupTimer?: NodeJS.Timeout;
 }
 
@@ -576,6 +584,170 @@ function maxConcurrentBotsForHybrid(
   return Math.max(1, Math.min(launchPlanCount, recommendedBots, recommendedInstances * perInstanceLimit));
 }
 
+function adapterCapabilitiesFromProfile(gameProfile: GameProfile): Partial<AdapterCapabilities> {
+  const supportsMultipleBotsPerInstance =
+    gameProfile.adapter.type === 'instrumented' ||
+    gameProfile.adapter.type === 'browser' ||
+    gameProfile.adapter.supportsDirectActions;
+
+  return {
+    supportsMultipleInstances: gameProfile.adapter.supportsMultipleInstances,
+    supportsMultipleBotsPerInstance,
+    supportsStateRead: gameProfile.adapter.supportsStateRead,
+    supportsDirectActions: gameProfile.adapter.supportsDirectActions,
+    supportsInputSimulation: gameProfile.controls.length > 0 || !gameProfile.adapter.supportsDirectActions,
+    supportsScreenshots: gameProfile.adapter.supportsScreenshots,
+    supportsVideo: gameProfile.adapter.supportsVideo,
+    supportsGameLogs: gameProfile.adapter.supportsStateRead,
+    supportsSaveIsolation: gameProfile.adapter.supportsSaveIsolation
+  };
+}
+
+function instrumentationEndpointFor(gameProfile: GameProfile): string | undefined {
+  return gameProfile.launch.url?.trim() || undefined;
+}
+
+function adapterFactoryOptionsForGameProfile(gameProfile: GameProfile): AdapterFactoryOptions {
+  const capabilities = adapterCapabilitiesFromProfile(gameProfile);
+  const instrumentationEndpoint = instrumentationEndpointFor(gameProfile);
+  const desktop = {
+    executablePath: gameProfile.launch.executablePath,
+    workingDirectory: gameProfile.launch.workingDirectory,
+    controlBindings: gameProfile.controls,
+    capabilities
+  };
+
+  return {
+    browser: {
+      targetUrl: gameProfile.launch.url,
+      capabilities
+    },
+    custom: {
+      protocolName: gameProfile.engine.type,
+      capabilities
+    },
+    desktop,
+    instrumented: {
+      instrumentationEndpoint,
+      capabilities
+    },
+    unity: {
+      unityVersion: gameProfile.engine.version,
+      instrumentationEndpoint
+    },
+    godot: {
+      godotVersion: gameProfile.engine.version,
+      instrumentationEndpoint
+    },
+    unreal: {
+      unrealVersion: gameProfile.engine.version,
+      instrumentationEndpoint
+    }
+  };
+}
+
+function createGameAdapterForProfile(
+  adapterFactory: Pick<AdapterFactory, 'createAdapter'>,
+  runConfig: SimulationRunConfig,
+  gameProfile: GameProfile
+): GameAdapter {
+  const options = adapterFactoryOptionsForGameProfile(gameProfile);
+
+  if (['unity', 'godot', 'unreal'].includes(runConfig.adapterType)) {
+    const instrumentationEndpoint = instrumentationEndpointFor(gameProfile);
+    const prefersInstrumentation =
+      Boolean(instrumentationEndpoint) &&
+      (gameProfile.adapter.supportsStateRead || gameProfile.adapter.supportsDirectActions);
+    const delegate = prefersInstrumentation
+      ? adapterFactory.createAdapter('instrumented', options)
+      : adapterFactory.createAdapter('desktop', options);
+
+    if (runConfig.adapterType === 'unity') {
+      return adapterFactory.createAdapter('unity', {
+        ...options,
+        unity: {
+          ...options.unity,
+          delegate
+        }
+      });
+    }
+
+    if (runConfig.adapterType === 'godot') {
+      return adapterFactory.createAdapter('godot', {
+        ...options,
+        godot: {
+          ...options.godot,
+          delegate
+        }
+      });
+    }
+
+    return adapterFactory.createAdapter('unreal', {
+      ...options,
+      unreal: {
+        ...options.unreal,
+        delegate
+      }
+    });
+  }
+
+  return adapterFactory.createAdapter(runConfig.adapterType, options);
+}
+
+class RuntimeAdapterBridge implements BotAdapter {
+  constructor(
+    private readonly gameAdapter: GameAdapter,
+    private readonly sessionId: string,
+    private readonly gameProfile: GameProfile,
+    private readonly now: () => string
+  ) {}
+
+  async getState(instanceId: string, botId: string): Promise<GameStateSnapshot | null> {
+    const state = await this.gameAdapter.getState(instanceId, botId);
+
+    if (state) {
+      return {
+        ...state,
+        sessionId: state.sessionId || this.sessionId,
+        gameId: state.gameId || this.gameProfile.gameId,
+        gameInstanceId: state.gameInstanceId || instanceId,
+        botId: state.botId ?? botId
+      };
+    }
+
+    const running = await this.gameAdapter.isRunning(instanceId).catch(() => false);
+    const health = await this.gameAdapter.getHealth(instanceId).catch(() => undefined);
+
+    return {
+      snapshotId: `${instanceId}-${botId}-adapter-state-${Date.now()}`,
+      sessionId: this.sessionId,
+      gameId: this.gameProfile.gameId,
+      gameInstanceId: instanceId,
+      botId,
+      capturedAt: health?.checkedAt ?? this.now(),
+      scene: health?.status === 'running' ? 'Adapter Runtime' : 'Adapter Unavailable',
+      state: {
+        adapterId: this.gameAdapter.id,
+        adapterType: this.gameAdapter.adapterType,
+        structuredStateAvailable: false,
+        processAlive: running,
+        processResponsive: health ? !['failed', 'degraded'].includes(health.status) : running,
+        adapterHealth: health?.status,
+        healthMessage: health?.message
+      },
+      metrics: {}
+    };
+  }
+
+  getAvailableActions(instanceId: string, botId: string): Promise<AvailableGameActionLike[]> {
+    return this.gameAdapter.getAvailableActions(instanceId, botId);
+  }
+
+  performAction(instanceId: string, botId: string, action: GameAction): Promise<ActionResult> {
+    return this.gameAdapter.performAction(instanceId, botId, action);
+  }
+}
+
 class MockBotRuntimeAdapter implements BotAdapter {
   private readonly countsByBot = new Map<string, number>();
   private readonly lastActionByBot = new Map<string, string>();
@@ -794,12 +966,16 @@ export class SimulationService {
   private readonly reportRoot: string;
   private readonly openPath: (path: string) => Promise<string>;
   private readonly systemSnapshot?: SystemResourceSnapshot;
+  private readonly adapterFactory: Pick<AdapterFactory, 'createAdapter'>;
+  private readonly useMockRuntime: boolean;
 
   constructor(options: SimulationServiceOptions = {}) {
     this.now = options.now ?? (() => new Date().toISOString());
     this.reportRoot = options.reportRoot ?? resolve(process.cwd(), 'runs');
     this.openPath = options.openPath ?? (async () => '');
     this.systemSnapshot = options.systemSnapshot;
+    this.adapterFactory = options.adapterFactory ?? new AdapterFactory();
+    this.useMockRuntime = options.useMockRuntime ?? false;
   }
 
   validateSessionConfig(payload: unknown): SimulationValidationResult {
@@ -831,6 +1007,7 @@ export class SimulationService {
 
   createSession(payload: unknown): SimulationSessionCreateResult {
     const request = SimulationSessionRequestSchema.parse(payload);
+    const useMockRuntime = request.runConfig.useMockRuntime ?? this.useMockRuntime;
     const botProfiles = fallbackBotProfiles(request.runConfig, request.botProfiles);
     const viabilityReport = this.estimateViability({
       ...request,
@@ -841,20 +1018,38 @@ export class SimulationService {
       botProfiles,
       viabilityReport
     });
-    const instancePlan = planGameInstances({
+    const sessionId = request.runConfig.sessionId;
+    const createdAt = this.now();
+    const profilesById = new Map(botProfiles.map((profile) => [profile.profileId, profile]));
+    const gameAdapter = useMockRuntime
+      ? undefined
+      : createGameAdapterForProfile(this.adapterFactory, request.runConfig, request.gameProfile);
+    const botAdapter: BotAdapter = useMockRuntime
+      ? new MockBotRuntimeAdapter(sessionId, request.gameProfile, this.now)
+      : new RuntimeAdapterBridge(gameAdapter!, sessionId, request.gameProfile, this.now);
+    const gameInstanceManager = gameAdapter
+      ? new GameInstanceManager({
+          adapter: gameAdapter,
+          runConfig: request.runConfig,
+          gameProfile: request.gameProfile,
+          launchPlans,
+          now: this.now
+        })
+      : undefined;
+    const instancePlan = gameInstanceManager?.getPlan() ?? planGameInstances({
       runConfig: request.runConfig,
       gameProfile: request.gameProfile,
       launchPlans,
       adapterCapabilities: {
         supportsMultipleInstances: request.gameProfile.adapter.supportsMultipleInstances,
+        supportsMultipleBotsPerInstance:
+          request.gameProfile.adapter.type === 'instrumented' ||
+          request.gameProfile.adapter.type === 'browser' ||
+          request.gameProfile.adapter.supportsDirectActions,
         supportsSaveIsolation: request.gameProfile.adapter.supportsSaveIsolation
       },
       now: this.now()
     });
-    const sessionId = request.runConfig.sessionId;
-    const createdAt = this.now();
-    const profilesById = new Map(botProfiles.map((profile) => [profile.profileId, profile]));
-    const adapter = new MockBotRuntimeAdapter(sessionId, request.gameProfile, this.now);
     const coverageTracker = new CoverageTracker(request.gameProfile);
     const structuredLogger = new StructuredRunLogger({
       rootDir: this.reportRoot,
@@ -868,7 +1063,7 @@ export class SimulationService {
       runConfig: request.runConfig,
       launchPlans,
       botProfiles,
-      adapter,
+      adapter: botAdapter,
       maxConcurrentBots: maxConcurrentBotsForHybrid(request.runConfig, viabilityReport, launchPlans.length),
       getCoverageData: () => this.coverageForRecord(record),
       getRecentIssues: () => this.getIssues(sessionId),
@@ -915,7 +1110,7 @@ export class SimulationService {
           currentArea: 'Queued',
           progressState: 'Queued',
           issueCount: 0,
-          message: 'Queued for mock session start.'
+          message: useMockRuntime ? 'Queued for mock session start.' : 'Queued for adapter-backed session start.'
         };
       }),
       instanceStatuses: instancePlan.instances.map((instance, index) => ({
@@ -931,7 +1126,7 @@ export class SimulationService {
         this.createLog(
           sessionId,
           'info',
-          `Created mock session with ${launchPlans.length} bot${launchPlans.length === 1 ? '' : 's'}.`
+          `Created ${useMockRuntime ? 'mock' : 'adapter-backed'} session with ${launchPlans.length} bot${launchPlans.length === 1 ? '' : 's'}.`
         )
       ],
       tick: 0,
@@ -954,7 +1149,10 @@ export class SimulationService {
       videoPathsByBot: new Map(),
       sessionStartLogged: false,
       sessionStopLogged: false,
-      adapter
+      botAdapter,
+      gameAdapter,
+      gameInstanceManager,
+      useMockRuntime
     };
 
     record.structuredLogger.writeConfig({
@@ -973,6 +1171,10 @@ export class SimulationService {
     for (const warning of viabilityReport.warnings) {
       record.structuredLogger.logSession('resource_warning', { warning });
     }
+    for (const warning of instancePlan.warnings) {
+      record.logs.push(this.createLog(sessionId, 'warn', warning));
+      record.structuredLogger.logSession('resource_warning', { warning, source: 'game-instance-plan' });
+    }
     this.writeStructuredReports(record);
 
     record.label = statusLabel(record);
@@ -990,7 +1192,7 @@ export class SimulationService {
     };
   }
 
-  startSession(sessionId: string): SimulationSessionStatusSnapshot {
+  async startSession(sessionId: string): Promise<SimulationSessionStatusSnapshot> {
     const record = this.requireSession(sessionId);
 
     if (record.viabilityReport.blockers.length > 0) {
@@ -998,6 +1200,10 @@ export class SimulationService {
       record.logs.push(this.createLog(sessionId, 'error', 'Session cannot start because viability blockers remain.'));
       record.label = statusLabel(record);
       return this.snapshotFor(record);
+    }
+
+    if (record.useMockRuntime) {
+      return this.startMockSession(record);
     }
 
     this.activeSessionId = sessionId;
@@ -1009,66 +1215,69 @@ export class SimulationService {
       status: bot.status === 'stopped' ? 'stopped' : 'starting',
       currentArea: bot.status === 'stopped' ? bot.currentArea : 'Boot',
       progressState: bot.status === 'stopped' ? bot.progressState : 'Starting',
-      message: bot.status === 'stopped' ? bot.message : 'Mock bot is starting.'
+      message: bot.status === 'stopped' ? bot.message : 'Waiting for game adapter launch.'
     }));
     record.instanceStatuses = record.instanceStatuses.map((instance) => ({
       ...instance,
       status: 'starting',
       lastHeartbeat: this.now()
     }));
-    record.logs.push(this.createLog(sessionId, 'info', 'Starting mock simulation session.'));
+    record.logs.push(this.createLog(sessionId, 'info', `Starting adapter-backed simulation session with ${record.request.runConfig.adapterType}.`));
     record.label = statusLabel(record);
     this.logSessionStart(record);
-    this.startVideoEvidence(record);
     this.writeStructuredReports(record);
 
     this.clearSessionTimer(sessionId);
-    const startupTimer = setTimeout(() => {
-      const current = this.sessions.get(sessionId);
 
-      if (!current || current.status !== 'starting') {
-        return;
+    try {
+      if (!record.gameInstanceManager) {
+        throw new Error('Adapter-backed session is missing a game instance manager.');
       }
 
-      current.status = 'running';
-      current.botStatuses = current.botStatuses.map((bot) => ({
+      record.instanceStatuses = await record.gameInstanceManager.launchInstances();
+
+      record.status = 'running';
+      record.botStatuses = record.botStatuses.map((bot) => ({
         ...bot,
         status: bot.status === 'stopped' ? 'stopped' : 'running',
-        currentArea: bot.status === 'stopped' ? bot.currentArea : 'Start Area',
+        currentArea: bot.status === 'stopped' ? bot.currentArea : 'Adapter Runtime',
         progressState: bot.status === 'stopped' ? bot.progressState : 'Running',
-        message: bot.status === 'stopped' ? bot.message : 'Mock bot is running.'
+        message: bot.status === 'stopped' ? bot.message : 'Bot runtime is using the selected game adapter.'
       }));
-      current.instanceStatuses = current.instanceStatuses.map((instance) => ({
-        ...instance,
-        status: 'running',
-        lastHeartbeat: this.now()
-      }));
-      current.logs.push(this.createLog(sessionId, 'info', 'Bot runtime loops are running.'));
-      current.label = statusLabel(current);
-      for (const instance of current.instanceStatuses) {
-        this.logInstanceStart(current, instance);
+      record.logs.push(this.createLog(sessionId, 'info', 'Game adapter instances are running; starting bot runtime loops.'));
+      record.label = statusLabel(record);
+      for (const instance of record.instanceStatuses) {
+        this.logInstanceStart(record, instance);
       }
-      this.writeStructuredReports(current);
-      current.botManager.startAll();
-    }, 300);
+      this.startVideoEvidence(record);
+      this.writeStructuredReports(record);
+      record.botManager.startAll();
+    } catch (error) {
+      await this.failAdapterStartup(record, error);
+    }
 
-    startupTimer.unref?.();
-    record.startupTimer = startupTimer;
     return this.snapshotFor(record);
   }
 
-  stopSession(sessionId: string): SimulationSessionStatusSnapshot {
+  async stopSession(sessionId: string): Promise<SimulationSessionStatusSnapshot> {
     const record = this.requireSession(sessionId);
+    const wasStopped = record.status === 'stopped';
+    const runtimeKind = record.useMockRuntime ? 'mock' : 'adapter-backed';
 
     record.status = 'stopping';
     record.label = statusLabel(record);
-    record.logs.push(this.createLog(sessionId, 'info', 'Stopping mock simulation session.'));
+    record.logs.push(this.createLog(sessionId, 'info', `Stopping ${runtimeKind} simulation session.`));
     this.clearSessionTimer(sessionId);
     record.botManager.stopAll();
-    record.structuredLogger.logSession('manual_stop', {
-      scope: 'session',
-      reason: 'Stop Session requested from UI or backend API.'
-    });
+
+    if (!wasStopped) {
+      record.structuredLogger.logSession('manual_stop', {
+        scope: 'session',
+        reason: 'Stop Session requested from UI or backend API.'
+      });
+    }
+
+    await this.stopGameInstances(record, 'manual_stop');
 
     record.status = 'stopped';
     record.stoppedAt = this.now();
@@ -1076,14 +1285,9 @@ export class SimulationService {
       ...bot,
       status: 'stopped',
       progressState: 'Stopped',
-      message: 'Mock session stopped.'
+      message: `${record.useMockRuntime ? 'Mock' : 'Adapter-backed'} session stopped.`
     }));
-    record.instanceStatuses = record.instanceStatuses.map((instance) => ({
-      ...instance,
-      status: 'stopped',
-      lastHeartbeat: this.now()
-    }));
-    record.logs.push(this.createLog(sessionId, 'info', 'Mock simulation stopped.'));
+    record.logs.push(this.createLog(sessionId, 'info', `${record.useMockRuntime ? 'Mock' : 'Adapter-backed'} simulation stopped.`));
     record.label = statusLabel(record);
     this.logSessionStop(record, 'manual_stop');
     this.stopVideoEvidence(record);
@@ -1102,13 +1306,14 @@ export class SimulationService {
     this.clearSessionTimer(sessionId);
     record.botManager.pauseAll();
     record.status = 'paused';
+    const runtimeKind = record.useMockRuntime ? 'Mock' : 'Adapter-backed';
     record.botStatuses = record.botStatuses.map((bot) => ({
       ...bot,
       status: bot.status === 'stopped' ? 'stopped' : 'waiting',
       progressState: bot.status === 'stopped' ? bot.progressState : 'Paused',
-      message: bot.status === 'stopped' ? bot.message : 'Mock session paused.'
+      message: bot.status === 'stopped' ? bot.message : `${runtimeKind} session paused.`
     }));
-    record.logs.push(this.createLog(sessionId, 'info', 'Mock simulation paused.'));
+    record.logs.push(this.createLog(sessionId, 'info', `${runtimeKind} simulation paused.`));
     record.label = statusLabel(record);
 
     return this.snapshotFor(record);
@@ -1122,18 +1327,19 @@ export class SimulationService {
     }
 
     record.status = 'running';
+    const runtimeKind = record.useMockRuntime ? 'Mock' : 'Adapter-backed';
     record.botStatuses = record.botStatuses.map((bot) => ({
       ...bot,
       status: ['stopped', 'completed', 'failed'].includes(bot.status) ? bot.status : 'running',
       progressState: ['stopped', 'completed', 'failed'].includes(bot.status) ? bot.progressState : 'Running',
-      message: ['stopped', 'completed', 'failed'].includes(bot.status) ? bot.message : 'Mock session resumed.'
+      message: ['stopped', 'completed', 'failed'].includes(bot.status) ? bot.message : `${runtimeKind} session resumed.`
     }));
     record.instanceStatuses = record.instanceStatuses.map((instance) => ({
       ...instance,
       status: 'running',
       lastHeartbeat: this.now()
     }));
-    record.logs.push(this.createLog(sessionId, 'info', 'Mock simulation resumed.'));
+    record.logs.push(this.createLog(sessionId, 'info', `${runtimeKind} simulation resumed.`));
     record.label = statusLabel(record);
     record.botManager.resumeAll();
 
@@ -1250,8 +1456,14 @@ export class SimulationService {
     return this.requireSession(sessionId).coverageTracker.getSummary();
   }
 
-  shutdownAllSessions(reason = 'app_shutdown'): SimulationSessionStatusSnapshot[] {
-    return [...this.sessions.values()].map((record) => this.shutdownSessionRecord(record, reason));
+  async shutdownAllSessions(reason = 'app_shutdown'): Promise<SimulationSessionStatusSnapshot[]> {
+    const snapshots: SimulationSessionStatusSnapshot[] = [];
+
+    for (const record of this.sessions.values()) {
+      snapshots.push(await this.shutdownSessionRecord(record, reason));
+    }
+
+    return snapshots;
   }
 
   async openReport(sessionId: string): Promise<OpenReportResult> {
@@ -2117,6 +2329,174 @@ export class SimulationService {
     });
   }
 
+  private startMockSession(record: SimulationSessionRecord): SimulationSessionStatusSnapshot {
+    const sessionId = record.request.runConfig.sessionId;
+
+    this.activeSessionId = sessionId;
+    record.status = 'starting';
+    record.startedAt = record.startedAt ?? this.now();
+    record.stoppedAt = undefined;
+    record.botStatuses = record.botStatuses.map((bot) => ({
+      ...bot,
+      status: bot.status === 'stopped' ? 'stopped' : 'starting',
+      currentArea: bot.status === 'stopped' ? bot.currentArea : 'Boot',
+      progressState: bot.status === 'stopped' ? bot.progressState : 'Starting',
+      message: bot.status === 'stopped' ? bot.message : 'Mock bot is starting.'
+    }));
+    record.instanceStatuses = record.instanceStatuses.map((instance) => ({
+      ...instance,
+      status: 'starting',
+      lastHeartbeat: this.now()
+    }));
+    record.logs.push(this.createLog(sessionId, 'info', 'Starting mock simulation session.'));
+    record.label = statusLabel(record);
+    this.logSessionStart(record);
+    this.startVideoEvidence(record);
+    this.writeStructuredReports(record);
+
+    this.clearSessionTimer(sessionId);
+    const startupTimer = setTimeout(() => {
+      const current = this.sessions.get(sessionId);
+
+      if (!current || current.status !== 'starting') {
+        return;
+      }
+
+      current.status = 'running';
+      current.botStatuses = current.botStatuses.map((bot) => ({
+        ...bot,
+        status: bot.status === 'stopped' ? 'stopped' : 'running',
+        currentArea: bot.status === 'stopped' ? bot.currentArea : 'Start Area',
+        progressState: bot.status === 'stopped' ? bot.progressState : 'Running',
+        message: bot.status === 'stopped' ? bot.message : 'Mock bot is running.'
+      }));
+      current.instanceStatuses = current.instanceStatuses.map((instance) => ({
+        ...instance,
+        status: 'running',
+        lastHeartbeat: this.now()
+      }));
+      current.logs.push(this.createLog(sessionId, 'info', 'Bot runtime loops are running.'));
+      current.label = statusLabel(current);
+      for (const instance of current.instanceStatuses) {
+        this.logInstanceStart(current, instance);
+      }
+      this.writeStructuredReports(current);
+      current.botManager.startAll();
+    }, 300);
+
+    startupTimer.unref?.();
+    record.startupTimer = startupTimer;
+    return this.snapshotFor(record);
+  }
+
+  private async failAdapterStartup(record: SimulationSessionRecord, error: unknown): Promise<void> {
+    const sessionId = record.request.runConfig.sessionId;
+    const message = error instanceof Error ? error.message : 'Unknown adapter startup failure.';
+    const timestamp = this.now();
+
+    record.status = 'failed';
+    record.stoppedAt = timestamp;
+    record.botStatuses = record.botStatuses.map((bot) => ({
+      ...bot,
+      status: 'failed',
+      currentArea: bot.currentArea === 'Queued' ? 'Adapter startup failed' : bot.currentArea,
+      progressState: 'Adapter startup failed',
+      message
+    }));
+    record.instanceStatuses = record.instanceStatuses.map((instance) => ({
+      ...instance,
+      status: instance.status === 'running' ? 'running' : 'crashed',
+      lastHeartbeat: timestamp
+    }));
+    record.logs.push(this.createLog(sessionId, 'error', `Adapter startup failed: ${message}`));
+    record.structuredLogger.logSession('crash', {
+      reason: 'adapter_startup_failed',
+      message
+    }, {
+      timestamp
+    });
+
+    const issue: DetectedIssue = {
+      id: `${sessionId}-adapter-startup-failed`,
+      issueId: `${sessionId}-adapter-startup-failed`,
+      timestamp,
+      sessionId,
+      instanceId: record.instanceStatuses[0]?.instanceId,
+      gameInstanceId: record.instanceStatuses[0]?.instanceId,
+      severity: 'critical',
+      category: 'crash',
+      title: 'Game adapter failed to launch',
+      description: message,
+      scene: 'Adapter startup',
+      area: 'Adapter startup',
+      lastActions: [],
+      stateSummary: `Adapter ${record.request.runConfig.adapterType} failed before bot runtime could start.`,
+      expectedBehavior: 'The selected adapter should launch or connect to the configured game instance.',
+      actualBehavior: message,
+      confidence: 1,
+      rawEvidence: {
+        adapterType: record.request.runConfig.adapterType,
+        launch: record.request.gameProfile.launch,
+        error: message
+      },
+      evidencePaths: [],
+      actionTimelineIds: [],
+      firstSeenAt: timestamp,
+      reproducible: true
+    };
+
+    this.recordDetectedIssue(record, issue);
+
+    try {
+      await record.gameAdapter?.stopAll();
+    } catch (stopError) {
+      const stopMessage = stopError instanceof Error ? stopError.message : 'Adapter cleanup failed.';
+      record.logs.push(this.createLog(sessionId, 'warn', `Adapter cleanup after launch failure failed: ${stopMessage}`));
+    }
+
+    record.label = statusLabel(record);
+    this.logSessionStop(record, 'adapter_startup_failed');
+    this.stopVideoEvidence(record);
+    this.writeStructuredReports(record);
+  }
+
+  private async stopGameInstances(record: SimulationSessionRecord, reason: string): Promise<void> {
+    const sessionId = record.request.runConfig.sessionId;
+
+    try {
+      if (record.gameAdapter) {
+        await record.gameAdapter.stopAll();
+        this.markInstancesStopped(record);
+      } else if (record.gameInstanceManager) {
+        record.instanceStatuses = await record.gameInstanceManager.stopAll();
+      } else {
+        this.markInstancesStopped(record);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown adapter shutdown failure.';
+      record.logs.push(this.createLog(sessionId, 'warn', `Adapter shutdown failed during ${reason}: ${message}`));
+
+      try {
+        await record.gameAdapter?.stopAll();
+      } catch (cleanupError) {
+        const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : 'Unknown adapter cleanup failure.';
+        record.logs.push(this.createLog(sessionId, 'warn', `Adapter stopAll cleanup failed during ${reason}: ${cleanupMessage}`));
+      }
+
+      this.markInstancesStopped(record);
+    }
+
+    this.markInstancesStopped(record);
+  }
+
+  private markInstancesStopped(record: SimulationSessionRecord): void {
+    record.instanceStatuses = record.instanceStatuses.map((instance) => ({
+      ...instance,
+      status: 'stopped',
+      lastHeartbeat: this.now()
+    }));
+  }
+
   private snapshotFor(record: SimulationSessionRecord): SimulationSessionStatusSnapshot {
     return {
       status: record.status,
@@ -2140,10 +2520,10 @@ export class SimulationService {
     }
   }
 
-  private shutdownSessionRecord(
+  private async shutdownSessionRecord(
     record: SimulationSessionRecord,
     reason: string
-  ): SimulationSessionStatusSnapshot {
+  ): Promise<SimulationSessionStatusSnapshot> {
     const sessionId = record.request.runConfig.sessionId;
     const terminalBotStatuses = new Set(['blocked', 'completed', 'failed', 'stopped']);
     const wasStopped = record.status === 'stopped';
@@ -2175,11 +2555,7 @@ export class SimulationService {
         message: `Stopped during graceful shutdown: ${reason}`
       };
     });
-    record.instanceStatuses = record.instanceStatuses.map((instance) => ({
-      ...instance,
-      status: 'stopped',
-      lastHeartbeat: this.now()
-    }));
+    await this.stopGameInstances(record, reason);
     record.label = statusLabel(record);
     this.logSessionStop(record, reason);
     this.stopVideoEvidence(record);
@@ -3049,14 +3425,13 @@ export class SimulationService {
         ? bot.message
         : `Stopped after critical issue: ${issue?.title ?? 'Unknown issue'}`
     }));
-    record.instanceStatuses = record.instanceStatuses.map((instance) => ({
-      ...instance,
-      status: 'stopped',
-      lastHeartbeat: this.now()
-    }));
+    this.markInstancesStopped(record);
     record.label = statusLabel(record);
     this.logSessionStop(record, 'critical_issue');
     this.stopVideoEvidence(record);
+    void this.stopGameInstances(record, 'critical_issue').then(() => {
+      this.writeStructuredReports(record);
+    });
   }
 
   private createSyntheticIssue(
@@ -3117,6 +3492,10 @@ export class SimulationService {
   }
 
   private completeSessionIfNoActiveBots(record: SimulationSessionRecord): void {
+    if (record.status === 'stopping' || record.status === 'stopped' || record.status === 'failed' || record.finalizing) {
+      return;
+    }
+
     const hasActiveBots = record.botStatuses.some(
       (bot) => !['blocked', 'stopped', 'completed', 'failed'].includes(bot.status)
     );
@@ -3127,18 +3506,39 @@ export class SimulationService {
     }
 
     this.clearSessionTimer(record.request.runConfig.sessionId);
+
+    if (!record.useMockRuntime) {
+      record.finalizing = true;
+      record.status = 'stopping';
+      record.logs.push(this.createLog(record.request.runConfig.sessionId, 'info', 'All bots are stopped; stopping game adapter instances.'));
+      record.label = statusLabel(record);
+      void this.finalizeIdleSession(record);
+      return;
+    }
+
     record.status = 'stopped';
     record.stoppedAt = this.now();
-    record.instanceStatuses = record.instanceStatuses.map((instance) => ({
-      ...instance,
-      status: 'stopped',
-      lastHeartbeat: this.now()
-    }));
+    this.markInstancesStopped(record);
     record.logs.push(this.createLog(record.request.runConfig.sessionId, 'info', 'All mock bots are stopped.'));
     record.label = statusLabel(record);
     this.logSessionStop(record, 'all_bots_idle');
     this.stopVideoEvidence(record);
     this.writeStructuredReports(record);
+  }
+
+  private async finalizeIdleSession(record: SimulationSessionRecord): Promise<void> {
+    try {
+      await this.stopGameInstances(record, 'all_bots_idle');
+      record.status = 'stopped';
+      record.stoppedAt = this.now();
+      record.logs.push(this.createLog(record.request.runConfig.sessionId, 'info', 'All adapter-backed bots are stopped.'));
+      record.label = statusLabel(record);
+      this.logSessionStop(record, 'all_bots_idle');
+      this.stopVideoEvidence(record);
+      this.writeStructuredReports(record);
+    } finally {
+      record.finalizing = false;
+    }
   }
 
   private requireSession(sessionId: string): SimulationSessionRecord {

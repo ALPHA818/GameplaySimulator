@@ -7,6 +7,7 @@ import { registerSimulationIpc } from './ipc/simulation';
 import { SimulationService } from './services/simulationService';
 
 let mainWindow: BrowserWindow | null = null;
+let quitAfterShutdown = false;
 const simulationService = new SimulationService({
   openPath: (path) => shell.openPath(path)
 });
@@ -57,8 +58,16 @@ app.whenReady().then(() => {
   });
 });
 
-app.on('before-quit', () => {
-  simulationService.shutdownAllSessions('app_before_quit');
+app.on('before-quit', (event) => {
+  if (quitAfterShutdown) {
+    return;
+  }
+
+  event.preventDefault();
+  void simulationService.shutdownAllSessions('app_before_quit').finally(() => {
+    quitAfterShutdown = true;
+    app.quit();
+  });
 });
 
 app.on('window-all-closed', () => {

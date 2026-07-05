@@ -10,7 +10,7 @@ This project is for legitimate QA, regression testing, accessibility-style explo
 
 ## Current Status
 
-GameplaySimulator now has the desktop shell, shared data models, mock backend simulation service, bot pools, live session monitoring, issue/log viewers, readable reports, content coverage tracking, evidence capture, exploit detection, and placeholder adapter architecture. Real engine integrations are still expected to be connected through adapters and optional instrumentation.
+GameplaySimulator now has the desktop shell, shared data models, adapter-backed backend simulation service, bot pools, live session monitoring, issue/log viewers, readable reports, content coverage tracking, evidence capture, exploit detection, and placeholder adapter architecture. Mock runtime mode is available only as an explicit debug/demo option with `useMockRuntime: true`; normal sessions use the selected adapter.
 
 ## Adapter Documentation
 

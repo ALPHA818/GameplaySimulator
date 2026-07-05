@@ -2,9 +2,24 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { BotProfile, GameProfile, SimulationRunConfig } from '@core/types';
+import type {
+  ActionResult,
+  BotProfile,
+  GameAction,
+  GameInstanceConfig,
+  GameProfile,
+  GameStateSnapshot,
+  SimulationRunConfig
+} from '@core/types';
 import type { SystemResourceSnapshot } from '@core/resources/ResourceManager';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type {
+  AdapterCapabilities,
+  AdapterHealth,
+  AvailableGameAction,
+  GameAdapter,
+  GameAdapterInstance
+} from '../../../../../packages/adapters/src';
 import { SimulationService } from './simulationService';
 
 const gameProfile: GameProfile = {
@@ -99,6 +114,7 @@ const runConfig: SimulationRunConfig = {
   saveVideo: false,
   saveActionTimeline: true,
   saveStateSnapshots: true,
+  useMockRuntime: true,
   botPools: [
     {
       profileId: 'explorer',
@@ -162,6 +178,127 @@ function parseJsonl(contents: string): Array<Record<string, unknown>> {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+const adapterCapabilities: AdapterCapabilities = {
+  supportsMultipleInstances: true,
+  supportsMultipleBotsPerInstance: true,
+  supportsStateRead: true,
+  supportsDirectActions: true,
+  supportsInputSimulation: true,
+  supportsScreenshots: true,
+  supportsVideo: false,
+  supportsGameLogs: true,
+  supportsSaveIsolation: true,
+  supportsReset: false,
+  supportsCheckpointReload: false
+};
+
+class RecordingGameAdapter implements GameAdapter {
+  readonly id = 'recording-browser';
+  readonly name = 'Recording Browser Adapter';
+  readonly adapterType = 'browser';
+  readonly capabilities = adapterCapabilities;
+  readonly launchConfigs: GameInstanceConfig[] = [];
+  readonly stoppedInstances: string[] = [];
+  stoppedAll = false;
+  private readonly runningInstances = new Set<string>();
+
+  async launchInstance(config: GameInstanceConfig): Promise<GameAdapterInstance> {
+    this.launchConfigs.push(config);
+    this.runningInstances.add(config.instanceId);
+
+    return {
+      instanceId: config.instanceId,
+      adapterId: this.id,
+      gameProfileId: config.gameProfileId,
+      launchConfig: config,
+      startedAt: '2026-07-04T09:00:00.000Z',
+      metadata: {
+        targetUrl: config.launch.url
+      }
+    };
+  }
+
+  async stopInstance(instanceId: string): Promise<void> {
+    this.stoppedInstances.push(instanceId);
+    this.runningInstances.delete(instanceId);
+  }
+
+  async stopAll(): Promise<void> {
+    this.stoppedAll = true;
+
+    for (const instanceId of [...this.runningInstances]) {
+      await this.stopInstance(instanceId);
+    }
+  }
+
+  async getState(instanceId: string, botId: string): Promise<GameStateSnapshot | null> {
+    if (!(await this.isRunning(instanceId))) {
+      return null;
+    }
+
+    return {
+      snapshotId: `${instanceId}-${botId}-recording-state`,
+      sessionId: 'adapter-backed-session',
+      gameId: gameProfile.gameId,
+      gameInstanceId: instanceId,
+      botId,
+      capturedAt: '2026-07-04T09:00:00.000Z',
+      scene: 'Recording Adapter Scene',
+      state: {
+        area: 'Recording Adapter Scene'
+      },
+      metrics: {}
+    };
+  }
+
+  async getAvailableActions(): Promise<AvailableGameAction[]> {
+    return [
+      {
+        actionType: 'wait',
+        label: 'Wait',
+        requiresDirectAction: true
+      }
+    ];
+  }
+
+  async performAction(_instanceId: string, botId: string, action: GameAction): Promise<ActionResult> {
+    return {
+      actionId: action.actionId,
+      botId,
+      status: 'succeeded',
+      startedAt: action.requestedAt,
+      completedAt: '2026-07-04T09:00:00.000Z',
+      durationMs: 1,
+      message: 'Recording adapter action succeeded.',
+      issueIds: []
+    };
+  }
+
+  async isRunning(instanceId: string): Promise<boolean> {
+    return this.runningInstances.has(instanceId);
+  }
+
+  async getHealth(instanceId: string): Promise<AdapterHealth> {
+    const running = await this.isRunning(instanceId);
+
+    return {
+      instanceId,
+      status: running ? 'running' : 'stopped',
+      checkedAt: '2026-07-04T09:00:00.000Z',
+      message: running ? 'Recording instance is running.' : 'Recording instance is stopped.',
+      details: {
+        adapterId: this.id
+      }
+    };
+  }
+}
+
+class FailingLaunchAdapter extends RecordingGameAdapter {
+  override async launchInstance(_config: GameInstanceConfig): Promise<GameAdapterInstance> {
+    throw new Error('configured game could not launch');
+  }
+}
+
 describe('SimulationService', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -183,7 +320,7 @@ describe('SimulationService', () => {
     expect(created.botStatuses).toHaveLength(2);
     expect(created.instanceStatuses).toHaveLength(1);
 
-    const starting = service.startSession(runConfig.sessionId);
+    const starting = await service.startSession(runConfig.sessionId);
     expect(starting.status).toBe('starting');
 
     await vi.advanceTimersByTimeAsync(350);
@@ -205,13 +342,97 @@ describe('SimulationService', () => {
 
     expect(service.getSessionStatus(runConfig.sessionId).status).toBe('stopped');
 
-    const restarted = service.startSession(runConfig.sessionId);
+    const restarted = await service.startSession(runConfig.sessionId);
     expect(restarted.status).toBe('starting');
 
-    const stopped = service.stopSession(runConfig.sessionId);
+    const stopped = await service.stopSession(runConfig.sessionId);
 
     expect(stopped.status).toBe('stopped');
     expect(service.getBotStatuses(runConfig.sessionId).every((bot) => bot.status === 'stopped')).toBe(true);
+  });
+
+  it('launches and stops adapter-backed sessions through AdapterFactory by default', async () => {
+    const adapter = new RecordingGameAdapter();
+    const createAdapter = vi.fn((_adapterType: SimulationRunConfig['adapterType'], _options?: unknown) => adapter);
+    const service = new SimulationService({
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot,
+      adapterFactory: { createAdapter }
+    });
+    const adapterRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-real-adapter',
+      useMockRuntime: false,
+      stopOnCriticalIssue: false,
+      actionDelayMs: 1,
+      maxActionsPerBot: undefined
+    };
+
+    const created = service.createSession({
+      runConfig: adapterRunConfig,
+      gameProfile,
+      botProfiles
+    });
+
+    expect(created.status.status).toBe('created');
+    expect(createAdapter).toHaveBeenCalledWith(
+      'browser',
+      expect.objectContaining({
+        browser: expect.objectContaining({
+          targetUrl: gameProfile.launch.url
+        })
+      })
+    );
+
+    const started = await service.startSession(adapterRunConfig.sessionId);
+
+    expect(started.status).toBe('running');
+    expect(adapter.launchConfigs).toHaveLength(1);
+    expect(adapter.launchConfigs[0].launch.url).toBe(gameProfile.launch.url);
+    expect(service.getInstanceStatuses(adapterRunConfig.sessionId).every((instance) => instance.status === 'running')).toBe(true);
+
+    const stopped = await service.stopSession(adapterRunConfig.sessionId);
+
+    expect(stopped.status).toBe('stopped');
+    expect(adapter.stoppedAll).toBe(true);
+    expect(service.getInstanceStatuses(adapterRunConfig.sessionId).every((instance) => instance.status === 'stopped')).toBe(true);
+  });
+
+  it('reports adapter launch failures as failed sessions with critical issues', async () => {
+    const adapter = new FailingLaunchAdapter();
+    const createAdapter = vi.fn((_adapterType: SimulationRunConfig['adapterType'], _options?: unknown) => adapter);
+    const service = new SimulationService({
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot,
+      adapterFactory: { createAdapter }
+    });
+    const failingRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-adapter-launch-failed',
+      useMockRuntime: false
+    };
+
+    service.createSession({
+      runConfig: failingRunConfig,
+      gameProfile,
+      botProfiles
+    });
+
+    const started = await service.startSession(failingRunConfig.sessionId);
+    const issues = service.getIssues(failingRunConfig.sessionId);
+
+    expect(started.status).toBe('failed');
+    expect(adapter.stoppedAll).toBe(true);
+    expect(service.getLogs(failingRunConfig.sessionId).some((log) => log.message.includes('Adapter startup failed'))).toBe(true);
+    expect(issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: 'critical',
+          category: 'crash',
+          title: 'Game adapter failed to launch'
+        })
+      ])
+    );
   });
 
   it('writes and opens a mock report', async () => {
@@ -257,7 +478,7 @@ describe('SimulationService', () => {
     });
 
     service.createSession({ runConfig, gameProfile, botProfiles });
-    service.startSession(runConfig.sessionId);
+    await service.startSession(runConfig.sessionId);
     await vi.advanceTimersByTimeAsync(350);
     await vi.advanceTimersByTimeAsync(1100);
 
@@ -298,7 +519,7 @@ describe('SimulationService', () => {
       gameProfile,
       botProfiles: boundaryBotProfiles
     });
-    service.startSession(boundaryRunConfig.sessionId);
+    await service.startSession(boundaryRunConfig.sessionId);
 
     await vi.advanceTimersByTimeAsync(350);
     await vi.advanceTimersByTimeAsync(1000);
@@ -343,7 +564,7 @@ describe('SimulationService', () => {
       gameProfile: videoProfile,
       botProfiles: boundaryBotProfiles
     });
-    service.startSession(videoRunConfig.sessionId);
+    await service.startSession(videoRunConfig.sessionId);
 
     await vi.advanceTimersByTimeAsync(350);
     await vi.advanceTimersByTimeAsync(1000);
@@ -383,7 +604,7 @@ describe('SimulationService', () => {
       gameProfile: { ...gameProfile, version: '1.0.0', buildId: 'old-build' },
       botProfiles: boundaryBotProfiles
     });
-    service.startSession(oldRunConfig.sessionId);
+    await service.startSession(oldRunConfig.sessionId);
     await vi.advanceTimersByTimeAsync(350);
     await vi.advanceTimersByTimeAsync(1000);
 
@@ -392,7 +613,7 @@ describe('SimulationService', () => {
       gameProfile: { ...gameProfile, version: '1.0.1', buildId: 'new-build' },
       botProfiles: boundaryBotProfiles
     });
-    service.startSession(newRunConfig.sessionId);
+    await service.startSession(newRunConfig.sessionId);
     await vi.advanceTimersByTimeAsync(350);
     await vi.advanceTimersByTimeAsync(1000);
 
@@ -434,7 +655,7 @@ describe('SimulationService', () => {
       gameProfile: { ...gameProfile, version: '2.0.0', buildId: 'github-export-build' },
       botProfiles: boundaryBotProfiles
     });
-    service.startSession(githubRunConfig.sessionId);
+    await service.startSession(githubRunConfig.sessionId);
     await vi.advanceTimersByTimeAsync(350);
     await vi.advanceTimersByTimeAsync(1000);
 
@@ -482,7 +703,7 @@ describe('SimulationService', () => {
       gameProfile,
       botProfiles: boundaryBotProfiles
     });
-    service.startSession(githubRunConfig.sessionId);
+    await service.startSession(githubRunConfig.sessionId);
     await vi.advanceTimersByTimeAsync(350);
     await vi.advanceTimersByTimeAsync(1000);
 
@@ -519,11 +740,11 @@ describe('SimulationService', () => {
     };
 
     service.createSession({ runConfig: interruptedRunConfig, gameProfile, botProfiles });
-    service.startSession(interruptedRunConfig.sessionId);
+    await service.startSession(interruptedRunConfig.sessionId);
     await vi.advanceTimersByTimeAsync(350);
     await vi.advanceTimersByTimeAsync(500);
 
-    const snapshots = service.shutdownAllSessions('test_shutdown');
+    const snapshots = await service.shutdownAllSessions('test_shutdown');
     const report = await service.openReport(interruptedRunConfig.sessionId);
     const logs = await service.openLogs(interruptedRunConfig.sessionId);
     const sessionEvents = parseJsonl(await readFile(logs.logsPath, 'utf8'));

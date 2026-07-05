@@ -27,6 +27,7 @@ export const SimulationRunConfigSchema = z
     screenshotEveryNActions: z.number().int().positive().optional(),
     saveActionTimeline: z.boolean(),
     saveStateSnapshots: z.boolean(),
+    useMockRuntime: z.boolean().optional(),
     botPools: z.array(BotPoolConfigSchema).min(1),
     globalBotLimit: z.number().int().min(1),
     perGameInstanceBotLimit: z.number().int().min(1),
