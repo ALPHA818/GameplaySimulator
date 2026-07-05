@@ -410,4 +410,131 @@ describe('SimulationService', () => {
     expect(contents).toContain('## Coverage Difference');
     expect(contents).toContain('## Crash Frequency Changes');
   });
+
+  it('previews and exports GitHub issue markdown without a token', async () => {
+    vi.useFakeTimers();
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-github-export-'));
+    const openedPaths: string[] = [];
+    const service = new SimulationService({
+      reportRoot,
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot,
+      openPath: async (path) => {
+        openedPaths.push(path);
+        return '';
+      }
+    });
+    const githubRunConfig: SimulationRunConfig = {
+      ...boundaryRunConfig,
+      sessionId: 'session-github-export'
+    };
+
+    service.createSession({
+      runConfig: githubRunConfig,
+      gameProfile: { ...gameProfile, version: '2.0.0', buildId: 'github-export-build' },
+      botProfiles: boundaryBotProfiles
+    });
+    service.startSession(githubRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(350);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const issue = service.getIssues(githubRunConfig.sessionId).find((item) => item.category === 'world_boundary');
+    expect(issue).toBeDefined();
+
+    const payload = {
+      sessionId: githubRunConfig.sessionId,
+      issueIds: [issue!.id ?? issue!.issueId],
+      minimumSeverity: 'warning',
+      minimumConfidence: 0.8
+    };
+    const preview = service.previewGitHubIssueExport(payload);
+    const exportResult = await service.exportGitHubIssueMarkdown(payload);
+    const indexContents = await readFile(exportResult.indexPath, 'utf8');
+    const issueContents = await readFile(exportResult.markdownPaths[0], 'utf8');
+
+    expect(preview.issueCount).toBe(1);
+    expect(preview.combinedMarkdown).toContain('GitHub Issue Export');
+    expect(preview.issues[0].body).toContain('## Steps To Reproduce');
+    expect(preview.issues[0].body).toContain('Game build');
+    expect(preview.issues[0].body).toContain('github-export-build');
+    expect(preview.issues[0].body).toContain(issue?.screenshotPath);
+    expect(exportResult.opened).toBe(true);
+    expect(openedPaths).toContain(exportResult.indexPath);
+    expect(indexContents).toContain('[critical] [world_boundary]');
+    expect(issueContents).toContain('Player fell out of the world');
+  });
+
+  it('does not post GitHub issues without explicit confirmation', async () => {
+    vi.useFakeTimers();
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-github-post-'));
+    const service = new SimulationService({
+      reportRoot,
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot
+    });
+    const githubRunConfig: SimulationRunConfig = {
+      ...boundaryRunConfig,
+      sessionId: 'session-github-post'
+    };
+
+    service.createSession({
+      runConfig: githubRunConfig,
+      gameProfile,
+      botProfiles: boundaryBotProfiles
+    });
+    service.startSession(githubRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(350);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const issue = service.getIssues(githubRunConfig.sessionId).find((item) => item.category === 'world_boundary');
+    const result = await service.postGitHubIssues({
+      sessionId: githubRunConfig.sessionId,
+      issueIds: [issue?.id ?? issue?.issueId ?? 'missing'],
+      minimumSeverity: 'warning',
+      minimumConfidence: 0.8,
+      owner: 'example',
+      repo: 'game',
+      token: 'not-used-without-confirmation',
+      useConfiguredToken: false,
+      confirmed: false,
+      labels: []
+    });
+
+    expect(result.posted).toBe(false);
+    expect(result.created).toHaveLength(0);
+    expect(result.message).toContain('not confirmed');
+  });
+
+  it('gracefully shuts down active sessions and preserves partial reports', async () => {
+    vi.useFakeTimers();
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-shutdown-'));
+    const service = new SimulationService({
+      reportRoot,
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot
+    });
+    const interruptedRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-interrupted'
+    };
+
+    service.createSession({ runConfig: interruptedRunConfig, gameProfile, botProfiles });
+    service.startSession(interruptedRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(350);
+    await vi.advanceTimersByTimeAsync(500);
+
+    const snapshots = service.shutdownAllSessions('test_shutdown');
+    const report = await service.openReport(interruptedRunConfig.sessionId);
+    const logs = await service.openLogs(interruptedRunConfig.sessionId);
+    const sessionEvents = parseJsonl(await readFile(logs.logsPath, 'utf8'));
+    const summary = await readFile(report.reportPath, 'utf8');
+
+    expect(snapshots.find((snapshot) => snapshot.sessionId === interruptedRunConfig.sessionId)?.status).toBe('stopped');
+    expect(service.getBotStatuses(interruptedRunConfig.sessionId).every((bot) => bot.status === 'stopped')).toBe(true);
+    expect(service.getInstanceStatuses(interruptedRunConfig.sessionId).every((instance) => instance.status === 'stopped')).toBe(true);
+    expect(sessionEvents.some((event) => event.eventType === 'manual_stop')).toBe(true);
+    expect(sessionEvents.some((event) => event.eventType === 'session_stop')).toBe(true);
+    expect(summary).toContain('GameplaySimulator Session');
+    expect(summary).toContain('session-interrupted');
+  });
 });

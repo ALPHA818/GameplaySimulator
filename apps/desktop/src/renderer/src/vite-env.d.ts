@@ -14,6 +14,11 @@ import type {
   OpenLogsResult,
   OpenEvidenceResult,
   ComparisonReportResult,
+  GitHubIssueExportRequest,
+  GitHubIssueExportPreviewResult,
+  GitHubIssueMarkdownExportResult,
+  GitHubIssuePostRequest,
+  GitHubIssuePostResult,
   ContentCoverageSummary,
   SimulationBotStatus,
   SimulationSessionCreateResult,
@@ -61,6 +66,9 @@ declare global {
         openReport: (sessionId: string) => Promise<OpenReportResult>;
         openLogs: (sessionId: string) => Promise<OpenLogsResult>;
         compareSessions: (oldSessionId: string, newSessionId: string) => Promise<ComparisonReportResult>;
+        previewGitHubIssueExport: (payload: GitHubIssueExportRequest) => Promise<GitHubIssueExportPreviewResult>;
+        exportGitHubIssueMarkdown: (payload: GitHubIssueExportRequest) => Promise<GitHubIssueMarkdownExportResult>;
+        postGitHubIssues: (payload: GitHubIssuePostRequest) => Promise<GitHubIssuePostResult>;
       };
     };
   }

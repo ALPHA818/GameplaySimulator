@@ -330,6 +330,10 @@ h2 {
   resize: vertical;
 }
 
+.input--multi {
+  min-height: 150px;
+}
+
 .field__error,
 .form-error {
   color: #fca5a5;

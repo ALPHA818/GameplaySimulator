@@ -29,6 +29,7 @@ import {
   BotProfileSchema,
   GameProfileSchema,
   RuntimeViabilityReportSchema,
+  SeveritySchema,
   SimulationRunConfigSchema
 } from '@core/types';
 
@@ -130,6 +131,63 @@ export interface ComparisonReportResult {
   summary: ComparisonReportSummary;
 }
 
+export interface GitHubIssueExportRequest {
+  sessionId: string;
+  issueIds: string[];
+  minimumSeverity: Severity;
+  minimumConfidence: number;
+}
+
+export interface GitHubIssuePostRequest extends GitHubIssueExportRequest {
+  owner: string;
+  repo: string;
+  token?: string;
+  useConfiguredToken: boolean;
+  confirmed: boolean;
+  labels: string[];
+}
+
+export interface GitHubIssuePreviewItem {
+  issueId: string;
+  title: string;
+  severity: Severity;
+  category: string;
+  confidence?: number;
+  body: string;
+}
+
+export interface GitHubIssueExportPreviewResult {
+  sessionId: string;
+  issueCount: number;
+  issues: GitHubIssuePreviewItem[];
+  combinedMarkdown: string;
+}
+
+export interface GitHubIssueMarkdownExportResult {
+  sessionId: string;
+  issueCount: number;
+  exportDirectory: string;
+  indexPath: string;
+  markdownPaths: string[];
+  opened: boolean;
+  message: string;
+}
+
+export interface GitHubPostedIssue {
+  issueId: string;
+  title: string;
+  number?: number;
+  url?: string;
+}
+
+export interface GitHubIssuePostResult {
+  sessionId: string;
+  posted: boolean;
+  created: GitHubPostedIssue[];
+  failed: Array<{ issueId: string; title: string; message: string }>;
+  message: string;
+}
+
 export interface StructuredLogItem {
   source: 'session' | 'bot-actions' | 'bot-states' | 'bot-issues' | 'instance';
   botId?: string;
@@ -156,6 +214,22 @@ const SimulationSessionRequestSchema = z.object({
   runConfig: SimulationRunConfigSchema,
   gameProfile: GameProfileSchema,
   botProfiles: z.array(BotProfileSchema).default([])
+});
+
+const GitHubIssueExportRequestSchema = z.object({
+  sessionId: z.string().min(1),
+  issueIds: z.array(z.string().min(1)).default([]),
+  minimumSeverity: SeveritySchema.default('warning'),
+  minimumConfidence: z.number().min(0).max(1).default(0.75)
+});
+
+const GitHubIssuePostRequestSchema = GitHubIssueExportRequestSchema.extend({
+  owner: z.string().min(1),
+  repo: z.string().min(1),
+  token: z.string().optional(),
+  useConfiguredToken: z.boolean().default(false),
+  confirmed: z.boolean().default(false),
+  labels: z.array(z.string().min(1)).default([])
 });
 
 interface SimulationSessionRecord {
@@ -387,6 +461,11 @@ function markdownTable(headers: string[], rows: string[][], emptyMessage = '_Non
   ].join('\n') + '\n';
 }
 
+function fencedMarkdown(value: string | undefined, language = ''): string {
+  const safe = value?.trim() ? value.trim().replace(/```/g, '`\\`\\`') : 'Not captured';
+  return `\`\`\`${language}\n${safe}\n\`\`\``;
+}
+
 function formatSignedNumber(value: number): string {
   return value > 0 ? `+${value}` : String(value);
 }
@@ -415,6 +494,10 @@ function sum(values: number[]): number {
 
 function fingerprintPreview(fingerprint: string): string {
   return fingerprint.length > 84 ? `${fingerprint.slice(0, 81)}...` : fingerprint;
+}
+
+function safeFileStem(value: string): string {
+  return safePathSegment(value).slice(0, 96) || 'issue';
 }
 
 function xmlEscape(value: string): string {
@@ -1167,6 +1250,10 @@ export class SimulationService {
     return this.requireSession(sessionId).coverageTracker.getSummary();
   }
 
+  shutdownAllSessions(reason = 'app_shutdown'): SimulationSessionStatusSnapshot[] {
+    return [...this.sessions.values()].map((record) => this.shutdownSessionRecord(record, reason));
+  }
+
   async openReport(sessionId: string): Promise<OpenReportResult> {
     const record = this.requireSession(sessionId);
     this.writeStructuredReports(record);
@@ -1275,6 +1362,283 @@ export class SimulationService {
       opened: openError.length === 0,
       message: openError.length === 0 ? 'Evidence opened.' : openError
     };
+  }
+
+  previewGitHubIssueExport(payload: unknown): GitHubIssueExportPreviewResult {
+    const request = GitHubIssueExportRequestSchema.parse(payload);
+    const record = this.requireSession(request.sessionId);
+    const issues = this.githubExportIssuesForRequest(record, request);
+    const items = issues.map((issue) => this.githubPreviewItemForIssue(record, issue));
+
+    return {
+      sessionId: request.sessionId,
+      issueCount: items.length,
+      issues: items,
+      combinedMarkdown: this.renderCombinedGitHubIssueMarkdown(record, items)
+    };
+  }
+
+  async exportGitHubIssueMarkdown(payload: unknown): Promise<GitHubIssueMarkdownExportResult> {
+    const request = GitHubIssueExportRequestSchema.parse(payload);
+    const record = this.requireSession(request.sessionId);
+    const preview = this.previewGitHubIssueExport(request);
+    const exportDirectory = join(record.structuredLogger.sessionDir, 'github-issues');
+
+    mkdirSync(exportDirectory, { recursive: true });
+
+    const markdownPaths = preview.issues.map((item) => {
+      const issue = record.issues.find((candidate) => (candidate.id ?? candidate.issueId) === item.issueId);
+      const path = join(
+        exportDirectory,
+        `${safeFileStem(issue?.severity ?? item.severity)}-${safeFileStem(issue?.category ?? item.category)}-${safeFileStem(item.title)}-${safeFileStem(item.issueId)}.md`
+      );
+
+      writeFileSync(path, item.body, 'utf8');
+      return path;
+    });
+    const indexPath = join(exportDirectory, 'github-issues-index.md');
+    writeFileSync(indexPath, preview.combinedMarkdown, 'utf8');
+
+    const openError = await this.openPath(indexPath);
+
+    return {
+      sessionId: request.sessionId,
+      issueCount: preview.issueCount,
+      exportDirectory,
+      indexPath,
+      markdownPaths,
+      opened: openError.length === 0,
+      message:
+        openError.length === 0
+          ? `Exported ${preview.issueCount} GitHub issue markdown file${preview.issueCount === 1 ? '' : 's'}.`
+          : openError
+    };
+  }
+
+  async postGitHubIssues(payload: unknown): Promise<GitHubIssuePostResult> {
+    const request = GitHubIssuePostRequestSchema.parse(payload);
+    const preview = this.previewGitHubIssueExport(request);
+
+    if (!request.confirmed) {
+      return {
+        sessionId: request.sessionId,
+        posted: false,
+        created: [],
+        failed: [],
+        message: 'GitHub posting was not confirmed. No issues were posted.'
+      };
+    }
+
+    const token = request.token?.trim() ||
+      (request.useConfiguredToken ? process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? '' : '');
+
+    if (!token) {
+      return {
+        sessionId: request.sessionId,
+        posted: false,
+        created: [],
+        failed: [],
+        message: 'No GitHub token was provided or configured. No issues were posted.'
+      };
+    }
+
+    const created: GitHubPostedIssue[] = [];
+    const failed: Array<{ issueId: string; title: string; message: string }> = [];
+
+    for (const item of preview.issues) {
+      try {
+        const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(request.owner)}/${encodeURIComponent(request.repo)}/issues`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            'X-GitHub-Api-Version': '2022-11-28'
+          },
+          body: JSON.stringify({
+            title: item.title,
+            body: item.body,
+            labels: request.labels
+          })
+        });
+        const responseText = await response.text();
+
+        if (!response.ok) {
+          failed.push({
+            issueId: item.issueId,
+            title: item.title,
+            message: responseText.slice(0, 500) || `GitHub returned HTTP ${response.status}.`
+          });
+          continue;
+        }
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(responseText);
+        } catch {
+          parsed = {};
+        }
+
+        const parsedRecord = typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {};
+        created.push({
+          issueId: item.issueId,
+          title: item.title,
+          number: typeof parsedRecord.number === 'number' ? parsedRecord.number : undefined,
+          url: typeof parsedRecord.html_url === 'string' ? parsedRecord.html_url : undefined
+        });
+      } catch (error) {
+        failed.push({
+          issueId: item.issueId,
+          title: item.title,
+          message: error instanceof Error ? error.message : 'GitHub issue post failed.'
+        });
+      }
+    }
+
+    return {
+      sessionId: request.sessionId,
+      posted: created.length > 0,
+      created,
+      failed,
+      message: `Posted ${created.length} GitHub issue${created.length === 1 ? '' : 's'}${failed.length > 0 ? `; ${failed.length} failed.` : '.'}`
+    };
+  }
+
+  private githubExportIssuesForRequest(
+    record: SimulationSessionRecord,
+    request: GitHubIssueExportRequest
+  ): DetectedIssue[] {
+    const selectedIssueIds = new Set(request.issueIds);
+    const minimumSeverityRank = severityRanks[request.minimumSeverity];
+
+    return record.issues.filter((issue) => {
+      const id = issue.id ?? issue.issueId;
+      const selected = selectedIssueIds.size === 0 || selectedIssueIds.has(id) || selectedIssueIds.has(issue.issueId);
+      const severityAllowed = severityRanks[issue.severity] >= minimumSeverityRank;
+      const confidenceAllowed = (issue.confidence ?? 0) >= request.minimumConfidence;
+
+      return selected && severityAllowed && confidenceAllowed;
+    });
+  }
+
+  private githubPreviewItemForIssue(record: SimulationSessionRecord, issue: DetectedIssue): GitHubIssuePreviewItem {
+    const title = this.githubIssueTitle(issue);
+
+    return {
+      issueId: issue.id ?? issue.issueId,
+      title,
+      severity: issue.severity,
+      category: issue.category,
+      confidence: issue.confidence,
+      body: this.renderGitHubIssueBody(record, issue, title)
+    };
+  }
+
+  private githubIssueTitle(issue: DetectedIssue): string {
+    return `[${issue.severity}] [${issue.category}] ${issue.title}`;
+  }
+
+  private renderCombinedGitHubIssueMarkdown(
+    record: SimulationSessionRecord,
+    items: GitHubIssuePreviewItem[]
+  ): string {
+    return [
+      `# GitHub Issue Export: ${record.request.runConfig.sessionId}`,
+      '',
+      `Generated: ${this.now()}`,
+      `Game: ${record.request.gameProfile.gameName}`,
+      `Build: ${this.gameBuildLabel(record)}`,
+      '',
+      markdownTable(
+        ['Issue', 'Severity', 'Category', 'Confidence'],
+        items.map((item) => [
+          item.title,
+          item.severity,
+          item.category,
+          item.confidence !== undefined ? `${Math.round(item.confidence * 100)}%` : 'unknown'
+        ]),
+        '_No issues matched the selected filters._'
+      ),
+      ...items.flatMap((item, index) => [
+        index === 0 ? '' : '\n---\n',
+        item.body
+      ]),
+      ''
+    ].join('\n');
+  }
+
+  private renderGitHubIssueBody(
+    record: SimulationSessionRecord,
+    issue: DetectedIssue,
+    title = this.githubIssueTitle(issue)
+  ): string {
+    const bot = issue.botId ? record.botStatuses.find((status) => status.botId === issue.botId) : undefined;
+    const profile = bot
+      ? record.request.botProfiles.find((candidate) => candidate.profileId === bot.profileId)
+      : undefined;
+    const botProfile = [
+      profile?.displayName ?? bot?.displayName,
+      profile?.profileId ?? bot?.profileId,
+      bot?.playstyle
+    ].filter((value): value is string => Boolean(value && value.trim().length > 0)).join(' / ') || 'Unknown';
+    const evidencePaths = uniqueStrings([issue.screenshotPath, issue.videoPath, ...(issue.evidencePaths ?? [])]);
+    const steps = issue.lastActions.length > 0
+      ? issue.lastActions.map((action, index) => `${index + 1}. ${action}`)
+      : ['1. Start the captured session/run.', '2. Reproduce the issue with the listed bot and scene context.'];
+
+    return [
+      `# ${title}`,
+      '',
+      '## Summary',
+      markdownTable(
+        ['Field', 'Value'],
+        [
+          ['Severity', issue.severity],
+          ['Category', issue.category],
+          ['Confidence', issue.confidence !== undefined ? `${Math.round(issue.confidence * 100)}%` : 'Unknown'],
+          ['Session', record.request.runConfig.sessionId],
+          ['Game', record.request.gameProfile.gameName],
+          ['Game build', this.gameBuildLabel(record)],
+          ['Adapter', record.request.runConfig.adapterType],
+          ['Bot profile', botProfile],
+          ['Bot ID', issue.botId ?? 'Unknown'],
+          ['Game instance', issue.gameInstanceId ?? issue.instanceId ?? 'Unknown'],
+          ['Scene/area', issueLocation(issue)]
+        ]
+      ),
+      '## Steps To Reproduce',
+      steps.join('\n'),
+      '',
+      '## Expected Behavior',
+      issue.expectedBehavior ?? 'Not specified',
+      '',
+      '## Actual Behavior',
+      issue.actualBehavior ?? issue.description ?? 'Not specified',
+      '',
+      '## Evidence',
+      evidencePaths.length > 0
+        ? evidencePaths.map((path) => `- ${path}`).join('\n')
+        : '- No screenshots or video paths captured',
+      '',
+      '## State Summary',
+      fencedMarkdown(issue.stateSummary),
+      '',
+      '## Last Actions',
+      issue.lastActions.length > 0
+        ? issue.lastActions.map((action, index) => `${index + 1}. ${action}`).join('\n')
+        : 'No actions captured',
+      '',
+      '## Raw Evidence',
+      fencedMarkdown(JSON.stringify(issue.rawEvidence ?? issue, null, 2), 'json'),
+      ''
+    ].join('\n');
+  }
+
+  private gameBuildLabel(record: SimulationSessionRecord): string {
+    return [
+      `version ${record.request.gameProfile.version}`,
+      record.request.gameProfile.buildId ? `build ${record.request.gameProfile.buildId}` : undefined
+    ].filter((value): value is string => Boolean(value)).join(', ');
   }
 
   async compareSessions(oldSessionId: string, newSessionId: string): Promise<ComparisonReportResult> {
@@ -1774,6 +2138,54 @@ export class SimulationService {
       clearTimeout(record.startupTimer);
       record.startupTimer = undefined;
     }
+  }
+
+  private shutdownSessionRecord(
+    record: SimulationSessionRecord,
+    reason: string
+  ): SimulationSessionStatusSnapshot {
+    const sessionId = record.request.runConfig.sessionId;
+    const terminalBotStatuses = new Set(['blocked', 'completed', 'failed', 'stopped']);
+    const wasStopped = record.status === 'stopped';
+
+    this.clearSessionTimer(sessionId);
+    record.botManager.stopAll();
+
+    if (!wasStopped) {
+      record.status = 'stopped';
+      record.stoppedAt = record.stoppedAt ?? this.now();
+      record.logs.push(this.createLog(sessionId, 'warn', `Graceful shutdown preserved partial session: ${reason}.`));
+      record.structuredLogger.logSession('manual_stop', {
+        scope: 'session',
+        reason
+      });
+    } else {
+      record.stoppedAt = record.stoppedAt ?? this.now();
+    }
+
+    record.botStatuses = record.botStatuses.map((bot) => {
+      if (terminalBotStatuses.has(bot.status)) {
+        return bot;
+      }
+
+      return {
+        ...bot,
+        status: 'stopped',
+        progressState: `Stopped during graceful shutdown: ${reason}`,
+        message: `Stopped during graceful shutdown: ${reason}`
+      };
+    });
+    record.instanceStatuses = record.instanceStatuses.map((instance) => ({
+      ...instance,
+      status: 'stopped',
+      lastHeartbeat: this.now()
+    }));
+    record.label = statusLabel(record);
+    this.logSessionStop(record, reason);
+    this.stopVideoEvidence(record);
+    this.writeStructuredReports(record);
+
+    return this.snapshotFor(record);
   }
 
   private captureScreenshotEvidence(

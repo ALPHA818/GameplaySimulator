@@ -13,6 +13,11 @@ import type {
   OpenLogsResult,
   OpenEvidenceResult,
   ComparisonReportResult,
+  GitHubIssueExportRequest,
+  GitHubIssueExportPreviewResult,
+  GitHubIssueMarkdownExportResult,
+  GitHubIssuePostRequest,
+  GitHubIssuePostResult,
   ContentCoverageSummary,
   SimulationBotStatus,
   SimulationSessionCreateResult,
@@ -79,7 +84,13 @@ const api = {
     openLogs: (sessionId: string) =>
       ipcRenderer.invoke('simulation:openLogs', sessionId) as Promise<OpenLogsResult>,
     compareSessions: (oldSessionId: string, newSessionId: string) =>
-      ipcRenderer.invoke('simulation:compareSessions', oldSessionId, newSessionId) as Promise<ComparisonReportResult>
+      ipcRenderer.invoke('simulation:compareSessions', oldSessionId, newSessionId) as Promise<ComparisonReportResult>,
+    previewGitHubIssueExport: (payload: GitHubIssueExportRequest) =>
+      ipcRenderer.invoke('simulation:previewGitHubIssueExport', payload) as Promise<GitHubIssueExportPreviewResult>,
+    exportGitHubIssueMarkdown: (payload: GitHubIssueExportRequest) =>
+      ipcRenderer.invoke('simulation:exportGitHubIssueMarkdown', payload) as Promise<GitHubIssueMarkdownExportResult>,
+    postGitHubIssues: (payload: GitHubIssuePostRequest) =>
+      ipcRenderer.invoke('simulation:postGitHubIssues', payload) as Promise<GitHubIssuePostResult>
   }
 };
 

@@ -1,7 +1,17 @@
-import type { DetectedIssue } from '@core/types';
-import { CheckCircle2, Copy, ExternalLink, Filter, Search, ShieldAlert, XCircle } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import type { DetectedIssue, Severity } from '@core/types';
+import type { GitHubIssueExportPreviewResult } from '../../../main/services/simulationService';
+import { CheckCircle2, Copy, Download, ExternalLink, Eye, Filter, Search, Send, XCircle } from 'lucide-react';
+import { type ChangeEvent, useEffect, useMemo, useState } from 'react';
+import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
+
+const severityOptions: Severity[] = ['info', 'warning', 'error', 'critical'];
+const severityRanks: Record<Severity, number> = {
+  info: 0,
+  warning: 1,
+  error: 2,
+  critical: 3
+};
 
 function issueId(issue: DetectedIssue): string {
   return issue.id ?? issue.issueId;
@@ -102,6 +112,7 @@ function EvidenceList({ issue, sessionId }: { issue: DetectedIssue; sessionId: s
 export function IssuesPage() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const issues = useSessionStore((state) => state.issues);
+  const runConfigs = useConfigStore((state) => state.runConfigs);
   const reviewedIssueIds = useSessionStore((state) => state.reviewedIssueIds);
   const falsePositiveIssueIds = useSessionStore((state) => state.falsePositiveIssueIds);
   const markIssueReviewed = useSessionStore((state) => state.markIssueReviewed);
@@ -113,11 +124,35 @@ export function IssuesPage() {
   const [query, setQuery] = useState('');
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [copyState, setCopyState] = useState('Copy');
+  const [exportSessionId, setExportSessionId] = useState('');
+  const [exportIssueOptions, setExportIssueOptions] = useState<DetectedIssue[]>([]);
+  const [selectedExportIssueIds, setSelectedExportIssueIds] = useState<string[]>([]);
+  const [minimumSeverity, setMinimumSeverity] = useState<Severity>('warning');
+  const [minimumConfidencePercent, setMinimumConfidencePercent] = useState('75');
+  const [githubOwner, setGithubOwner] = useState('');
+  const [githubRepo, setGithubRepo] = useState('');
+  const [githubToken, setGithubToken] = useState('');
+  const [useConfiguredToken, setUseConfiguredToken] = useState(false);
+  const [githubPreview, setGithubPreview] = useState<GitHubIssueExportPreviewResult | null>(null);
+  const [githubMessage, setGithubMessage] = useState('');
+  const [githubState, setGithubState] = useState<'ready' | 'loading' | 'error'>('ready');
 
   const severities = unique(issues.map((issue) => issue.severity));
   const botIds = unique(issues.map((issue) => issue.botId));
   const categories = unique(issues.map((issue) => issue.category));
   const scenes = unique(issues.map(issueScene));
+  const sessionOptions = useMemo(() => {
+    const options = runConfigs.map((config) => ({
+      sessionId: config.sessionId,
+      label: `${config.sessionId} (${config.gameProfilePath.replace('memory://game-profiles/', '')})`
+    }));
+
+    if (activeSessionId && !options.some((option) => option.sessionId === activeSessionId)) {
+      options.unshift({ sessionId: activeSessionId, label: `${activeSessionId} (active session)` });
+    }
+
+    return options;
+  }, [activeSessionId, runConfigs]);
   const filteredIssues = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
@@ -135,11 +170,201 @@ export function IssuesPage() {
   const selectedIssueKey = selectedIssue ? issueId(selectedIssue) : null;
   const selectedReviewed = selectedIssueKey ? reviewedIssueIds.includes(selectedIssueKey) : false;
   const selectedFalsePositive = selectedIssueKey ? falsePositiveIssueIds.includes(selectedIssueKey) : false;
+  const minimumConfidence = Math.max(0, Math.min(100, Number(minimumConfidencePercent) || 0)) / 100;
+  const eligibleExportIssues = useMemo(
+    () =>
+      exportIssueOptions.filter(
+        (issue) =>
+          severityRanks[issue.severity] >= severityRanks[minimumSeverity] &&
+          (issue.confidence ?? 0) >= minimumConfidence
+      ),
+    [exportIssueOptions, minimumConfidence, minimumSeverity]
+  );
+  const selectedEligibleCount = selectedExportIssueIds.filter((id) =>
+    eligibleExportIssues.some((issue) => issueId(issue) === id)
+  ).length;
+
+  useEffect(() => {
+    if (!exportSessionId) {
+      const fallbackSessionId = activeSessionId ?? sessionOptions[0]?.sessionId;
+
+      if (fallbackSessionId) {
+        setExportSessionId(fallbackSessionId);
+      }
+    }
+  }, [activeSessionId, exportSessionId, sessionOptions]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadExportIssues() {
+      if (!exportSessionId) {
+        setExportIssueOptions([]);
+        setSelectedExportIssueIds([]);
+        return;
+      }
+
+      try {
+        const loadedIssues =
+          exportSessionId === activeSessionId ? issues : await window.gameplaySimulator.simulation.getIssues(exportSessionId);
+
+        if (cancelled) {
+          return;
+        }
+
+        const loadedIds = loadedIssues.map(issueId);
+        setExportIssueOptions(loadedIssues);
+        setSelectedExportIssueIds((current) => {
+          const retained = current.filter((id) => loadedIds.includes(id));
+          return retained.length > 0 ? retained : loadedIds;
+        });
+        setGithubPreview(null);
+      } catch (error) {
+        if (!cancelled) {
+          setExportIssueOptions([]);
+          setSelectedExportIssueIds([]);
+          setGithubPreview(null);
+          setGithubState('error');
+          setGithubMessage(error instanceof Error ? error.message : 'Unable to load session issues.');
+        }
+      }
+    }
+
+    void loadExportIssues();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSessionId, exportSessionId, issues]);
 
   async function copySteps(issue: DetectedIssue) {
     await navigator.clipboard.writeText(reproductionSteps(issue));
     setCopyState('Copied');
     window.setTimeout(() => setCopyState('Copy'), 1400);
+  }
+
+  function githubExportPayload() {
+    return {
+      sessionId: exportSessionId,
+      issueIds: selectedExportIssueIds,
+      minimumSeverity,
+      minimumConfidence
+    };
+  }
+
+  function handleExportIssueSelection(event: ChangeEvent<HTMLSelectElement>) {
+    setSelectedExportIssueIds(Array.from(event.target.selectedOptions).map((option) => option.value));
+    setGithubPreview(null);
+  }
+
+  function selectEligibleExportIssues() {
+    setSelectedExportIssueIds(eligibleExportIssues.map(issueId));
+    setGithubPreview(null);
+  }
+
+  function validateGitHubExportSelection(): boolean {
+    if (!exportSessionId) {
+      setGithubState('error');
+      setGithubMessage('Select a session before exporting.');
+      return false;
+    }
+
+    if (selectedExportIssueIds.length === 0) {
+      setGithubState('error');
+      setGithubMessage('Select at least one issue.');
+      return false;
+    }
+
+    return true;
+  }
+
+  async function previewGitHubIssues() {
+    if (!validateGitHubExportSelection()) {
+      return;
+    }
+
+    setGithubState('loading');
+    setGithubMessage('Preparing GitHub issue preview...');
+
+    try {
+      const preview = await window.gameplaySimulator.simulation.previewGitHubIssueExport(githubExportPayload());
+      setGithubPreview(preview);
+      setGithubState('ready');
+      setGithubMessage(`${preview.issueCount} issue${preview.issueCount === 1 ? '' : 's'} matched the export filters.`);
+    } catch (error) {
+      setGithubState('error');
+      setGithubMessage(error instanceof Error ? error.message : 'Unable to preview GitHub issue export.');
+    }
+  }
+
+  async function exportGitHubMarkdown() {
+    if (!validateGitHubExportSelection()) {
+      return;
+    }
+
+    setGithubState('loading');
+    setGithubMessage('Exporting GitHub issue markdown...');
+
+    try {
+      const result = await window.gameplaySimulator.simulation.exportGitHubIssueMarkdown(githubExportPayload());
+      setGithubState('ready');
+      setGithubMessage(`${result.message} Index: ${result.indexPath}`);
+      if (!githubPreview) {
+        const preview = await window.gameplaySimulator.simulation.previewGitHubIssueExport(githubExportPayload());
+        setGithubPreview(preview);
+      }
+    } catch (error) {
+      setGithubState('error');
+      setGithubMessage(error instanceof Error ? error.message : 'Unable to export GitHub issue markdown.');
+    }
+  }
+
+  async function postGitHubIssues() {
+    if (!validateGitHubExportSelection()) {
+      return;
+    }
+
+    if (!githubOwner.trim() || !githubRepo.trim()) {
+      setGithubState('error');
+      setGithubMessage('GitHub owner and repository are required for posting.');
+      return;
+    }
+
+    if (!githubToken.trim() && !useConfiguredToken) {
+      setGithubState('error');
+      setGithubMessage('Provide a token or choose the configured backend token before posting.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Post selected issues to ${githubOwner.trim()}/${githubRepo.trim()}? This will create GitHub issues.`
+    );
+
+    if (!confirmed) {
+      setGithubState('ready');
+      setGithubMessage('Posting cancelled. No GitHub issues were created.');
+      return;
+    }
+
+    setGithubState('loading');
+    setGithubMessage('Posting GitHub issues...');
+
+    try {
+      const result = await window.gameplaySimulator.simulation.postGitHubIssues({
+        ...githubExportPayload(),
+        owner: githubOwner.trim(),
+        repo: githubRepo.trim(),
+        token: githubToken.trim() || undefined,
+        useConfiguredToken,
+        confirmed: true,
+        labels: []
+      });
+      setGithubState(result.failed.length > 0 ? 'error' : 'ready');
+      setGithubMessage(result.message);
+    } catch (error) {
+      setGithubState('error');
+      setGithubMessage(error instanceof Error ? error.message : 'Unable to post GitHub issues.');
+    }
   }
 
   return (
@@ -203,6 +428,166 @@ export function IssuesPage() {
             ))}
           </select>
         </label>
+      </section>
+
+      <section className="form-section" aria-label="GitHub issue export">
+        <div className="section-header-row">
+          <div>
+            <p className="eyebrow">GitHub export</p>
+            <h2>Issue Markdown</h2>
+          </div>
+          <span className="status-pill">
+            {selectedEligibleCount} selected · {eligibleExportIssues.length} eligible
+          </span>
+        </div>
+
+        <div className="field-grid">
+          <label className="field">
+            <span className="field__label">Session</span>
+            <select className="input" value={exportSessionId} onChange={(event) => setExportSessionId(event.target.value)}>
+              <option value="">Select session</option>
+              {sessionOptions.map((option) => (
+                <option value={option.sessionId} key={option.sessionId}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field">
+            <span className="field__label">Minimum Severity</span>
+            <select
+              className="input"
+              value={minimumSeverity}
+              onChange={(event) => {
+                setMinimumSeverity(event.target.value as Severity);
+                setGithubPreview(null);
+              }}
+            >
+              {severityOptions.map((item) => (
+                <option value={item} key={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field">
+            <span className="field__label">Minimum Confidence</span>
+            <input
+              className="input"
+              type="number"
+              min="0"
+              max="100"
+              value={minimumConfidencePercent}
+              onChange={(event) => {
+                setMinimumConfidencePercent(event.target.value);
+                setGithubPreview(null);
+              }}
+            />
+          </label>
+
+          <label className="field field--wide">
+            <span className="field__label">Issues</span>
+            <select
+              className="input input--multi"
+              multiple
+              value={selectedExportIssueIds}
+              onChange={handleExportIssueSelection}
+            >
+              {exportIssueOptions.map((issue) => (
+                <option value={issueId(issue)} key={issueId(issue)}>
+                  {issue.severity} · {Math.round((issue.confidence ?? 0) * 100)}% · {issue.title}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="form-actions">
+          <button className="secondary-button" type="button" onClick={selectEligibleExportIssues}>
+            <CheckCircle2 size={16} aria-hidden="true" />
+            <span>Select Eligible</span>
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => {
+              setSelectedExportIssueIds([]);
+              setGithubPreview(null);
+            }}
+          >
+            <XCircle size={16} aria-hidden="true" />
+            <span>Clear</span>
+          </button>
+          <button className="secondary-button" type="button" onClick={() => void previewGitHubIssues()}>
+            <Eye size={16} aria-hidden="true" />
+            <span>Preview</span>
+          </button>
+          <button className="primary-button" type="button" onClick={() => void exportGitHubMarkdown()}>
+            <Download size={16} aria-hidden="true" />
+            <span>Export Markdown</span>
+          </button>
+        </div>
+
+        {githubMessage ? <div className={`inline-notice inline-notice--${githubState}`}>{githubMessage}</div> : null}
+
+        {githubPreview ? (
+          <section className="detail-section">
+            <div className="section-header-row">
+              <div>
+                <p className="eyebrow">Preview</p>
+                <h2>GitHub Issue Body</h2>
+              </div>
+              <span className="status-pill">{githubPreview.issueCount} issue bodies</span>
+            </div>
+            <pre className="code-block code-block--tall">{githubPreview.combinedMarkdown}</pre>
+          </section>
+        ) : null}
+
+        <div className="field-grid">
+          <label className="field">
+            <span className="field__label">Owner</span>
+            <input className="input" value={githubOwner} onChange={(event) => setGithubOwner(event.target.value)} />
+          </label>
+
+          <label className="field">
+            <span className="field__label">Repository</span>
+            <input className="input" value={githubRepo} onChange={(event) => setGithubRepo(event.target.value)} />
+          </label>
+
+          <label className="field">
+            <span className="field__label">Token</span>
+            <input
+              className="input"
+              type="password"
+              value={githubToken}
+              disabled={useConfiguredToken}
+              onChange={(event) => setGithubToken(event.target.value)}
+            />
+          </label>
+
+          <label className="toggle-row field--wide">
+            <input
+              type="checkbox"
+              checked={useConfiguredToken}
+              onChange={(event) => setUseConfiguredToken(event.target.checked)}
+            />
+            <span>Use configured backend token</span>
+          </label>
+        </div>
+
+        <div className="form-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={githubState === 'loading'}
+            onClick={() => void postGitHubIssues()}
+          >
+            <Send size={16} aria-hidden="true" />
+            <span>Post to GitHub</span>
+          </button>
+        </div>
       </section>
 
       <section className="review-layout">

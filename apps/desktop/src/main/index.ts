@@ -57,6 +57,10 @@ app.whenReady().then(() => {
   });
 });
 
+app.on('before-quit', () => {
+  simulationService.shutdownAllSessions('app_before_quit');
+});
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();

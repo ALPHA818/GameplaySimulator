@@ -61,4 +61,13 @@ export function registerSimulationIpc(service: SimulationService): void {
   ipcMain.handle('simulation:compareSessions', (_event, oldSessionId: unknown, newSessionId: unknown) =>
     service.compareSessions(SessionIdSchema.parse(oldSessionId), SessionIdSchema.parse(newSessionId))
   );
+  ipcMain.handle('simulation:previewGitHubIssueExport', (_event, payload: unknown) =>
+    service.previewGitHubIssueExport(payload)
+  );
+  ipcMain.handle('simulation:exportGitHubIssueMarkdown', (_event, payload: unknown) =>
+    service.exportGitHubIssueMarkdown(payload)
+  );
+  ipcMain.handle('simulation:postGitHubIssues', (_event, payload: unknown) =>
+    service.postGitHubIssues(payload)
+  );
 }
