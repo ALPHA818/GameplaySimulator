@@ -1,5 +1,10 @@
 import type { BotPoolConfig, BotProfile, GameProfile, SimulationRunConfig } from '@core/types';
 import { defaultBotProfiles } from '@core/bot/defaultBotProfiles';
+import {
+  AdvancedIntelligenceConfigSchema,
+  defaultAdvancedIntelligenceConfig,
+  type AdvancedIntelligenceConfig
+} from '@core/config/advancedIntelligenceConfig';
 import { create } from 'zustand';
 import type { PageId } from '../routes';
 
@@ -10,10 +15,12 @@ interface ConfigState {
   botProfiles: BotProfile[];
   runConfigs: SimulationRunConfig[];
   lastValidatedRunConfig: SimulationRunConfig | null;
+  advancedIntelligence: AdvancedIntelligenceConfig;
   navigate: (page: PageId) => void;
   openGameProfileEditor: (gameId?: string) => void;
   saveGameProfile: (profile: GameProfile) => void;
   saveRunConfig: (config: SimulationRunConfig) => void;
+  updateAdvancedIntelligence: (patch: Partial<AdvancedIntelligenceConfig>) => void;
 }
 
 const seededGameProfiles: GameProfile[] = [
@@ -41,6 +48,12 @@ const seededGameProfiles: GameProfile[] = [
     testingTargets: [],
     progressSignals: [],
     failureSignals: [],
+    saveIsolation: {
+      mode: 'temp-directory',
+      workingSaveRoot: 'runs/sample-browser-game/saves',
+      cleanupTempSaves: false,
+      preserveBotSaves: true
+    },
     knownContent: {
       scenes: ['Boot', 'Main Menu', 'Start Area', 'Traversal Loop', 'Interaction Check', 'Results Review'],
       levels: ['Level 1', 'Level 2'],
@@ -99,6 +112,7 @@ export const useConfigStore = create<ConfigState>((set) => ({
   botProfiles: seededBotProfiles,
   runConfigs: [],
   lastValidatedRunConfig: null,
+  advancedIntelligence: defaultAdvancedIntelligenceConfig,
   navigate: (currentPage) => set({ currentPage }),
   openGameProfileEditor: (gameId) =>
     set({ currentPage: 'gameProfileEditor', editingGameId: gameId ?? null }),
@@ -120,5 +134,12 @@ export const useConfigStore = create<ConfigState>((set) => ({
     set((state) => ({
       runConfigs: [config, ...state.runConfigs],
       lastValidatedRunConfig: config
+    })),
+  updateAdvancedIntelligence: (patch) =>
+    set((state) => ({
+      advancedIntelligence: AdvancedIntelligenceConfigSchema.parse({
+        ...state.advancedIntelligence,
+        ...patch
+      })
     }))
 }));

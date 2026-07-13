@@ -1,163 +1,143 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { once } from 'node:events';
-import type { AddressInfo } from 'node:net';
+import type { GameAction } from '@core/types';
+import { IssueDetectionRunner } from '@core/detection/IssueDetectors';
 import { describe, expect, it } from 'vitest';
+import { startInstrumentedTestServer } from '../../../../examples/instrumented-test-server/src/server';
 import { InstrumentedAdapter } from './InstrumentedAdapter';
 
-function sendJson(response: ServerResponse, payload: unknown): void {
-  response.writeHead(200, { 'content-type': 'application/json' });
-  response.end(JSON.stringify(payload));
-}
-
-async function readBody(request: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-
-  for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-}
-
-async function withInstrumentationServer<T>(test: (endpoint: string) => Promise<T>): Promise<T> {
-  const server = createServer(async (request, response) => {
-    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-
-    if (request.method === 'GET' && url.pathname === '/gsi/v1/health') {
-      sendJson(response, {
-        ok: true,
-        gameId: 'instrumented-game',
-        gameName: 'Instrumented Game',
-        instanceId: 'game-instance-001',
-        protocolVersion: '0.1.0',
-        engine: { type: 'custom' },
-        capabilities: {
-          stateRead: true,
-          directActions: true,
-          events: true,
-          logs: true
-        }
-      });
-      return;
-    }
-
-    if (request.method === 'GET' && url.pathname === '/gsi/v1/state') {
-      sendJson(response, {
-        gameId: 'instrumented-game',
-        instanceId: url.searchParams.get('instanceId') ?? 'game-instance-001',
-        sessionId: 'sdk-test-session',
-        scene: 'TestScene',
-        tick: 42,
-        timestamp: '2026-07-02T20:00:00.000Z',
-        playerPosition: {
-          playerId: url.searchParams.get('botId') ?? 'bot',
-          sceneId: 'TestScene',
-          x: 10,
-          y: 20,
-          z: 0
-        },
-        uiState: {
-          screenId: 'hud',
-          openMenus: [],
-          modalStack: [],
-          metadata: {}
-        },
-        performance: {
-          fps: 60,
-          frameTimeMs: 16.6,
-          metadata: {}
-        },
-        inventory: [{ itemId: 'potion', quantity: 2, metadata: {} }],
-        quests: [{ questId: 'intro', status: 'active', objectives: ['Start'], metadata: {} }],
-        state: { hp: 100 },
-        logs: ['state read']
-      });
-      return;
-    }
-
-    if (request.method === 'GET' && url.pathname === '/gsi/v1/actions') {
-      sendJson(response, [
-        {
-          actionType: 'move-to',
-          label: 'Move To',
-          description: 'Move to a point.',
-          metadata: {}
-        }
-      ]);
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/gsi/v1/actions') {
-      const body = (await readBody(request)) as { requestId: string };
-
-      sendJson(response, {
-        requestId: body.requestId,
-        status: 'succeeded',
-        message: 'Action accepted.',
-        metadata: {}
-      });
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/gsi/v1/events') {
-      await readBody(request);
-      sendJson(response, { ok: true });
-      return;
-    }
-
-    response.writeHead(404, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ message: 'Not found' }));
-  });
-
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-
-  try {
-    const address = server.address() as AddressInfo;
-    return await test(`http://127.0.0.1:${address.port}`);
-  } finally {
-    server.close();
-    await once(server, 'close');
-  }
+function action(type: string, actionId = `${type}-001`): GameAction {
+  return {
+    actionId,
+    sessionId: 'sdk-test-session',
+    gameInstanceId: 'game-instance-001',
+    botId: 'explorer-001',
+    type,
+    payload: {},
+    requestedAt: '2026-07-02T20:00:00.000Z'
+  };
 }
 
 describe('InstrumentedAdapter', () => {
-  it('connects to a local endpoint and reads structured state', async () => {
-    await withInstrumentationServer(async (endpoint) => {
-      const adapter = new InstrumentedAdapter({ instrumentationEndpoint: endpoint });
+  it('connects to the example fake game server and reads structured state', async () => {
+    const server = await startInstrumentedTestServer({ port: 0 });
+
+    try {
+      const adapter = new InstrumentedAdapter({ instrumentationEndpoint: server.endpoint });
       const instance = await adapter.launchInstance({
         instanceId: 'game-instance-001',
-        gameProfileId: 'instrumented-game',
+        gameProfileId: 'fake-instrumented-game',
         launch: { platform: 'linux', arguments: [] },
         maxBots: 2,
         environment: {}
       });
 
-      expect(instance.metadata.instrumentationHealth).toMatchObject({ ok: true });
+      expect(instance.metadata.instrumentationHealth).toMatchObject({
+        ok: true,
+        gameId: 'fake-instrumented-game'
+      });
 
       const state = await adapter.getState('game-instance-001', 'explorer-001');
       const actions = await adapter.getAvailableActions('game-instance-001', 'explorer-001');
-      const result = await adapter.performAction('game-instance-001', 'explorer-001', {
-        actionId: 'action-001',
-        sessionId: 'sdk-test-session',
-        gameInstanceId: 'game-instance-001',
-        botId: 'explorer-001',
-        type: 'move-to',
-        payload: { x: 10, y: 20 },
-        requestedAt: '2026-07-02T20:00:00.000Z'
-      });
 
-      expect(state?.scene).toBe('TestScene');
+      expect(state?.scene).toBe('Start Area');
       expect(state?.state).toMatchObject({
-        hp: 100,
+        currency: 25,
         playerPosition: {
-          x: 10,
-          y: 20
+          x: 0,
+          y: 0
         }
       });
       expect(state?.metrics.fps).toBe(60);
-      expect(actions[0].actionType).toBe('move-to');
-      expect(result.status).toBe('succeeded');
-    });
+      expect(actions.map((item) => item.actionType)).toEqual(
+        expect.arrayContaining(['move-forward', 'buy-item', 'trigger-crash'])
+      );
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('mutates fake game state through direct HTTP actions', async () => {
+    const server = await startInstrumentedTestServer({ port: 0 });
+
+    try {
+      const adapter = new InstrumentedAdapter({ instrumentationEndpoint: server.endpoint });
+      await adapter.launchInstance({
+        instanceId: 'game-instance-001',
+        gameProfileId: 'fake-instrumented-game',
+        launch: { platform: 'linux', arguments: [] },
+        maxBots: 2,
+        environment: {}
+      });
+
+      const firstState = await adapter.getState('game-instance-001', 'explorer-001');
+      const moveResult = await adapter.performAction('game-instance-001', 'explorer-001', action('move-forward'));
+      const buyResult = await adapter.performAction('game-instance-001', 'explorer-001', action('buy-item'));
+      const hiddenResult = await adapter.performAction(
+        'game-instance-001',
+        'explorer-001',
+        action('enter-hidden-area')
+      );
+      const nextState = await adapter.getState('game-instance-001', 'explorer-001');
+
+      expect(moveResult.status).toBe('succeeded');
+      expect(buyResult.status).toBe('succeeded');
+      expect(hiddenResult.status).toBe('succeeded');
+      expect(nextState?.state.playerPosition).toMatchObject({ y: 12 });
+      expect(nextState?.state.currency).toBe(20);
+      expect(nextState?.scene).toBe('Hidden Grotto');
+      expect(nextState?.state.inventory).toEqual(
+        expect.arrayContaining([expect.objectContaining({ itemId: 'health-potion', quantity: 1 })])
+      );
+      expect(nextState?.tick).toBeGreaterThan(firstState?.tick ?? 0);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('exposes fake issue states that the detector pipeline can report', async () => {
+    const server = await startInstrumentedTestServer({ port: 0 });
+
+    try {
+      const adapter = new InstrumentedAdapter({ instrumentationEndpoint: server.endpoint });
+      const detector = new IssueDetectionRunner();
+      await adapter.launchInstance({
+        instanceId: 'game-instance-001',
+        gameProfileId: 'fake-instrumented-game',
+        launch: { platform: 'linux', arguments: [] },
+        maxBots: 2,
+        environment: {}
+      });
+
+      const beforeCrash = await adapter.getState('game-instance-001', 'explorer-001');
+      const crashAction = action('trigger-crash');
+      const crashResult = await adapter.performAction('game-instance-001', 'explorer-001', crashAction);
+      const crashedState = await adapter.getState('game-instance-001', 'explorer-001');
+      const issues = detector.detect({
+        sessionId: 'sdk-test-session',
+        botId: 'explorer-001',
+        instanceId: 'game-instance-001',
+        timestamp: '2026-07-02T20:00:01.000Z',
+        memory: {
+          previousState: beforeCrash,
+          lastState: crashedState,
+          lastAction: crashAction,
+          lastResult: crashResult,
+          recentActionTypes: ['trigger-crash']
+        }
+      });
+
+      expect(crashResult.status).toBe('succeeded');
+      expect(crashedState?.state.processStatus).toBe('crashed');
+      expect(issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            category: 'crash',
+            severity: 'critical',
+            title: 'Game process crashed'
+          })
+        ])
+      );
+    } finally {
+      await server.stop();
+    }
   });
 });

@@ -1,7 +1,11 @@
 import type { DetectedIssue, Severity } from '@core/types';
-import type { GitHubIssueExportPreviewResult } from '../../../main/services/simulationService';
+import type {
+  GitHubIssueExportPreviewResult,
+  PersistedSessionMetadata
+} from '../../../main/services/simulationService';
 import { CheckCircle2, Copy, Download, ExternalLink, Eye, Filter, Search, Send, XCircle } from 'lucide-react';
 import { type ChangeEvent, useEffect, useMemo, useState } from 'react';
+import { FieldLabel } from '../components/FormFields';
 import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
 
@@ -94,15 +98,43 @@ function EvidenceList({ issue, sessionId }: { issue: DetectedIssue; sessionId: s
     }
   }
 
+  function isFallbackEvidence(path: string): boolean {
+    const raw = issue.rawEvidence;
+    const rawRecord = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+      ? raw as Record<string, unknown>
+      : {};
+    const screenshotEvidence = typeof rawRecord.screenshotEvidence === 'object' && rawRecord.screenshotEvidence !== null
+      ? rawRecord.screenshotEvidence as Record<string, unknown>
+      : {};
+
+    return (
+      (screenshotEvidence.path === path && screenshotEvidence.fallback === true) ||
+      path.includes('/fallback-') ||
+      path.endsWith('.svg')
+    );
+  }
+
   return (
     <div className="evidence-list">
       {evidence.map((path) => (
         <div className="evidence-row" key={path}>
-          <span>{path}</span>
-          <button className="secondary-button" type="button" onClick={() => void openEvidence(path)}>
-            <ExternalLink size={16} aria-hidden="true" />
-            <span>Open</span>
-          </button>
+          <span className="evidence-row__path">
+            <FieldLabel label="Evidence path" />
+            <span>{path}</span>
+            {isFallbackEvidence(path) ? (
+              <small>
+                <FieldLabel label="Fallback evidence" />
+                <span>Fallback/debug evidence</span>
+              </small>
+            ) : null}
+          </span>
+          <span className="evidence-row__action">
+            <FieldLabel label="Open evidence" />
+            <button className="secondary-button" type="button" onClick={() => void openEvidence(path)}>
+              <ExternalLink size={16} aria-hidden="true" />
+              <span>Open</span>
+            </button>
+          </span>
         </div>
       ))}
     </div>
@@ -111,7 +143,9 @@ function EvidenceList({ issue, sessionId }: { issue: DetectedIssue; sessionId: s
 
 export function IssuesPage() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
-  const issues = useSessionStore((state) => state.issues);
+  const activeIssues = useSessionStore((state) => state.issues);
+  const preferredReviewSessionId = useSessionStore((state) => state.reviewSessionId);
+  const setPreferredReviewSessionId = useSessionStore((state) => state.setReviewSessionId);
   const runConfigs = useConfigStore((state) => state.runConfigs);
   const reviewedIssueIds = useSessionStore((state) => state.reviewedIssueIds);
   const falsePositiveIssueIds = useSessionStore((state) => state.falsePositiveIssueIds);
@@ -136,27 +170,41 @@ export function IssuesPage() {
   const [githubPreview, setGithubPreview] = useState<GitHubIssueExportPreviewResult | null>(null);
   const [githubMessage, setGithubMessage] = useState('');
   const [githubState, setGithubState] = useState<'ready' | 'loading' | 'error'>('ready');
+  const [availableSessions, setAvailableSessions] = useState<PersistedSessionMetadata[]>([]);
+  const [reviewSessionId, setReviewSessionSelection] = useState(preferredReviewSessionId ?? activeSessionId ?? '');
+  const [reviewIssues, setReviewIssues] = useState<DetectedIssue[]>(activeIssues);
+  const [reviewLoadMessage, setReviewLoadMessage] = useState('');
+  const [reviewLoadState, setReviewLoadState] = useState<'ready' | 'loading' | 'error'>('ready');
 
-  const severities = unique(issues.map((issue) => issue.severity));
-  const botIds = unique(issues.map((issue) => issue.botId));
-  const categories = unique(issues.map((issue) => issue.category));
-  const scenes = unique(issues.map(issueScene));
+  const severities = unique(reviewIssues.map((issue) => issue.severity));
+  const botIds = unique(reviewIssues.map((issue) => issue.botId));
+  const categories = unique(reviewIssues.map((issue) => issue.category));
+  const scenes = unique(reviewIssues.map(issueScene));
   const sessionOptions = useMemo(() => {
-    const options = runConfigs.map((config) => ({
-      sessionId: config.sessionId,
-      label: `${config.sessionId} (${config.gameProfilePath.replace('memory://game-profiles/', '')})`
+    const options = availableSessions.map((session) => ({
+      sessionId: session.sessionId,
+      label: `${session.sessionId} (${session.gameName}${session.buildId ? ` ${session.buildId}` : ''})`
     }));
+
+    for (const config of runConfigs) {
+      if (!options.some((option) => option.sessionId === config.sessionId)) {
+        options.push({
+          sessionId: config.sessionId,
+          label: `${config.sessionId} (${config.gameProfilePath.replace('memory://game-profiles/', '')})`
+        });
+      }
+    }
 
     if (activeSessionId && !options.some((option) => option.sessionId === activeSessionId)) {
       options.unshift({ sessionId: activeSessionId, label: `${activeSessionId} (active session)` });
     }
 
     return options;
-  }, [activeSessionId, runConfigs]);
+  }, [activeSessionId, availableSessions, runConfigs]);
   const filteredIssues = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
-    return issues.filter((issue) => {
+    return reviewIssues.filter((issue) => {
       if (severity !== 'all' && issue.severity !== severity) return false;
       if (botId !== 'all' && issue.botId !== botId) return false;
       if (category !== 'all' && issue.category !== category) return false;
@@ -164,7 +212,7 @@ export function IssuesPage() {
       if (normalizedQuery && !searchableIssueText(issue).includes(normalizedQuery)) return false;
       return true;
     });
-  }, [botId, category, issues, query, scene, severity]);
+  }, [botId, category, query, reviewIssues, scene, severity]);
   const selectedIssue =
     filteredIssues.find((issue) => issueId(issue) === selectedIssueId) ?? filteredIssues[0] ?? null;
   const selectedIssueKey = selectedIssue ? issueId(selectedIssue) : null;
@@ -184,15 +232,112 @@ export function IssuesPage() {
     eligibleExportIssues.some((issue) => issueId(issue) === id)
   ).length;
 
+  function chooseReviewSession(sessionId: string) {
+    setReviewSessionSelection(sessionId);
+    setPreferredReviewSessionId(sessionId || null);
+    setExportSessionId(sessionId);
+    setSelectedIssueId(null);
+    setReviewLoadMessage('');
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSessions() {
+      try {
+        const sessions = await window.gameplaySimulator.simulation.listSessions();
+
+        if (!cancelled) {
+          setAvailableSessions(sessions);
+        }
+      } catch {
+        if (!cancelled) {
+          setAvailableSessions([]);
+        }
+      }
+    }
+
+    void loadSessions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const fallbackSessionId = preferredReviewSessionId ?? activeSessionId ?? sessionOptions[0]?.sessionId ?? '';
+
+    if (fallbackSessionId && reviewSessionId !== fallbackSessionId && !reviewSessionId) {
+      setReviewSessionSelection(fallbackSessionId);
+    }
+  }, [activeSessionId, preferredReviewSessionId, reviewSessionId, sessionOptions]);
+
+  useEffect(() => {
+    if (preferredReviewSessionId && preferredReviewSessionId !== reviewSessionId) {
+      setReviewSessionSelection(preferredReviewSessionId);
+    }
+  }, [preferredReviewSessionId, reviewSessionId]);
+
+  useEffect(() => {
+    if (preferredReviewSessionId) {
+      setExportSessionId(preferredReviewSessionId);
+    }
+  }, [preferredReviewSessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadReviewIssues() {
+      if (!reviewSessionId) {
+        setReviewIssues(activeIssues);
+        setReviewLoadState('ready');
+        setReviewLoadMessage(activeIssues.length > 0 ? 'Showing active session issues.' : '');
+        return;
+      }
+
+      if (reviewSessionId === activeSessionId) {
+        setReviewIssues(activeIssues);
+        setReviewLoadState('ready');
+        setReviewLoadMessage(`${activeIssues.length} issue${activeIssues.length === 1 ? '' : 's'} loaded from the active session.`);
+        return;
+      }
+
+      setReviewLoadState('loading');
+      setReviewLoadMessage('Loading saved session issues...');
+
+      try {
+        const loadedIssues = await window.gameplaySimulator.simulation.getIssues(reviewSessionId);
+
+        if (!cancelled) {
+          setReviewIssues(loadedIssues);
+          setReviewLoadState('ready');
+          setReviewLoadMessage(`${loadedIssues.length} issue${loadedIssues.length === 1 ? '' : 's'} loaded from the saved session.`);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setReviewIssues([]);
+          setReviewLoadState('error');
+          setReviewLoadMessage(error instanceof Error ? error.message : 'Unable to load saved session issues.');
+        }
+      }
+    }
+
+    void loadReviewIssues();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeIssues, activeSessionId, reviewSessionId]);
+
   useEffect(() => {
     if (!exportSessionId) {
-      const fallbackSessionId = activeSessionId ?? sessionOptions[0]?.sessionId;
+      const fallbackSessionId = reviewSessionId || activeSessionId || sessionOptions[0]?.sessionId;
 
       if (fallbackSessionId) {
         setExportSessionId(fallbackSessionId);
       }
     }
-  }, [activeSessionId, exportSessionId, sessionOptions]);
+  }, [activeSessionId, exportSessionId, reviewSessionId, sessionOptions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -206,7 +351,11 @@ export function IssuesPage() {
 
       try {
         const loadedIssues =
-          exportSessionId === activeSessionId ? issues : await window.gameplaySimulator.simulation.getIssues(exportSessionId);
+          exportSessionId === reviewSessionId
+            ? reviewIssues
+            : exportSessionId === activeSessionId && activeIssues.length > 0
+              ? activeIssues
+              : await window.gameplaySimulator.simulation.getIssues(exportSessionId);
 
         if (cancelled) {
           return;
@@ -235,7 +384,7 @@ export function IssuesPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeSessionId, exportSessionId, issues]);
+  }, [activeIssues, activeSessionId, exportSessionId, reviewIssues, reviewSessionId]);
 
   async function copySteps(issue: DetectedIssue) {
     await navigator.clipboard.writeText(reproductionSteps(issue));
@@ -378,18 +527,42 @@ export function IssuesPage() {
       </div>
 
       <section className="filter-surface" aria-label="Issue filters">
-        <label className="filter-field filter-field--search">
+        <div className="filter-field">
+          <FieldLabel label="Open Old Session" htmlFor="issue-review-session" />
+          <select
+            id="issue-review-session"
+            className="input"
+            value={reviewSessionId}
+            onChange={(event) => chooseReviewSession(event.target.value)}
+          >
+            <option value="">Active session</option>
+            {sessionOptions.map((option) => (
+              <option value={option.sessionId} key={option.sessionId}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="filter-field filter-field--search">
+          <FieldLabel label="Search" htmlFor="issue-search" />
           <Search size={16} aria-hidden="true" />
           <input
+            id="issue-search"
             className="input"
             value={query}
             placeholder="Search issues"
             onChange={(event) => setQuery(event.target.value)}
           />
-        </label>
-        <label className="filter-field">
+        </div>
+        <div className="filter-field">
+          <FieldLabel label="Severity" htmlFor="issue-severity-filter" />
           <Filter size={16} aria-hidden="true" />
-          <select className="input" value={severity} onChange={(event) => setSeverity(event.target.value)}>
+          <select
+            id="issue-severity-filter"
+            className="input"
+            value={severity}
+            onChange={(event) => setSeverity(event.target.value)}
+          >
             <option value="all">All severities</option>
             {severities.map((item) => (
               <option value={item} key={item}>
@@ -397,9 +570,10 @@ export function IssuesPage() {
               </option>
             ))}
           </select>
-        </label>
-        <label className="filter-field">
-          <select className="input" value={botId} onChange={(event) => setBotId(event.target.value)}>
+        </div>
+        <div className="filter-field">
+          <FieldLabel label="Bot" htmlFor="issue-bot-filter" />
+          <select id="issue-bot-filter" className="input" value={botId} onChange={(event) => setBotId(event.target.value)}>
             <option value="all">All bots</option>
             {botIds.map((item) => (
               <option value={item} key={item}>
@@ -407,9 +581,15 @@ export function IssuesPage() {
               </option>
             ))}
           </select>
-        </label>
-        <label className="filter-field">
-          <select className="input" value={category} onChange={(event) => setCategory(event.target.value)}>
+        </div>
+        <div className="filter-field">
+          <FieldLabel label="Category" htmlFor="issue-category-filter" />
+          <select
+            id="issue-category-filter"
+            className="input"
+            value={category}
+            onChange={(event) => setCategory(event.target.value)}
+          >
             <option value="all">All categories</option>
             {categories.map((item) => (
               <option value={item} key={item}>
@@ -417,9 +597,10 @@ export function IssuesPage() {
               </option>
             ))}
           </select>
-        </label>
-        <label className="filter-field">
-          <select className="input" value={scene} onChange={(event) => setScene(event.target.value)}>
+        </div>
+        <div className="filter-field">
+          <FieldLabel label="Scene" htmlFor="issue-scene-filter" />
+          <select id="issue-scene-filter" className="input" value={scene} onChange={(event) => setScene(event.target.value)}>
             <option value="all">All scenes</option>
             {scenes.map((item) => (
               <option value={item} key={item}>
@@ -427,8 +608,10 @@ export function IssuesPage() {
               </option>
             ))}
           </select>
-        </label>
+        </div>
       </section>
+
+      {reviewLoadMessage ? <div className={`inline-notice inline-notice--${reviewLoadState}`}>{reviewLoadMessage}</div> : null}
 
       <section className="form-section" aria-label="GitHub issue export">
         <div className="section-header-row">
@@ -442,9 +625,14 @@ export function IssuesPage() {
         </div>
 
         <div className="field-grid">
-          <label className="field">
-            <span className="field__label">Session</span>
-            <select className="input" value={exportSessionId} onChange={(event) => setExportSessionId(event.target.value)}>
+          <div className="field">
+            <FieldLabel label="Session" htmlFor="github-export-session" />
+            <select
+              id="github-export-session"
+              className="input"
+              value={exportSessionId}
+              onChange={(event) => setExportSessionId(event.target.value)}
+            >
               <option value="">Select session</option>
               {sessionOptions.map((option) => (
                 <option value={option.sessionId} key={option.sessionId}>
@@ -452,11 +640,12 @@ export function IssuesPage() {
                 </option>
               ))}
             </select>
-          </label>
+          </div>
 
-          <label className="field">
-            <span className="field__label">Minimum Severity</span>
+          <div className="field">
+            <FieldLabel label="Minimum Severity" htmlFor="github-minimum-severity" />
             <select
+              id="github-minimum-severity"
               className="input"
               value={minimumSeverity}
               onChange={(event) => {
@@ -470,11 +659,12 @@ export function IssuesPage() {
                 </option>
               ))}
             </select>
-          </label>
+          </div>
 
-          <label className="field">
-            <span className="field__label">Minimum Confidence</span>
+          <div className="field">
+            <FieldLabel label="Minimum Confidence" htmlFor="github-minimum-confidence" />
             <input
+              id="github-minimum-confidence"
               className="input"
               type="number"
               min="0"
@@ -485,11 +675,12 @@ export function IssuesPage() {
                 setGithubPreview(null);
               }}
             />
-          </label>
+          </div>
 
-          <label className="field field--wide">
-            <span className="field__label">Issues</span>
+          <div className="field field--wide">
+            <FieldLabel label="Issues" htmlFor="github-export-issues" />
             <select
+              id="github-export-issues"
               className="input input--multi"
               multiple
               value={selectedExportIssueIds}
@@ -501,7 +692,7 @@ export function IssuesPage() {
                 </option>
               ))}
             </select>
-          </label>
+          </div>
         </div>
 
         <div className="form-actions">
@@ -546,35 +737,37 @@ export function IssuesPage() {
         ) : null}
 
         <div className="field-grid">
-          <label className="field">
-            <span className="field__label">Owner</span>
-            <input className="input" value={githubOwner} onChange={(event) => setGithubOwner(event.target.value)} />
-          </label>
+          <div className="field">
+            <FieldLabel label="Owner" htmlFor="github-owner" />
+            <input id="github-owner" className="input" value={githubOwner} onChange={(event) => setGithubOwner(event.target.value)} />
+          </div>
 
-          <label className="field">
-            <span className="field__label">Repository</span>
-            <input className="input" value={githubRepo} onChange={(event) => setGithubRepo(event.target.value)} />
-          </label>
+          <div className="field">
+            <FieldLabel label="Repository" htmlFor="github-repository" />
+            <input id="github-repository" className="input" value={githubRepo} onChange={(event) => setGithubRepo(event.target.value)} />
+          </div>
 
-          <label className="field">
-            <span className="field__label">Token</span>
+          <div className="field">
+            <FieldLabel label="Token" htmlFor="github-token" />
             <input
+              id="github-token"
               className="input"
               type="password"
               value={githubToken}
               disabled={useConfiguredToken}
               onChange={(event) => setGithubToken(event.target.value)}
             />
-          </label>
+          </div>
 
-          <label className="toggle-row field--wide">
+          <div className="toggle-row field--wide">
             <input
+              id="github-use-configured-token"
               type="checkbox"
               checked={useConfiguredToken}
               onChange={(event) => setUseConfiguredToken(event.target.checked)}
             />
-            <span>Use configured backend token</span>
-          </label>
+            <FieldLabel label="Use configured backend token" htmlFor="github-use-configured-token" className="toggle-row__label" />
+          </div>
         </div>
 
         <div className="form-actions">
@@ -664,19 +857,19 @@ export function IssuesPage() {
 
               <div className="issue-meta-grid">
                 <div>
-                  <span>Category</span>
+                  <FieldLabel label="Category" />
                   <strong>{issueCategoryLabel(selectedIssue)}</strong>
                 </div>
                 <div>
-                  <span>Bot</span>
+                  <FieldLabel label="Bot" />
                   <strong>{selectedIssue.botId ?? 'None'}</strong>
                 </div>
                 <div>
-                  <span>Scene/area</span>
+                  <FieldLabel label="Scene/area" />
                   <strong>{issueScene(selectedIssue)}</strong>
                 </div>
                 <div>
-                  <span>Confidence</span>
+                  <FieldLabel label="Confidence" />
                   <strong>{selectedIssue.confidence !== undefined ? `${Math.round(selectedIssue.confidence * 100)}%` : 'Unknown'}</strong>
                 </div>
               </div>
@@ -711,7 +904,7 @@ export function IssuesPage() {
 
               <section className="detail-section">
                 <h2>Evidence</h2>
-                <EvidenceList issue={selectedIssue} sessionId={activeSessionId} />
+                <EvidenceList issue={selectedIssue} sessionId={reviewSessionId || activeSessionId} />
               </section>
 
               <section className="detail-section">

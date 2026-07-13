@@ -1,6 +1,7 @@
 import type { BotPoolConfig } from '@core/types';
 import { BookOpen, FileText, Pause, Play, RotateCw, Square, UserX, UsersRound } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { FieldLabel } from '../components/FormFields';
 import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
 
@@ -231,35 +232,35 @@ export function LiveSessionPage() {
 
         <div className="metric-grid metric-grid--session">
           <div className="metric-card">
-            <span>Build/version</span>
+            <FieldLabel label="Build/version" />
             <strong>{gameProfile ? `${gameProfile.version}${gameProfile.buildId ? ` / ${gameProfile.buildId}` : ''}` : 'None'}</strong>
           </div>
           <div className="metric-card">
-            <span>Adapter</span>
+            <FieldLabel label="Adapter" />
             <strong>{activeConfig?.adapterType ?? gameProfile?.adapter.type ?? 'None'}</strong>
           </div>
           <div className="metric-card">
-            <span>Runtime</span>
+            <FieldLabel label="Runtime" />
             <strong>{formatRuntime(lastSnapshot?.startedAt, lastSnapshot?.stoppedAt)}</strong>
           </div>
           <div className="metric-card">
-            <span>Total bots</span>
+            <FieldLabel label="Total bots" />
             <strong>{botStatuses.length}</strong>
           </div>
           <div className="metric-card">
-            <span>Running bots</span>
+            <FieldLabel label="Running bots" />
             <strong>{runningBots}</strong>
           </div>
           <div className="metric-card">
-            <span>Stopped bots</span>
+            <FieldLabel label="Stopped bots" />
             <strong>{stoppedBots}</strong>
           </div>
           <div className="metric-card">
-            <span>Stuck bots</span>
+            <FieldLabel label="Stuck bots" />
             <strong>{stuckBots}</strong>
           </div>
           <div className="metric-card">
-            <span>Issues found</span>
+            <FieldLabel label="Issues found" />
             <strong>{issues.length}</strong>
           </div>
         </div>
@@ -306,19 +307,19 @@ export function LiveSessionPage() {
 
         <div className="metric-grid metric-grid--session">
           <div className="metric-card">
-            <span>Known tested</span>
+            <FieldLabel label="Known tested" />
             <strong>{coverage ? `${coverage.testedKnown}/${coverage.totalKnown}` : '0/0'}</strong>
           </div>
           <div className="metric-card">
-            <span>Observed</span>
+            <FieldLabel label="Observed" />
             <strong>{coverage?.totalObserved ?? 0}</strong>
           </div>
           <div className="metric-card">
-            <span>Untested</span>
+            <FieldLabel label="Untested" />
             <strong>{coverage?.untestedContent.length ?? 0}</strong>
           </div>
           <div className="metric-card">
-            <span>With issues</span>
+            <FieldLabel label="With issues" />
             <strong>{coverage?.contentWithIssues.length ?? 0}</strong>
           </div>
         </div>
@@ -385,12 +386,24 @@ export function LiveSessionPage() {
         </div>
         <div className="allocation-table">
           <div className="pool-summary-row pool-summary-row--head">
-            <span>Bot type</span>
-            <span>Requested</span>
-            <span>Running</span>
-            <span>Stopped</span>
-            <span>Stuck</span>
-            <span>Issues</span>
+            <span>
+              <FieldLabel label="Bot type" />
+            </span>
+            <span>
+              <FieldLabel label="Requested" />
+            </span>
+            <span>
+              <FieldLabel label="Running" />
+            </span>
+            <span>
+              <FieldLabel label="Stopped" />
+            </span>
+            <span>
+              <FieldLabel label="Stuck" />
+            </span>
+            <span>
+              <FieldLabel label="Issues" />
+            </span>
           </div>
           {botPools.length === 0 ? (
             <div className="empty-row">Create or start a session to see bot pools</div>
@@ -422,13 +435,27 @@ export function LiveSessionPage() {
         </div>
         <div className="allocation-table">
           <div className="bot-status-row bot-status-row--head">
-            <span>Bot ID</span>
-            <span>Profile/playstyle</span>
-            <span>Status</span>
-            <span>Current area</span>
-            <span>Last action</span>
-            <span>Issues</span>
-            <span>Progress</span>
+            <span>
+              <FieldLabel label="Bot ID" />
+            </span>
+            <span>
+              <FieldLabel label="Profile/playstyle" />
+            </span>
+            <span>
+              <FieldLabel label="Status" />
+            </span>
+            <span>
+              <FieldLabel label="Current area" />
+            </span>
+            <span>
+              <FieldLabel label="Last action" />
+            </span>
+            <span>
+              <FieldLabel label="Issues" />
+            </span>
+            <span>
+              <FieldLabel label="Progress" />
+            </span>
           </div>
           {botStatuses.length === 0 ? (
             <div className="empty-row">No live bots yet</div>
@@ -467,11 +494,24 @@ export function LiveSessionPage() {
         </div>
         <div className="allocation-table">
           <div className="live-instance-row live-instance-row--head">
-            <span>Instance ID</span>
-            <span>Process/window</span>
-            <span>Assigned bots</span>
-            <span>CPU/RAM</span>
-            <span>Crash/unresponsive</span>
+            <span>
+              <FieldLabel label="Instance ID" />
+            </span>
+            <span>
+              <FieldLabel label="Game instance status" />
+            </span>
+            <span>
+              <FieldLabel label="Assigned bots" />
+            </span>
+            <span>
+              <FieldLabel label="Save/profile" />
+            </span>
+            <span>
+              <FieldLabel label="CPU/RAM" />
+            </span>
+            <span>
+              <FieldLabel label="Instance health check" />
+            </span>
           </div>
           {instanceStatuses.length === 0 ? (
             <div className="empty-row">No game instances yet</div>
@@ -485,9 +525,13 @@ export function LiveSessionPage() {
                 </span>
                 <span>{instance.assignedBots.join(', ') || 'None'}</span>
                 <span>
+                  {instance.saveProfileId ?? 'Shared/default'}
+                  {instance.isolatedSaveDirectory ? <small>{instance.isolatedSaveDirectory}</small> : null}
+                </span>
+                <span>
                   {instance.resourceUsage?.cpuPercent ?? 0}% / {instance.resourceUsage?.ramMb ?? 0} MB
                 </span>
-                <span>{['crashed', 'unresponsive'].includes(instance.status) ? instance.status : 'Healthy'}</span>
+                <span>{['crashed', 'unresponsive', 'failed'].includes(instance.status) ? instance.status : 'Healthy'}</span>
               </div>
             ))
           )}

@@ -1,9 +1,19 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cp, mkdir, rm } from 'node:fs/promises';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
-import { AdapterFactory, type AdapterFactoryOptions } from '../../../../../packages/adapters/src';
-import type { AdapterCapabilities, GameAdapter } from '../../../../../packages/adapters/src';
+import {
+  AdapterFactory,
+  createAdapterOptionsFromGameProfile,
+  DesktopAdapterDependencyChecker
+} from '../../../../../packages/adapters/src';
+import type {
+  AdapterProfileOptionsResult,
+  AdapterHealth,
+  DesktopAdapterDependencyReport,
+  GameAdapter
+} from '../../../../../packages/adapters/src';
 import { type BotAdapter, type BotMemory } from '@core/bot/Bot';
 import { BotManager } from '@core/bot/BotManager';
 import { resolveBotPools } from '@core/bot/BotPoolResolver';
@@ -13,9 +23,16 @@ import { IssueDetectionRunner } from '@core/detection/IssueDetectors';
 import type { LogEntry } from '@core/logging/LogEntry';
 import { StructuredRunLogger, type BotReportInput } from '@core/logging/StructuredLoggers';
 import { resourceManager, type SystemResourceSnapshot } from '@core/resources/ResourceManager';
-import { GameInstanceManager, planGameInstances } from '@core/sessions/GameInstanceManager';
+import {
+  GameInstanceManager,
+  planGameInstances,
+  type GameInstanceManagerEvent,
+  type GameInstancePlan
+} from '@core/sessions/GameInstanceManager';
 import type {
+  BotLaunchPlan,
   BotProfile,
+  ControlBinding,
   GameAction,
   DetectedIssue,
   ActionResult,
@@ -34,6 +51,13 @@ import {
   SeveritySchema,
   SimulationRunConfigSchema
 } from '@core/types';
+import {
+  SessionRepository,
+  type PersistedSessionArtifacts,
+  type PersistedSessionMetadata,
+  type SessionReportPaths
+} from './SessionRepository';
+import { EvidenceCaptureService, type EvidenceCaptureResult } from './EvidenceCaptureService';
 
 export type SimulationRuntimeStatus =
   | 'idle'
@@ -53,6 +77,7 @@ export interface SimulationValidationError {
 export interface SimulationValidationResult {
   valid: boolean;
   errors: SimulationValidationError[];
+  warnings: SimulationValidationError[];
 }
 
 export interface SimulationSessionRequest {
@@ -61,12 +86,65 @@ export interface SimulationSessionRequest {
   botProfiles?: BotProfile[];
 }
 
+export interface DesktopControlTestRequest {
+  gameProfile: GameProfile;
+  controlId?: string;
+}
+
+export interface GameProfileTestRequest {
+  gameProfile: GameProfile;
+}
+
+export interface DesktopControlTestResult {
+  dependencyReport: DesktopAdapterDependencyReport;
+  actionResult: ActionResult;
+  controlId?: string;
+  binding?: string;
+  launched: boolean;
+  stopped: boolean;
+}
+
+export interface GameProfileTestCapability {
+  label: string;
+  supported: boolean;
+}
+
+export interface GameProfileTestDetectedGame {
+  gameId?: string;
+  gameName?: string;
+  engineType?: string;
+  engineVersion?: string;
+  buildId?: string;
+}
+
+export interface GameProfileTestResult {
+  ok: boolean;
+  status: 'succeeded' | 'failed' | 'skipped';
+  adapterType: string;
+  runtimeMode: string;
+  message: string;
+  errors: SimulationValidationError[];
+  warnings: SimulationValidationError[];
+  launched: boolean;
+  stopped: boolean;
+  running?: boolean;
+  capabilities: GameProfileTestCapability[];
+  health?: AdapterHealth;
+  detectedGame?: GameProfileTestDetectedGame;
+  availableActions: string[];
+  logs: Array<Pick<LogEntry, 'level' | 'message' | 'source'>>;
+  screenshotPath?: string;
+  stateSummary?: string;
+  desktopDependencies?: DesktopAdapterDependencyReport;
+}
+
 export interface SimulationBotStatus extends RuntimeBotSnapshot {
   displayName: string;
   playstyle: string;
   currentArea: string;
   progressState: string;
   issueCount: number;
+  actionCount?: number;
 }
 
 export interface SimulationSessionStatusSnapshot {
@@ -90,7 +168,7 @@ export interface SimulationSessionCreateResult {
   logs: LogEntry[];
 }
 
-export type { ContentCoverageSummary };
+export type { ContentCoverageSummary, PersistedSessionMetadata };
 
 export interface OpenReportResult {
   sessionId: string;
@@ -220,6 +298,15 @@ const SimulationSessionRequestSchema = z.object({
   botProfiles: z.array(BotProfileSchema).default([])
 });
 
+const DesktopControlTestRequestSchema = z.object({
+  gameProfile: GameProfileSchema,
+  controlId: z.string().min(1).optional()
+});
+
+const GameProfileTestRequestSchema = z.object({
+  gameProfile: GameProfileSchema
+});
+
 const GitHubIssueExportRequestSchema = z.object({
   sessionId: z.string().min(1),
   issueIds: z.array(z.string().min(1)).default([]),
@@ -266,14 +353,18 @@ interface SimulationSessionRecord {
   loggedEvidenceKeys: Set<string>;
   lastPeriodicScreenshotActionCountByBot: Map<string, number>;
   videoPathsByBot: Map<string, string>;
+  evidenceCaptureService: EvidenceCaptureService;
   sessionStartLogged: boolean;
   sessionStopLogged: boolean;
   botAdapter: BotAdapter;
   gameAdapter?: GameAdapter;
   gameInstanceManager?: GameInstanceManager;
   useMockRuntime: boolean;
+  persisted: boolean;
+  persistedCoverageSummary?: ContentCoverageSummary;
   finalizing?: boolean;
   startupTimer?: NodeJS.Timeout;
+  instanceHealthTimer?: NodeJS.Timeout;
 }
 
 function fallbackBotProfiles(runConfig: SimulationRunConfig, botProfiles: BotProfile[]): BotProfile[] {
@@ -303,6 +394,156 @@ function validationErrors(error: z.ZodError): SimulationValidationError[] {
     path: issue.path.join('.') || 'config',
     message: issue.message
   }));
+}
+
+function formatSimulationValidationErrors(errors: SimulationValidationError[]): string {
+  return errors.map((error) => `${error.path}: ${error.message}`).join(' ');
+}
+
+function createTemporaryDesktopControlRunConfig(gameProfile: GameProfile): SimulationRunConfig {
+  return createTemporaryGameProfileTestRunConfig(gameProfile, `desktop-control-test-${Date.now()}`);
+}
+
+function createTemporaryGameProfileTestRunConfig(
+  gameProfile: GameProfile,
+  sessionId = `profile-test-${Date.now()}`
+): SimulationRunConfig {
+  return {
+    sessionId,
+    gameProfilePath: `memory://game-profiles/${gameProfile.gameId}`,
+    adapterType: gameProfile.adapter.type,
+    runMode: 'sequential',
+    runUntilStopped: false,
+    maxRuntimeMinutes: 1,
+    stopOnCriticalIssue: false,
+    saveScreenshots: false,
+    saveVideo: false,
+    saveActionTimeline: false,
+    saveStateSnapshots: false,
+    botPools: [
+      {
+        profileId: 'desktop-control-test',
+        enabled: true,
+        minCount: 1,
+        desiredCount: 1,
+        maxCount: 1,
+        scalingMode: 'fixed',
+        priority: 1,
+        resourceWeight: 'light'
+      }
+    ],
+    globalBotLimit: 1,
+    perGameInstanceBotLimit: 1,
+    actionDelayMs: 0,
+    maxActionsPerBot: 1,
+    resourceLimits: {
+      maxCpuPercent: 100,
+      maxRamPercent: 100,
+      reserveRamMb: 0,
+      maxGameInstances: 1,
+      allowAutoScaling: false
+    }
+  };
+}
+
+function adapterCapabilitiesForTest(adapter: GameAdapter): GameProfileTestCapability[] {
+  return [
+    ['Multiple instances', adapter.capabilities.supportsMultipleInstances],
+    ['Multiple bots per instance', adapter.capabilities.supportsMultipleBotsPerInstance],
+    ['State read', adapter.capabilities.supportsStateRead],
+    ['Direct actions', adapter.capabilities.supportsDirectActions],
+    ['Keyboard/mouse input', adapter.capabilities.supportsInputSimulation],
+    ['Screenshots', adapter.capabilities.supportsScreenshots],
+    ['Video', adapter.capabilities.supportsVideo],
+    ['Game logs', adapter.capabilities.supportsGameLogs],
+    ['Save isolation', adapter.capabilities.supportsSaveIsolation],
+    ['Reset', adapter.capabilities.supportsReset],
+    ['Checkpoint reload', adapter.capabilities.supportsCheckpointReload]
+  ].map(([label, supported]) => ({
+    label: String(label),
+    supported: Boolean(supported)
+  }));
+}
+
+function summarizeProfileTestState(state: GameStateSnapshot | null): string | undefined {
+  if (!state) {
+    return undefined;
+  }
+
+  const summary: Record<string, unknown> = {
+    scene: state.scene,
+    tick: state.tick,
+    metrics: state.metrics,
+    state: state.state
+  };
+
+  return JSON.stringify(summary, null, 2).slice(0, 2000);
+}
+
+function detectedGameFromProfileTest(
+  gameProfile: GameProfile,
+  health: AdapterHealth | undefined,
+  instanceMetadata: Record<string, unknown> | undefined
+): GameProfileTestDetectedGame {
+  const metadataHealth = instanceMetadata?.instrumentationHealth;
+  const healthDetails = health?.details ?? {};
+  const detected = typeof metadataHealth === 'object' && metadataHealth !== null
+    ? metadataHealth as Record<string, unknown>
+    : healthDetails;
+  const engine = typeof detected.engine === 'object' && detected.engine !== null
+    ? detected.engine as Record<string, unknown>
+    : undefined;
+
+  return {
+    gameId: typeof detected.gameId === 'string' ? detected.gameId : gameProfile.gameId,
+    gameName: typeof detected.gameName === 'string' ? detected.gameName : gameProfile.gameName,
+    engineType:
+      typeof engine?.type === 'string'
+        ? engine.type
+        : typeof healthDetails.browserType === 'string'
+          ? 'browser'
+          : gameProfile.engine.type,
+    engineVersion: typeof engine?.version === 'string' ? engine.version : gameProfile.engine.version,
+    buildId: gameProfile.buildId
+  };
+}
+
+function failedProfileTestResult(input: {
+  gameProfile: GameProfile;
+  adapterOptions: AdapterProfileOptionsResult;
+  message: string;
+  errors?: SimulationValidationError[];
+  warnings?: SimulationValidationError[];
+  desktopDependencies?: DesktopAdapterDependencyReport;
+}): GameProfileTestResult {
+  return {
+    ok: false,
+    status: 'failed',
+    adapterType: input.gameProfile.adapter.type,
+    runtimeMode: input.adapterOptions.runtimeMode,
+    message: input.message,
+    errors: input.errors ?? input.adapterOptions.errors,
+    warnings: input.warnings ?? input.adapterOptions.warnings,
+    launched: false,
+    stopped: false,
+    capabilities: [],
+    availableActions: [],
+    logs: [],
+    desktopDependencies: input.desktopDependencies
+  };
+}
+
+function selectControlBinding(gameProfile: GameProfile, controlId: string | undefined): ControlBinding | undefined {
+  if (controlId) {
+    const normalized = controlId.trim().toLowerCase();
+    return gameProfile.controls.find((binding) =>
+      [binding.controlId, binding.action, binding.label]
+        .filter((value): value is string => Boolean(value))
+        .some((value) => value.trim().toLowerCase() === normalized)
+    );
+  }
+
+  return gameProfile.controls[0];
 }
 
 function cloneStatus(status: GameInstanceStatus): GameInstanceStatus {
@@ -508,48 +749,6 @@ function safeFileStem(value: string): string {
   return safePathSegment(value).slice(0, 96) || 'issue';
 }
 
-function xmlEscape(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function screenshotSvg(input: {
-  sessionId: string;
-  botId: string;
-  instanceId?: string;
-  reason: string;
-  capturedAt: string;
-  area?: string;
-  lastAction?: string;
-  progressState?: string;
-}): string {
-  const lines = [
-    `Session: ${input.sessionId}`,
-    `Bot: ${input.botId}`,
-    `Instance: ${input.instanceId ?? 'none'}`,
-    `Reason: ${input.reason}`,
-    `Area: ${input.area ?? 'unknown'}`,
-    `Last action: ${input.lastAction ?? 'none'}`,
-    `Progress: ${input.progressState ?? 'unknown'}`,
-    `Captured: ${input.capturedAt}`
-  ];
-
-  return [
-    '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">',
-    '<rect width="1280" height="720" fill="#101216"/>',
-    '<rect x="48" y="48" width="1184" height="624" rx="18" fill="#191b20" stroke="#2dd4bf" stroke-width="3"/>',
-    '<text x="82" y="110" fill="#eef2f7" font-family="monospace" font-size="34" font-weight="700">GameplaySimulator Evidence</text>',
-    ...lines.map(
-      (line, index) =>
-        `<text x="82" y="${170 + index * 52}" fill="#d8e0eb" font-family="monospace" font-size="26">${xmlEscape(line)}</text>`
-    ),
-    '</svg>'
-  ].join('');
-}
-
 function areaForTick(tick: number, index: number): string {
   const areas = ['Boot', 'Main Menu', 'Start Area', 'Traversal Loop', 'Interaction Check', 'Results Review'];
   return areas[(tick + index) % areas.length];
@@ -584,85 +783,19 @@ function maxConcurrentBotsForHybrid(
   return Math.max(1, Math.min(launchPlanCount, recommendedBots, recommendedInstances * perInstanceLimit));
 }
 
-function adapterCapabilitiesFromProfile(gameProfile: GameProfile): Partial<AdapterCapabilities> {
-  const supportsMultipleBotsPerInstance =
-    gameProfile.adapter.type === 'instrumented' ||
-    gameProfile.adapter.type === 'browser' ||
-    gameProfile.adapter.supportsDirectActions;
-
-  return {
-    supportsMultipleInstances: gameProfile.adapter.supportsMultipleInstances,
-    supportsMultipleBotsPerInstance,
-    supportsStateRead: gameProfile.adapter.supportsStateRead,
-    supportsDirectActions: gameProfile.adapter.supportsDirectActions,
-    supportsInputSimulation: gameProfile.controls.length > 0 || !gameProfile.adapter.supportsDirectActions,
-    supportsScreenshots: gameProfile.adapter.supportsScreenshots,
-    supportsVideo: gameProfile.adapter.supportsVideo,
-    supportsGameLogs: gameProfile.adapter.supportsStateRead,
-    supportsSaveIsolation: gameProfile.adapter.supportsSaveIsolation
-  };
-}
-
-function instrumentationEndpointFor(gameProfile: GameProfile): string | undefined {
-  return gameProfile.launch.url?.trim() || undefined;
-}
-
-function adapterFactoryOptionsForGameProfile(gameProfile: GameProfile): AdapterFactoryOptions {
-  const capabilities = adapterCapabilitiesFromProfile(gameProfile);
-  const instrumentationEndpoint = instrumentationEndpointFor(gameProfile);
-  const desktop = {
-    executablePath: gameProfile.launch.executablePath,
-    workingDirectory: gameProfile.launch.workingDirectory,
-    controlBindings: gameProfile.controls,
-    capabilities
-  };
-
-  return {
-    browser: {
-      targetUrl: gameProfile.launch.url,
-      capabilities
-    },
-    custom: {
-      protocolName: gameProfile.engine.type,
-      capabilities
-    },
-    desktop,
-    instrumented: {
-      instrumentationEndpoint,
-      capabilities
-    },
-    unity: {
-      unityVersion: gameProfile.engine.version,
-      instrumentationEndpoint
-    },
-    godot: {
-      godotVersion: gameProfile.engine.version,
-      instrumentationEndpoint
-    },
-    unreal: {
-      unrealVersion: gameProfile.engine.version,
-      instrumentationEndpoint
-    }
-  };
-}
-
 function createGameAdapterForProfile(
   adapterFactory: Pick<AdapterFactory, 'createAdapter'>,
-  runConfig: SimulationRunConfig,
-  gameProfile: GameProfile
+  adapterOptions: AdapterProfileOptionsResult
 ): GameAdapter {
-  const options = adapterFactoryOptionsForGameProfile(gameProfile);
+  const { adapterType, options } = adapterOptions;
 
-  if (['unity', 'godot', 'unreal'].includes(runConfig.adapterType)) {
-    const instrumentationEndpoint = instrumentationEndpointFor(gameProfile);
-    const prefersInstrumentation =
-      Boolean(instrumentationEndpoint) &&
-      (gameProfile.adapter.supportsStateRead || gameProfile.adapter.supportsDirectActions);
+  if (['unity', 'godot', 'unreal'].includes(adapterType)) {
+    const prefersInstrumentation = adapterOptions.runtimeMode === 'engine-instrumented';
     const delegate = prefersInstrumentation
       ? adapterFactory.createAdapter('instrumented', options)
       : adapterFactory.createAdapter('desktop', options);
 
-    if (runConfig.adapterType === 'unity') {
+    if (adapterType === 'unity') {
       return adapterFactory.createAdapter('unity', {
         ...options,
         unity: {
@@ -672,7 +805,7 @@ function createGameAdapterForProfile(
       });
     }
 
-    if (runConfig.adapterType === 'godot') {
+    if (adapterType === 'godot') {
       return adapterFactory.createAdapter('godot', {
         ...options,
         godot: {
@@ -691,7 +824,16 @@ function createGameAdapterForProfile(
     });
   }
 
-  return adapterFactory.createAdapter(runConfig.adapterType, options);
+  return adapterFactory.createAdapter(adapterType, options);
+}
+
+function launchPlansForInstancePlan(plan: GameInstancePlan): BotLaunchPlan[] {
+  return plan.instances.flatMap((instance) =>
+    instance.assignedBots.map((bot) => ({
+      ...bot,
+      assignedGameInstanceId: instance.instanceId
+    }))
+  );
 }
 
 class RuntimeAdapterBridge implements BotAdapter {
@@ -919,6 +1061,29 @@ class MockBotRuntimeAdapter implements BotAdapter {
   }
 }
 
+class PersistedSessionBotAdapter implements BotAdapter {
+  async getState(): Promise<GameStateSnapshot | null> {
+    return null;
+  }
+
+  async getAvailableActions(): Promise<AvailableGameActionLike[]> {
+    return [];
+  }
+
+  async performAction(_instanceId: string, botId: string, action: GameAction): Promise<ActionResult> {
+    return {
+      actionId: action.actionId,
+      botId,
+      status: 'skipped',
+      startedAt: action.requestedAt,
+      completedAt: new Date().toISOString(),
+      durationMs: 0,
+      message: 'Persisted sessions are read-only and cannot perform new game actions.',
+      issueIds: []
+    };
+  }
+}
+
 function statusLabel(record: SimulationSessionRecord): string {
   const botCount = record.botStatuses.length;
 
@@ -968,6 +1133,7 @@ export class SimulationService {
   private readonly systemSnapshot?: SystemResourceSnapshot;
   private readonly adapterFactory: Pick<AdapterFactory, 'createAdapter'>;
   private readonly useMockRuntime: boolean;
+  private readonly sessionRepository: SessionRepository;
 
   constructor(options: SimulationServiceOptions = {}) {
     this.now = options.now ?? (() => new Date().toISOString());
@@ -976,21 +1142,29 @@ export class SimulationService {
     this.systemSnapshot = options.systemSnapshot;
     this.adapterFactory = options.adapterFactory ?? new AdapterFactory();
     this.useMockRuntime = options.useMockRuntime ?? false;
+    this.sessionRepository = new SessionRepository(this.reportRoot);
+    this.loadPersistedSessions();
   }
 
   validateSessionConfig(payload: unknown): SimulationValidationResult {
     const result = SimulationSessionRequestSchema.safeParse(payload);
 
-    if (result.success) {
+    if (!result.success) {
       return {
-        valid: true,
-        errors: []
+        valid: false,
+        errors: validationErrors(result.error),
+        warnings: []
       };
     }
 
+    const useMockRuntime = result.data.runConfig.useMockRuntime ?? this.useMockRuntime;
+    const adapterOptions = createAdapterOptionsFromGameProfile(result.data.gameProfile, result.data.runConfig);
+    const adapterErrors = useMockRuntime ? [] : adapterOptions.errors;
+
     return {
-      valid: false,
-      errors: validationErrors(result.error)
+      valid: adapterErrors.length === 0,
+      errors: adapterErrors,
+      warnings: useMockRuntime ? [] : adapterOptions.warnings
     };
   }
 
@@ -1005,15 +1179,358 @@ export class SimulationService {
     return RuntimeViabilityReportSchema.parse(report);
   }
 
+  listSessions(): PersistedSessionMetadata[] {
+    this.loadPersistedSessions();
+    const liveMetadata = [...this.sessions.values()].map((record) => this.metadataForRecord(record));
+    const byId = new Map(liveMetadata.map((metadata) => [metadata.sessionId, metadata]));
+
+    for (const metadata of this.sessionRepository.listSessions()) {
+      if (!byId.has(metadata.sessionId)) {
+        byId.set(metadata.sessionId, metadata);
+      }
+    }
+
+    return [...byId.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  reloadPersistedSessions(): PersistedSessionMetadata[] {
+    this.loadPersistedSessions(true);
+    return this.listSessions();
+  }
+
+  async getDesktopAdapterDependencies(): Promise<DesktopAdapterDependencyReport> {
+    return new DesktopAdapterDependencyChecker().checkDependencies();
+  }
+
+  async testGameProfile(payload: unknown): Promise<GameProfileTestResult> {
+    const request = GameProfileTestRequestSchema.parse(payload);
+    const runConfig = createTemporaryGameProfileTestRunConfig(request.gameProfile);
+    const adapterOptions = createAdapterOptionsFromGameProfile(request.gameProfile, runConfig);
+    const usesDesktopRuntime =
+      adapterOptions.runtimeMode === 'desktop-window' ||
+      adapterOptions.runtimeMode === 'engine-desktop-fallback';
+    const desktopDependencies = usesDesktopRuntime
+      ? await this.getDesktopAdapterDependencies().catch(() => undefined)
+      : undefined;
+
+    if (adapterOptions.errors.length > 0) {
+      return failedProfileTestResult({
+        gameProfile: request.gameProfile,
+        adapterOptions,
+        message: formatSimulationValidationErrors(adapterOptions.errors),
+        desktopDependencies
+      });
+    }
+
+    const adapter = createGameAdapterForProfile(this.adapterFactory, adapterOptions);
+    const instanceId = 'profile-test-instance';
+    const botId = 'profile-test-bot';
+    let launched = false;
+    let stopped = false;
+    let health: AdapterHealth | undefined;
+    let running: boolean | undefined;
+    let state: GameStateSnapshot | null = null;
+    let screenshotPath: string | undefined;
+    let instanceMetadata: Record<string, unknown> | undefined;
+    let availableActions: string[] = [];
+    let logs: Array<Pick<LogEntry, 'level' | 'message' | 'source'>> = [];
+    const warnings = [...adapterOptions.warnings];
+
+    try {
+      const instance = await adapter.launchInstance({
+        instanceId,
+        gameProfileId: request.gameProfile.gameId,
+        launch: request.gameProfile.launch,
+        maxBots: 1,
+        environment: {
+          GAMEPLAY_SIMULATOR_PROFILE_TEST: '1'
+        }
+      });
+      launched = true;
+      instanceMetadata = instance.metadata;
+
+      health = await adapter.getHealth(instanceId).catch((error: unknown) => {
+        warnings.push({
+          path: 'adapter.health',
+          message: error instanceof Error ? error.message : 'Adapter health check failed.'
+        });
+        return undefined;
+      });
+      running = await adapter.isRunning(instanceId).catch(() => undefined);
+      state = await adapter.getState(instanceId, botId).catch((error: unknown) => {
+        warnings.push({
+          path: 'adapter.state',
+          message: error instanceof Error ? error.message : 'State read failed.'
+        });
+        return null;
+      });
+      availableActions = (await adapter.getAvailableActions(instanceId, botId).catch((error: unknown) => {
+        warnings.push({
+          path: 'adapter.actions',
+          message: error instanceof Error ? error.message : 'Available action read failed.'
+        });
+        return [];
+      })).map((action) => action.label || action.actionType);
+
+      if (adapter.captureLogs) {
+        logs = (await adapter.captureLogs(instanceId).catch((error: unknown) => {
+          warnings.push({
+            path: 'adapter.logs',
+            message: error instanceof Error ? error.message : 'Log capture failed.'
+          });
+          return [];
+        })).slice(-12).map((entry) => ({
+          level: entry.level,
+          message: entry.message,
+          source: entry.source
+        }));
+      }
+
+      if (adapter.capabilities.supportsScreenshots && adapter.captureScreenshot) {
+        const screenshot = await adapter.captureScreenshot(instanceId, botId).catch((error: unknown) => {
+          warnings.push({
+            path: 'adapter.screenshot',
+            message: error instanceof Error ? error.message : 'Screenshot capture failed.'
+          });
+          return undefined;
+        });
+        screenshotPath = screenshot?.path;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Profile test failed.';
+      const wasLaunched = launched;
+
+      if (launched) {
+        await adapter.stopAll().catch(() => undefined);
+        stopped = true;
+        launched = false;
+      }
+
+      return {
+        ...failedProfileTestResult({
+          gameProfile: request.gameProfile,
+          adapterOptions,
+          message,
+          errors: [{ path: 'adapter.launch', message }],
+          warnings,
+          desktopDependencies
+        }),
+        launched: wasLaunched,
+        stopped,
+        capabilities: adapterCapabilitiesForTest(adapter)
+      };
+    } finally {
+      if (launched) {
+        await adapter.stopAll().catch(() => undefined);
+        stopped = true;
+      }
+    }
+
+    const instrumentationError =
+      typeof instanceMetadata?.instrumentationConnectionError === 'string'
+        ? instanceMetadata.instrumentationConnectionError
+        : undefined;
+    const instrumentationHealth =
+      typeof instanceMetadata?.instrumentationHealth === 'object' && instanceMetadata.instrumentationHealth !== null
+        ? instanceMetadata.instrumentationHealth as { ok?: boolean; message?: string }
+        : undefined;
+    const healthOk =
+      !instrumentationError &&
+      (instrumentationHealth
+        ? instrumentationHealth.ok === true
+        : !health || ['ready', 'running', 'stopped'].includes(health.status));
+    const ok = launched && healthOk;
+    const failureMessage =
+      instrumentationError ??
+      instrumentationHealth?.message ??
+      health?.message ??
+      'Adapter health is not ready.';
+
+    return {
+      ok,
+      status: ok ? 'succeeded' : 'failed',
+      adapterType: adapter.adapterType,
+      runtimeMode: adapterOptions.runtimeMode,
+      message: ok
+        ? 'Profile test finished. The selected adapter can launch or connect with this setup.'
+        : failureMessage,
+      errors: ok ? [] : [{ path: 'adapter.health', message: failureMessage }],
+      warnings,
+      launched,
+      stopped,
+      running,
+      capabilities: adapterCapabilitiesForTest(adapter),
+      health,
+      detectedGame: detectedGameFromProfileTest(request.gameProfile, health, instanceMetadata),
+      availableActions,
+      logs,
+      screenshotPath,
+      stateSummary: summarizeProfileTestState(state),
+      desktopDependencies
+    };
+  }
+
+  async testDesktopControl(payload: unknown): Promise<DesktopControlTestResult> {
+    const request = DesktopControlTestRequestSchema.parse(payload);
+    const dependencyReport = await this.getDesktopAdapterDependencies();
+    const runConfig = createTemporaryDesktopControlRunConfig(request.gameProfile);
+    const adapterOptions = createAdapterOptionsFromGameProfile(request.gameProfile, runConfig);
+    const binding = selectControlBinding(request.gameProfile, request.controlId);
+    const startedAt = this.now();
+    const instanceId = 'desktop-control-test-instance';
+    const botId = 'desktop-control-test-bot';
+
+    if (!binding) {
+      return {
+        dependencyReport,
+        actionResult: {
+          actionId: 'desktop-control-test',
+          botId,
+          status: 'skipped',
+          startedAt,
+          completedAt: this.now(),
+          message: 'No control mapping is available to test.',
+          issueIds: []
+        },
+        launched: false,
+        stopped: false
+      };
+    }
+
+    if (adapterOptions.runtimeMode !== 'desktop-window' && adapterOptions.runtimeMode !== 'engine-desktop-fallback') {
+      return {
+        dependencyReport,
+        actionResult: {
+          actionId: `desktop-control-test-${binding.controlId}`,
+          botId,
+          status: 'skipped',
+          startedAt,
+          completedAt: this.now(),
+          message: 'Control testing is only available for desktop-window adapter or engine desktop fallback profiles.',
+          issueIds: []
+        },
+        controlId: binding.controlId,
+        binding: binding.binding,
+        launched: false,
+        stopped: false
+      };
+    }
+
+    if (adapterOptions.errors.length > 0) {
+      return {
+        dependencyReport,
+        actionResult: {
+          actionId: `desktop-control-test-${binding.controlId}`,
+          botId,
+          status: 'failed',
+          startedAt,
+          completedAt: this.now(),
+          message: formatSimulationValidationErrors(adapterOptions.errors),
+          issueIds: []
+        },
+        controlId: binding.controlId,
+        binding: binding.binding,
+        launched: false,
+        stopped: false
+      };
+    }
+
+    const needsKeyboard = binding.inputType === 'keyboard';
+    const needsMouse = binding.inputType === 'mouse';
+
+    if ((needsKeyboard && !dependencyReport.canSendKeyboardInput) || (needsMouse && !dependencyReport.canSendMouseInput)) {
+      return {
+        dependencyReport,
+        actionResult: {
+          actionId: `desktop-control-test-${binding.controlId}`,
+          botId,
+          status: 'skipped',
+          startedAt,
+          completedAt: this.now(),
+          message: dependencyReport.warnings.join(' ') || 'Desktop input is not available on this platform.',
+          issueIds: []
+        },
+        controlId: binding.controlId,
+        binding: binding.binding,
+        launched: false,
+        stopped: false
+      };
+    }
+
+    const adapter = createGameAdapterForProfile(this.adapterFactory, adapterOptions);
+    let launched = false;
+    let stopped = false;
+    let actionResult: ActionResult;
+
+    try {
+      await adapter.launchInstance({
+        instanceId,
+        gameProfileId: request.gameProfile.gameId,
+        launch: request.gameProfile.launch,
+        maxBots: 1,
+        environment: {
+          GAMEPLAY_SIMULATOR_CONTROL_TEST: '1'
+        }
+      });
+      launched = true;
+
+      const action: GameAction = {
+        actionId: `desktop-control-test-${binding.controlId}`,
+        sessionId: runConfig.sessionId,
+        gameInstanceId: instanceId,
+        botId,
+        type: binding.action ?? binding.controlId,
+        target: binding.controlId,
+        payload: {
+          controlId: binding.controlId,
+          binding: binding.binding
+        },
+        requestedAt: this.now()
+      };
+      actionResult = await adapter.performAction(instanceId, botId, action);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Desktop control test failed.';
+      actionResult = {
+        actionId: `desktop-control-test-${binding.controlId}`,
+        botId,
+        status: 'failed',
+        startedAt,
+        completedAt: this.now(),
+        message,
+        issueIds: []
+      };
+    } finally {
+      if (launched) {
+        await adapter.stopAll().catch(() => undefined);
+        stopped = true;
+      }
+    }
+
+    return {
+      dependencyReport,
+      actionResult,
+      controlId: binding.controlId,
+      binding: binding.binding,
+      launched,
+      stopped
+    };
+  }
+
   createSession(payload: unknown): SimulationSessionCreateResult {
     const request = SimulationSessionRequestSchema.parse(payload);
     const useMockRuntime = request.runConfig.useMockRuntime ?? this.useMockRuntime;
+    const adapterOptions = createAdapterOptionsFromGameProfile(request.gameProfile, request.runConfig);
+
+    if (!useMockRuntime && adapterOptions.errors.length > 0) {
+      throw new Error(formatSimulationValidationErrors(adapterOptions.errors));
+    }
+
     const botProfiles = fallbackBotProfiles(request.runConfig, request.botProfiles);
     const viabilityReport = this.estimateViability({
       ...request,
       botProfiles
     });
-    const launchPlans = resolveBotPools({
+    const resolvedLaunchPlans = resolveBotPools({
       runConfig: request.runConfig,
       botProfiles,
       viabilityReport
@@ -1023,7 +1540,7 @@ export class SimulationService {
     const profilesById = new Map(botProfiles.map((profile) => [profile.profileId, profile]));
     const gameAdapter = useMockRuntime
       ? undefined
-      : createGameAdapterForProfile(this.adapterFactory, request.runConfig, request.gameProfile);
+      : createGameAdapterForProfile(this.adapterFactory, adapterOptions);
     const botAdapter: BotAdapter = useMockRuntime
       ? new MockBotRuntimeAdapter(sessionId, request.gameProfile, this.now)
       : new RuntimeAdapterBridge(gameAdapter!, sessionId, request.gameProfile, this.now);
@@ -1032,14 +1549,15 @@ export class SimulationService {
           adapter: gameAdapter,
           runConfig: request.runConfig,
           gameProfile: request.gameProfile,
-          launchPlans,
+          launchPlans: resolvedLaunchPlans,
+          fileSystem: { cp, mkdir, rm },
           now: this.now
         })
       : undefined;
     const instancePlan = gameInstanceManager?.getPlan() ?? planGameInstances({
       runConfig: request.runConfig,
       gameProfile: request.gameProfile,
-      launchPlans,
+      launchPlans: resolvedLaunchPlans,
       adapterCapabilities: {
         supportsMultipleInstances: request.gameProfile.adapter.supportsMultipleInstances,
         supportsMultipleBotsPerInstance:
@@ -1050,11 +1568,16 @@ export class SimulationService {
       },
       now: this.now()
     });
+    const launchPlans = gameInstanceManager?.getAssignedLaunchPlans() ?? launchPlansForInstancePlan(instancePlan);
     const coverageTracker = new CoverageTracker(request.gameProfile);
     const structuredLogger = new StructuredRunLogger({
       rootDir: this.reportRoot,
       sessionId,
       createdAt,
+      now: this.now
+    });
+    const evidenceCaptureService = new EvidenceCaptureService({
+      adapter: gameAdapter,
       now: this.now
     });
     let record!: SimulationSessionRecord;
@@ -1071,11 +1594,11 @@ export class SimulationService {
         record.instanceStatuses.find((instance) => instance.instanceId === instanceId)?.lastHeartbeat,
       getProcessResponsive: (instanceId) => {
         const status = record.instanceStatuses.find((instance) => instance.instanceId === instanceId)?.status;
-        return status ? status !== 'unresponsive' && status !== 'crashed' : undefined;
+        return status ? !['unresponsive', 'crashed', 'failed'].includes(status) : undefined;
       },
       now: this.now,
       onStatusChange: ({ status, memory }) => {
-        this.updateBotStatus(record, status, memory);
+        return this.updateBotStatus(record, status, memory);
       },
       onLog: ({ entry }) => {
         record.logs.push(entry);
@@ -1147,12 +1670,14 @@ export class SimulationService {
       loggedEvidenceKeys: new Set(),
       lastPeriodicScreenshotActionCountByBot: new Map(),
       videoPathsByBot: new Map(),
+      evidenceCaptureService,
       sessionStartLogged: false,
       sessionStopLogged: false,
       botAdapter,
       gameAdapter,
       gameInstanceManager,
-      useMockRuntime
+      useMockRuntime,
+      persisted: false
     };
 
     record.structuredLogger.writeConfig({
@@ -1187,7 +1712,7 @@ export class SimulationService {
       status: this.snapshotFor(record),
       viabilityReport,
       botStatuses: this.getBotStatuses(sessionId),
-      instanceStatuses: this.getInstanceStatuses(sessionId),
+      instanceStatuses: record.instanceStatuses.map(cloneStatus),
       logs: this.getLogs(sessionId)
     };
   }
@@ -1234,7 +1759,8 @@ export class SimulationService {
         throw new Error('Adapter-backed session is missing a game instance manager.');
       }
 
-      record.instanceStatuses = await record.gameInstanceManager.launchInstances();
+      record.instanceStatuses = await record.gameInstanceManager.startAllInstances();
+      this.logInstanceManagerEvents(record);
 
       record.status = 'running';
       record.botStatuses = record.botStatuses.map((bot) => ({
@@ -1249,6 +1775,7 @@ export class SimulationService {
       for (const instance of record.instanceStatuses) {
         this.logInstanceStart(record, instance);
       }
+      this.startInstanceHealthMonitor(record);
       this.startVideoEvidence(record);
       this.writeStructuredReports(record);
       record.botManager.startAll();
@@ -1360,8 +1887,11 @@ export class SimulationService {
       return this.getStatus();
     }
 
-    const record = this.sessions.get(sessionId);
-    return record ? this.snapshotFor(record) : createIdleSnapshot();
+    try {
+      return this.snapshotFor(this.requireSession(sessionId));
+    } catch {
+      return createIdleSnapshot();
+    }
   }
 
   getBotStatuses(sessionId: string): SimulationBotStatus[] {
@@ -1435,8 +1965,10 @@ export class SimulationService {
     return this.getBotStatuses(sessionId);
   }
 
-  getInstanceStatuses(sessionId: string): GameInstanceStatus[] {
-    return this.requireSession(sessionId).instanceStatuses.map(cloneStatus);
+  async getInstanceStatuses(sessionId: string): Promise<GameInstanceStatus[]> {
+    const record = this.requireSession(sessionId);
+    await this.refreshInstanceHealth(record);
+    return record.instanceStatuses.map(cloneStatus);
   }
 
   getIssues(sessionId: string): DetectedIssue[] {
@@ -1453,7 +1985,7 @@ export class SimulationService {
   }
 
   getCoverage(sessionId: string): ContentCoverageSummary {
-    return this.requireSession(sessionId).coverageTracker.getSummary();
+    return this.coverageSummaryForRecord(this.requireSession(sessionId));
   }
 
   async shutdownAllSessions(reason = 'app_shutdown'): Promise<SimulationSessionStatusSnapshot[]> {
@@ -1612,6 +2144,7 @@ export class SimulationService {
     writeFileSync(indexPath, preview.combinedMarkdown, 'utf8');
 
     const openError = await this.openPath(indexPath);
+    this.metadataForRecord(record);
 
     return {
       sessionId: request.sessionId,
@@ -1906,8 +2439,8 @@ export class SimulationService {
     const improvedSeverityPairs = repeatedIssuePairs.filter(
       ({ oldGroup, newGroup }) => newGroup.maxSeverityRank < oldGroup.maxSeverityRank
     );
-    const oldCoverage = oldRecord.coverageTracker.getSummary();
-    const newCoverage = newRecord.coverageTracker.getSummary();
+    const oldCoverage = this.coverageSummaryForRecord(oldRecord);
+    const newCoverage = this.coverageSummaryForRecord(newRecord);
     const oldCovered = new Map(
       oldCoverage.testedContent.map((item) => [`${item.category}:${item.contentId}`, `${item.category}: ${item.label}`])
     );
@@ -2035,7 +2568,7 @@ export class SimulationService {
             profileId: bot.profileId,
             displayName: bot.displayName,
             status: bot.status,
-            actionCount: memory?.actionCount ?? 0,
+            actionCount: memory?.actionCount ?? bot.actionCount ?? 0,
             currentArea: memory?.currentArea ?? bot.currentArea,
             progressState: memory?.progressState ?? bot.progressState,
             issueCount: record.issues.filter((issue) => issue.botId === bot.botId).length
@@ -2179,8 +2712,8 @@ export class SimulationService {
         [
           [
             'Known content coverage',
-            `${oldRecord.coverageTracker.getSummary().percentage}%`,
-            `${newRecord.coverageTracker.getSummary().percentage}%`,
+            `${this.coverageSummaryForRecord(oldRecord).percentage}%`,
+            `${this.coverageSummaryForRecord(newRecord).percentage}%`,
             `${formatSignedNumber(data.summary.coverageDeltaPercent)} points`
           ],
           [
@@ -2313,6 +2846,175 @@ export class SimulationService {
     });
   }
 
+  private loadPersistedSessions(force = false): void {
+    for (const metadata of this.sessionRepository.listSessions()) {
+      if (!force && this.sessions.has(metadata.sessionId)) {
+        continue;
+      }
+
+      try {
+        const artifacts = this.sessionRepository.loadSession(metadata.sessionId);
+        const existing = this.sessions.get(metadata.sessionId);
+
+        if (existing && !existing.persisted && !force) {
+          continue;
+        }
+
+        this.sessions.set(metadata.sessionId, this.recordFromPersistedArtifacts(artifacts));
+      } catch {
+        // Ignore unreadable run folders. A partial or hand-edited run should not break app startup.
+      }
+    }
+  }
+
+  private recordFromPersistedArtifacts(artifacts: PersistedSessionArtifacts): SimulationSessionRecord {
+    const sessionId = artifacts.runConfig.sessionId;
+    const botProfiles = fallbackBotProfiles(artifacts.runConfig, artifacts.botProfiles);
+    const profilesById = new Map(botProfiles.map((profile) => [profile.profileId, profile]));
+    const launchPlans: BotLaunchPlan[] = artifacts.botStatuses.map((bot, index) => ({
+      botId: bot.botId,
+      profileId: bot.profileId,
+      displayName: bot.displayName,
+      playstyle: bot.playstyle,
+      assignedGameInstanceId: bot.gameInstanceId,
+      seed: index + 1,
+      resourceWeight: profilesById.get(bot.profileId)?.defaultResourceWeight ?? 'medium',
+      launchIndex: index + 1
+    }));
+    const botAdapter = new PersistedSessionBotAdapter();
+    const botManager = new BotManager({
+      sessionId,
+      runConfig: artifacts.runConfig,
+      launchPlans,
+      botProfiles,
+      adapter: botAdapter,
+      now: this.now
+    });
+    const coverageTracker = new CoverageTracker(artifacts.gameProfile);
+
+    for (const bot of artifacts.botStatuses) {
+      const profile = profilesById.get(bot.profileId);
+      coverageTracker.registerBot(bot.botId, profile ?? bot.profileId);
+    }
+
+    for (const state of artifacts.states) {
+      coverageTracker.recordSnapshot(state, {
+        botId: state.botId,
+        profileId: state.botId ? artifacts.botStatuses.find((bot) => bot.botId === state.botId)?.profileId : undefined
+      });
+    }
+
+    for (const action of artifacts.actions) {
+      coverageTracker.recordAction(action, {
+        botId: action.botId,
+        profileId: artifacts.botStatuses.find((bot) => bot.botId === action.botId)?.profileId
+      });
+    }
+
+    for (const issue of artifacts.issues) {
+      coverageTracker.recordIssue(issue);
+    }
+
+    const structuredLogger = new StructuredRunLogger({
+      rootDir: this.reportRoot,
+      sessionId,
+      createdAt: artifacts.metadata.createdAt,
+      sessionDir: artifacts.metadata.reportPaths.sessionDirectory,
+      now: this.now
+    });
+
+    for (const bot of artifacts.botStatuses) {
+      structuredLogger.ensureBot(bot.botId);
+    }
+
+    for (const instance of artifacts.instanceStatuses) {
+      structuredLogger.ensureInstance(instance.instanceId);
+    }
+
+    const record: SimulationSessionRecord = {
+      request: {
+        runConfig: artifacts.runConfig,
+        gameProfile: artifacts.gameProfile,
+        botProfiles
+      },
+      viabilityReport: artifacts.viabilityReport,
+      status: artifacts.metadata.status,
+      label: `Loaded ${sessionId} from disk`,
+      createdAt: artifacts.metadata.createdAt,
+      startedAt: artifacts.metadata.startedAt,
+      stoppedAt: artifacts.metadata.stoppedAt,
+      botStatuses: artifacts.botStatuses,
+      instanceStatuses: artifacts.instanceStatuses,
+      issues: artifacts.issues,
+      logs: artifacts.logs,
+      tick: artifacts.botStatuses.reduce((total, bot) => total + (bot.actionCount ?? 0), 0),
+      botManager,
+      issueDetectionRunner: new IssueDetectionRunner(),
+      coverageTracker,
+      structuredLogger,
+      loggedStateSnapshotIds: new Set(),
+      loggedActionIds: new Set(),
+      loggedIssueIds: new Set(artifacts.issues.map((issue) => issue.id ?? issue.issueId)),
+      loggedStartedBotIds: new Set(),
+      loggedStoppedBotIds: new Set(),
+      loggedStartedInstanceIds: new Set(),
+      loggedStoppedInstanceIds: new Set(),
+      loggedRecoveryAttemptIds: new Set(),
+      loggedRecoverySuccessIds: new Set(),
+      loggedRecoveryFailedIds: new Set(),
+      loggedEvidenceKeys: new Set(),
+      lastPeriodicScreenshotActionCountByBot: new Map(),
+      videoPathsByBot: new Map(),
+      evidenceCaptureService: new EvidenceCaptureService({
+        now: this.now
+      }),
+      sessionStartLogged: true,
+      sessionStopLogged: true,
+      botAdapter,
+      useMockRuntime: false,
+      persisted: true,
+      persistedCoverageSummary: artifacts.coverageSummary
+    };
+
+    record.label = statusLabel(record);
+    return record;
+  }
+
+  private metadataForRecord(record: SimulationSessionRecord): PersistedSessionMetadata {
+    const coverage = this.coverageSummaryForRecord(record);
+
+    return this.sessionRepository.writeSessionMetadata({
+      sessionDir: record.structuredLogger.sessionDir,
+      sessionId: record.request.runConfig.sessionId,
+      gameProfile: record.request.gameProfile,
+      runConfig: record.request.runConfig,
+      status: record.status,
+      createdAt: record.createdAt,
+      startedAt: record.startedAt,
+      stoppedAt: record.stoppedAt,
+      issues: record.issues,
+      botStatuses: record.botStatuses,
+      coverageSummary: coverage,
+      reportPaths: this.reportPathsForRecord(record)
+    });
+  }
+
+  private reportPathsForRecord(record: SimulationSessionRecord): SessionReportPaths {
+    const sessionDir = record.structuredLogger.sessionDir;
+
+    return {
+      sessionDirectory: sessionDir,
+      summaryMarkdown: record.structuredLogger.summaryPath,
+      htmlReport: record.structuredLogger.sessionLogger.htmlReportPath,
+      sessionLog: record.structuredLogger.sessionLogPath,
+      config: record.structuredLogger.sessionLogger.configPath,
+      viabilityReport: record.structuredLogger.sessionLogger.viabilityReportPath,
+      githubExportDirectory: existsSync(join(sessionDir, 'github-issues'))
+        ? join(sessionDir, 'github-issues')
+        : undefined
+    };
+  }
+
   private repeatedIssueRows(pairs: Array<{ oldGroup: IssueComparisonGroup; newGroup: IssueComparisonGroup }>): string[][] {
     return pairs.map(({ oldGroup, newGroup }) => {
       const issue = newGroup.exemplar;
@@ -2394,7 +3096,12 @@ export class SimulationService {
     const message = error instanceof Error ? error.message : 'Unknown adapter startup failure.';
     const timestamp = this.now();
 
+    this.clearInstanceHealthTimer(sessionId);
     record.status = 'failed';
+    if (record.gameInstanceManager) {
+      record.instanceStatuses = record.gameInstanceManager.getAllInstanceStatuses();
+      this.logInstanceManagerEvents(record);
+    }
     record.stoppedAt = timestamp;
     record.botStatuses = record.botStatuses.map((bot) => ({
       ...bot,
@@ -2405,7 +3112,7 @@ export class SimulationService {
     }));
     record.instanceStatuses = record.instanceStatuses.map((instance) => ({
       ...instance,
-      status: instance.status === 'running' ? 'running' : 'crashed',
+      status: instance.status === 'running' ? 'running' : instance.status === 'failed' ? 'failed' : 'crashed',
       lastHeartbeat: timestamp
     }));
     record.logs.push(this.createLog(sessionId, 'error', `Adapter startup failed: ${message}`));
@@ -2445,7 +3152,7 @@ export class SimulationService {
       reproducible: true
     };
 
-    this.recordDetectedIssue(record, issue);
+    await this.recordDetectedIssue(record, issue);
 
     try {
       await record.gameAdapter?.stopAll();
@@ -2460,15 +3167,94 @@ export class SimulationService {
     this.writeStructuredReports(record);
   }
 
+  private startInstanceHealthMonitor(record: SimulationSessionRecord): void {
+    if (record.useMockRuntime || !record.gameInstanceManager || record.instanceHealthTimer) {
+      return;
+    }
+
+    const sessionId = record.request.runConfig.sessionId;
+    const timer = setInterval(() => {
+      const current = this.sessions.get(sessionId);
+
+      if (!current || !['starting', 'running', 'paused'].includes(current.status)) {
+        this.clearInstanceHealthTimer(sessionId);
+        return;
+      }
+
+      void this.refreshInstanceHealth(current);
+    }, 1000);
+
+    timer.unref?.();
+    record.instanceHealthTimer = timer;
+  }
+
+  private clearInstanceHealthTimer(sessionId: string): void {
+    const record = this.sessions.get(sessionId);
+
+    if (record?.instanceHealthTimer) {
+      clearInterval(record.instanceHealthTimer);
+      record.instanceHealthTimer = undefined;
+    }
+  }
+
+  private async refreshInstanceHealth(record: SimulationSessionRecord): Promise<void> {
+    if (record.useMockRuntime || !record.gameInstanceManager) {
+      return;
+    }
+
+    if (!['starting', 'running', 'paused'].includes(record.status)) {
+      return;
+    }
+
+    try {
+      record.instanceStatuses = await record.gameInstanceManager.refreshHealth();
+      this.logInstanceManagerEvents(record);
+      record.label = statusLabel(record);
+      this.writeStructuredReports(record);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Instance health refresh failed.';
+      record.logs.push(this.createLog(record.request.runConfig.sessionId, 'warn', `Instance health refresh failed: ${message}`));
+    }
+  }
+
+  private logInstanceManagerEvents(record: SimulationSessionRecord): void {
+    const events = record.gameInstanceManager?.drainEvents() ?? [];
+
+    for (const event of events) {
+      const instance = record.instanceStatuses.find((item) => item.instanceId === event.instanceId);
+
+      if (!instance) {
+        continue;
+      }
+
+      if (event.eventType === 'instance_start') {
+        this.logInstanceStart(record, instance);
+      } else if (event.eventType === 'instance_stop') {
+        this.logInstanceStop(record, instance, event.message ?? 'manager_stop');
+      } else if (event.eventType === 'instance_crash') {
+        this.logInstanceCrash(record, instance, event);
+      } else if (event.eventType === 'instance_health_warning') {
+        this.logInstanceHealthWarning(record, instance, event);
+      } else if (event.eventType === 'instance_restart') {
+        this.logInstanceRestart(record, instance, event);
+      } else if (event.eventType === 'instance_save_isolation') {
+        this.logInstanceSaveIsolation(record, instance, event);
+      }
+    }
+  }
+
   private async stopGameInstances(record: SimulationSessionRecord, reason: string): Promise<void> {
     const sessionId = record.request.runConfig.sessionId;
 
+    this.clearInstanceHealthTimer(sessionId);
+
     try {
-      if (record.gameAdapter) {
+      if (record.gameInstanceManager) {
+        record.instanceStatuses = await record.gameInstanceManager.stopAllInstances();
+        this.logInstanceManagerEvents(record);
+      } else if (record.gameAdapter) {
         await record.gameAdapter.stopAll();
         this.markInstancesStopped(record);
-      } else if (record.gameInstanceManager) {
-        record.instanceStatuses = await record.gameInstanceManager.stopAll();
       } else {
         this.markInstancesStopped(record);
       }
@@ -2564,7 +3350,7 @@ export class SimulationService {
     return this.snapshotFor(record);
   }
 
-  private captureScreenshotEvidence(
+  private async captureScreenshotEvidence(
     record: SimulationSessionRecord,
     input: {
       botId?: string;
@@ -2574,7 +3360,7 @@ export class SimulationService {
       issueId?: string;
       evidenceKey?: string;
     }
-  ): string | undefined {
+  ): Promise<EvidenceCaptureResult | undefined> {
     if (!record.request.runConfig.saveScreenshots || !input.botId) {
       return undefined;
     }
@@ -2589,43 +3375,54 @@ export class SimulationService {
 
     try {
       const botLogger = record.structuredLogger.ensureBot(input.botId);
-      mkdirSync(botLogger.screenshotsDir, { recursive: true });
-      const capturedAt = this.now();
-      const fileName = `${safePathSegment(input.reason)}-${safePathSegment(input.issueId ?? String(record.loggedEvidenceKeys.size))}.svg`;
-      const screenshotPath = join(botLogger.screenshotsDir, fileName);
-      const svg = screenshotSvg({
+      const result = await record.evidenceCaptureService.captureScreenshot({
         sessionId: record.request.runConfig.sessionId,
         botId: input.botId,
         instanceId: input.instanceId,
         reason: input.reason,
-        capturedAt,
+        issueId: input.issueId,
+        screenshotsDir: botLogger.screenshotsDir,
         area: input.memory?.currentArea,
-        lastAction: input.memory?.lastAction?.type,
-        progressState: input.memory?.progressState
+        lastAction: input.memory?.lastAction,
+        progressState: input.memory?.progressState,
+        lastState: input.memory?.lastState
       });
 
-      writeFileSync(screenshotPath, svg, 'utf8');
-
-      if (input.memory?.lastState) {
-        input.memory.lastState.screenshotPath = screenshotPath;
+      if (result.path && input.memory?.lastState) {
+        input.memory.lastState.screenshotPath = result.path;
       }
 
-      record.structuredLogger.logSession(
-        'state_snapshot',
-        {
-          evidence: 'screenshot',
-          reason: input.reason,
-          screenshotPath,
-          issueId: input.issueId
-        },
-        {
-          botId: input.botId,
-          gameInstanceId: input.instanceId,
-          timestamp: capturedAt
-        }
-      );
+      if (result.path) {
+        record.structuredLogger.logSession(
+          'state_snapshot',
+          {
+            evidence: result.fallback ? 'fallback_screenshot' : 'screenshot',
+            reason: input.reason,
+            screenshotPath: result.path,
+            sourcePath: result.sourcePath,
+            issueId: input.issueId,
+            fallback: result.fallback,
+            message: result.message
+          },
+          {
+            botId: input.botId,
+            gameInstanceId: input.instanceId,
+            timestamp: result.capturedAt
+          }
+        );
+      }
 
-      return screenshotPath;
+      if (result.fallback) {
+        record.logs.push(
+          this.createLog(
+            record.request.runConfig.sessionId,
+            'warn',
+            `Screenshot capture used fallback evidence for ${input.botId}: ${result.message ?? 'real screenshot unavailable'}.`
+          )
+        );
+      }
+
+      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Screenshot capture failed.';
       record.logs.push(this.createLog(record.request.runConfig.sessionId, 'warn', `Screenshot capture failed: ${message}`));
@@ -2743,6 +3540,32 @@ export class SimulationService {
     }
 
     issue.evidencePaths = [...new Set([...(issue.evidencePaths ?? []), evidencePath])];
+  }
+
+  private attachScreenshotEvidenceMetadata(issue: DetectedIssue, result: EvidenceCaptureResult | undefined): void {
+    if (!result?.path) {
+      return;
+    }
+
+    const rawEvidence =
+      typeof issue.rawEvidence === 'object' && issue.rawEvidence !== null && !Array.isArray(issue.rawEvidence)
+        ? issue.rawEvidence as Record<string, unknown>
+        : issue.rawEvidence === undefined
+          ? {}
+          : { originalRawEvidence: issue.rawEvidence };
+
+    issue.rawEvidence = {
+      ...rawEvidence,
+      screenshotEvidence: {
+        path: result.path,
+        kind: result.kind,
+        fallback: result.fallback,
+        capturedAt: result.capturedAt,
+        mimeType: result.mimeType,
+        sourcePath: result.sourcePath,
+        message: result.message
+      }
+    };
   }
 
   private async readStructuredLogFile(
@@ -2885,11 +3708,14 @@ export class SimulationService {
     record.loggedStartedInstanceIds.add(instance.instanceId);
     const event = record.structuredLogger.logSession(
       'instance_start',
-      {
-        status: instance.status,
-        adapterType: instance.adapterType,
-        assignedBots: instance.assignedBots
-      },
+        {
+          status: instance.status,
+          adapterType: instance.adapterType,
+          assignedBots: instance.assignedBots,
+          saveProfileId: instance.saveProfileId,
+          isolatedSaveDirectory: instance.isolatedSaveDirectory,
+          saveIsolationMode: instance.saveIsolationMode
+        },
       {
         gameInstanceId: instance.instanceId,
         timestamp: instance.startTime
@@ -2906,17 +3732,141 @@ export class SimulationService {
     record.loggedStoppedInstanceIds.add(instance.instanceId);
     const event = record.structuredLogger.logSession(
       'instance_stop',
-      {
-        status: instance.status,
-        reason,
-        assignedBots: instance.assignedBots
-      },
+        {
+          status: instance.status,
+          reason,
+          assignedBots: instance.assignedBots,
+          saveProfileId: instance.saveProfileId,
+          isolatedSaveDirectory: instance.isolatedSaveDirectory,
+          saveIsolationMode: instance.saveIsolationMode,
+          saveIsolationCleanedUp: instance.saveIsolationCleanedUp
+        },
       {
         gameInstanceId: instance.instanceId,
         timestamp: instance.lastHeartbeat
       }
     );
     record.structuredLogger.logInstance(event, instance);
+  }
+
+  private logInstanceCrash(
+    record: SimulationSessionRecord,
+    instance: GameInstanceStatus,
+    event: GameInstanceManagerEvent
+  ): void {
+    record.logs.push(
+      this.createLog(
+        record.request.runConfig.sessionId,
+        'error',
+        `Game instance ${instance.instanceId} ${instance.status}: ${event.message ?? 'Adapter reported a runtime failure.'}`
+      )
+    );
+    const structuredEvent = record.structuredLogger.logSession(
+      'instance_crash',
+      {
+        status: instance.status,
+        previousStatus: event.previousStatus,
+        message: event.message,
+        assignedBots: instance.assignedBots,
+        details: event.details ?? {}
+      },
+      {
+        gameInstanceId: instance.instanceId,
+        timestamp: event.timestamp
+      }
+    );
+    record.structuredLogger.logInstance(structuredEvent, instance);
+  }
+
+  private logInstanceHealthWarning(
+    record: SimulationSessionRecord,
+    instance: GameInstanceStatus,
+    event: GameInstanceManagerEvent
+  ): void {
+    record.logs.push(
+      this.createLog(
+        record.request.runConfig.sessionId,
+        'warn',
+        `Game instance ${instance.instanceId} health warning: ${event.message ?? instance.status}.`
+      )
+    );
+    const structuredEvent = record.structuredLogger.logSession(
+      'instance_health_warning',
+      {
+        status: instance.status,
+        previousStatus: event.previousStatus,
+        message: event.message,
+        assignedBots: instance.assignedBots,
+        details: event.details ?? {}
+      },
+      {
+        gameInstanceId: instance.instanceId,
+        timestamp: event.timestamp
+      }
+    );
+    record.structuredLogger.logInstance(structuredEvent, instance);
+  }
+
+  private logInstanceRestart(
+    record: SimulationSessionRecord,
+    instance: GameInstanceStatus,
+    event: GameInstanceManagerEvent
+  ): void {
+    record.logs.push(
+      this.createLog(
+        record.request.runConfig.sessionId,
+        'warn',
+        `Restarting game instance ${instance.instanceId}: ${event.message ?? 'restart requested'}.`
+      )
+    );
+    const structuredEvent = record.structuredLogger.logSession(
+      'instance_restart',
+      {
+        status: instance.status,
+        previousStatus: event.previousStatus,
+        message: event.message,
+        assignedBots: instance.assignedBots,
+        details: event.details ?? {}
+      },
+      {
+        gameInstanceId: instance.instanceId,
+        timestamp: event.timestamp
+      }
+    );
+    record.structuredLogger.logInstance(structuredEvent, instance);
+  }
+
+  private logInstanceSaveIsolation(
+    record: SimulationSessionRecord,
+    instance: GameInstanceStatus,
+    event: GameInstanceManagerEvent
+  ): void {
+    record.logs.push(
+      this.createLog(
+        record.request.runConfig.sessionId,
+        'info',
+        `Game instance ${instance.instanceId} save/profile isolation: ${event.message ?? instance.saveIsolationMode ?? 'prepared'}.`
+      )
+    );
+    const structuredEvent = record.structuredLogger.logSession(
+      'instance_save_isolation',
+      {
+        status: instance.status,
+        previousStatus: event.previousStatus,
+        message: event.message,
+        assignedBots: instance.assignedBots,
+        saveProfileId: instance.saveProfileId,
+        isolatedSaveDirectory: instance.isolatedSaveDirectory,
+        saveIsolationMode: instance.saveIsolationMode,
+        saveIsolationCleanedUp: instance.saveIsolationCleanedUp,
+        details: event.details ?? {}
+      },
+      {
+        gameInstanceId: instance.instanceId,
+        timestamp: event.timestamp
+      }
+    );
+    record.structuredLogger.logInstance(structuredEvent, instance);
   }
 
   private logBotStart(record: SimulationSessionRecord, botId: string): void {
@@ -2974,11 +3924,11 @@ export class SimulationService {
     );
   }
 
-  private logRuntimeArtifacts(
+  private async logRuntimeArtifacts(
     record: SimulationSessionRecord,
     status: RuntimeBotSnapshot,
     memory: BotMemory
-  ): void {
+  ): Promise<void> {
     if (['starting', 'running', 'waiting'].includes(status.status)) {
       this.logBotStart(record, status.botId);
     }
@@ -3036,7 +3986,7 @@ export class SimulationService {
         record.lastPeriodicScreenshotActionCountByBot.get(status.botId) !== memory.actionCount
       ) {
         record.lastPeriodicScreenshotActionCountByBot.set(status.botId, memory.actionCount);
-        this.captureScreenshotEvidence(record, {
+        await this.captureScreenshotEvidence(record, {
           botId: status.botId,
           instanceId: status.gameInstanceId,
           reason: `action-${memory.actionCount}`,
@@ -3047,7 +3997,7 @@ export class SimulationService {
     }
 
     if (memory.stuckReason && ['waiting', 'blocked'].includes(status.status)) {
-      this.captureScreenshotEvidence(record, {
+      await this.captureScreenshotEvidence(record, {
         botId: status.botId,
         instanceId: status.gameInstanceId,
         reason: 'stuck',
@@ -3057,7 +4007,7 @@ export class SimulationService {
     }
 
     if (memory.progressState?.startsWith('Recovery failed')) {
-      this.captureScreenshotEvidence(record, {
+      await this.captureScreenshotEvidence(record, {
         botId: status.botId,
         instanceId: status.gameInstanceId,
         reason: 'recovery-failed',
@@ -3172,6 +4122,11 @@ export class SimulationService {
   }
 
   private writeStructuredReports(record: SimulationSessionRecord): void {
+    if (record.persisted) {
+      this.metadataForRecord(record);
+      return;
+    }
+
     const bots = this.botReportInputsForRecord(record);
     const coverage = this.contentCoverageForRecord(record);
 
@@ -3193,6 +4148,7 @@ export class SimulationService {
       stoppedAt: record.stoppedAt
     });
     record.structuredLogger.writeBotReports(bots);
+    this.metadataForRecord(record);
   }
 
   private botReportInputsForRecord(record: SimulationSessionRecord): BotReportInput[] {
@@ -3241,7 +4197,7 @@ export class SimulationService {
     contentWithIssues: string[];
     contentByBotType: string[];
   } {
-    const summary = record.coverageTracker.getSummary();
+    const summary = this.coverageSummaryForRecord(record);
 
     return {
       percentage: summary.percentage,
@@ -3293,11 +4249,15 @@ export class SimulationService {
     };
   }
 
-  private updateBotStatus(
+  private coverageSummaryForRecord(record: SimulationSessionRecord): ContentCoverageSummary {
+    return record.persistedCoverageSummary ?? record.coverageTracker.getSummary();
+  }
+
+  private async updateBotStatus(
     record: SimulationSessionRecord,
     status: RuntimeBotSnapshot,
     memory: BotMemory
-  ): void {
+  ): Promise<void> {
     const botIndex = record.botStatuses.findIndex((bot) => bot.botId === status.botId);
 
     if (botIndex === -1) {
@@ -3322,33 +4282,37 @@ export class SimulationService {
       const memory = record.botManager.getMemory(bot.botId);
       return total + (memory?.actionCount ?? 0);
     }, 0);
-    record.instanceStatuses = record.instanceStatuses.map((instance, index) => ({
-      ...instance,
-      status: record.status === 'running' ? 'running' : instance.status,
-      lastHeartbeat: this.now(),
-      resourceUsage: {
-        cpuPercent: Math.min(95, 10 + record.tick * 1.5 + index * 3),
-        ramMb: 512 + record.botStatuses.length * 96 + index * 160,
-        gpuPercent: record.request.runConfig.saveVideo ? Math.min(80, 6 + record.tick + index) : undefined
-      }
-    }));
+    if (record.useMockRuntime) {
+      record.instanceStatuses = record.instanceStatuses.map((instance, index) => ({
+        ...instance,
+        status: record.status === 'running' ? 'running' : instance.status,
+        lastHeartbeat: this.now(),
+        resourceUsage: {
+          cpuPercent: Math.min(95, 10 + record.tick * 1.5 + index * 3),
+          ramMb: 512 + record.botStatuses.length * 96 + index * 160,
+          gpuPercent: record.request.runConfig.saveVideo ? Math.min(80, 6 + record.tick + index) : undefined
+        }
+      }));
+    } else {
+      void this.refreshInstanceHealth(record);
+    }
     record.label = statusLabel(record);
 
     if (['blocked', 'failed'].includes(status.status)) {
-      this.createSyntheticIssue(record, status, memory);
+      await this.createSyntheticIssue(record, status, memory);
     }
 
-    this.detectAutomaticIssues(record, status, memory);
-    this.logRuntimeArtifacts(record, status, memory);
+    await this.detectAutomaticIssues(record, status, memory);
+    await this.logRuntimeArtifacts(record, status, memory);
     this.writeStructuredReports(record);
     this.completeSessionIfNoActiveBots(record);
   }
 
-  private detectAutomaticIssues(
+  private async detectAutomaticIssues(
     record: SimulationSessionRecord,
     status: RuntimeBotSnapshot,
     memory: BotMemory
-  ): void {
+  ): Promise<void> {
     const instanceStatus = status.gameInstanceId
       ? record.instanceStatuses.find((instance) => instance.instanceId === status.gameInstanceId)
       : undefined;
@@ -3363,7 +4327,7 @@ export class SimulationService {
     });
 
     for (const issue of issues) {
-      this.recordDetectedIssue(record, issue);
+      await this.recordDetectedIssue(record, issue);
     }
 
     if (issues.some((issue) => issue.severity === 'critical') && record.request.runConfig.stopOnCriticalIssue) {
@@ -3371,13 +4335,13 @@ export class SimulationService {
     }
   }
 
-  private recordDetectedIssue(record: SimulationSessionRecord, issue: DetectedIssue): boolean {
+  private async recordDetectedIssue(record: SimulationSessionRecord, issue: DetectedIssue): Promise<boolean> {
     if (record.issues.some((existing) => existing.issueId === issue.issueId || existing.id === issue.id)) {
       return false;
     }
 
     const memory = issue.botId ? record.botManager.getMemory(issue.botId) : undefined;
-    const screenshotPath = this.captureScreenshotEvidence(record, {
+    const screenshotEvidence = await this.captureScreenshotEvidence(record, {
       botId: issue.botId,
       instanceId: issue.gameInstanceId,
       reason: 'issue-detected',
@@ -3387,8 +4351,13 @@ export class SimulationService {
     });
     const videoPath = issue.botId ? record.videoPathsByBot.get(issue.botId) : undefined;
 
-    issue.screenshotPath = issue.screenshotPath ?? screenshotPath;
+    if (screenshotEvidence?.path && !screenshotEvidence.fallback) {
+      issue.screenshotPath = screenshotEvidence.path;
+    } else {
+      issue.screenshotPath = issue.screenshotPath ?? screenshotEvidence?.path;
+    }
     issue.videoPath = issue.videoPath ?? videoPath;
+    this.attachScreenshotEvidenceMetadata(issue, screenshotEvidence);
     this.addEvidencePath(issue, issue.screenshotPath);
     this.addEvidencePath(issue, issue.videoPath);
 
@@ -3434,11 +4403,11 @@ export class SimulationService {
     });
   }
 
-  private createSyntheticIssue(
+  private async createSyntheticIssue(
     record: SimulationSessionRecord,
     status: RuntimeBotSnapshot,
     memory: BotMemory
-  ): void {
+  ): Promise<void> {
     const issueId = `${record.request.runConfig.sessionId}-${status.botId}-${status.status}`;
     const recoveryFailed = memory.progressState?.startsWith('Recovery failed') ?? false;
 
@@ -3478,7 +4447,7 @@ export class SimulationService {
       reproducible: false
     };
 
-    this.recordDetectedIssue(record, issue);
+    await this.recordDetectedIssue(record, issue);
   }
 
   private createLog(sessionId: string, level: LogEntry['level'], message: string): LogEntry {
@@ -3542,7 +4511,17 @@ export class SimulationService {
   }
 
   private requireSession(sessionId: string): SimulationSessionRecord {
-    const record = this.sessions.get(sessionId);
+    let record = this.sessions.get(sessionId);
+
+    if (!record) {
+      try {
+        const artifacts = this.sessionRepository.loadSession(sessionId);
+        record = this.recordFromPersistedArtifacts(artifacts);
+        this.sessions.set(sessionId, record);
+      } catch {
+        // Fall through to the normal missing-session error below.
+      }
+    }
 
     if (!record) {
       throw new Error(`Session "${sessionId}" does not exist.`);

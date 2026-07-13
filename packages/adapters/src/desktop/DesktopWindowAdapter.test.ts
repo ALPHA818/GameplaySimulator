@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ControlBinding, GameAction, GameInstanceConfig } from '@core/types';
 import { afterEach, describe, expect, it } from 'vitest';
+import { DesktopAdapterDependencyChecker } from './DesktopAdapterDependencyChecker';
 import {
   DesktopWindowAdapter,
   type DesktopInputDriver,
@@ -12,6 +13,11 @@ import {
   type KeyboardInputRequest,
   type MouseInputRequest
 } from './DesktopWindowAdapter';
+
+const dependencyChecker = new DesktopAdapterDependencyChecker({
+  platform: 'linux',
+  commandExists: async (command) => ['xdotool', 'scrot'].includes(command)
+});
 
 class RecordingInputDriver implements DesktopInputDriver {
   readonly keyboard: KeyboardInputRequest[] = [];
@@ -108,19 +114,33 @@ describe('DesktopWindowAdapter', () => {
   });
 
   it('launches a local executable and detects whether the process is alive', async () => {
-    const adapter = new DesktopWindowAdapter({ controlBindings: controls, processStopTimeoutMs: 300 });
+    const adapter = new DesktopWindowAdapter({
+      controlBindings: controls,
+      dependencyChecker,
+      processStopTimeoutMs: 300
+    });
     adapters.push(adapter);
 
     const instance = await adapter.launchInstance(instanceConfig);
     const processInfo = await adapter.getProcessInfo(instance.instanceId);
 
     expect(instance.metadata.browserSpecific).toBe(false);
+    expect(instance.metadata.dependencyReport).toMatchObject({
+      canSendKeyboardInput: true,
+      canCaptureScreenshots: true
+    });
     expect(processInfo?.pid).toBeGreaterThan(0);
     expect(await adapter.isRunning(instance.instanceId)).toBe(true);
+
+    const health = await adapter.getHealth(instance.instanceId);
+    expect(health.details.processInfo).toMatchObject({ alive: true });
+    expect(health.details.lastHeartbeatAt).toBeDefined();
 
     await adapter.stopInstance(instance.instanceId);
 
     expect(await adapter.isRunning(instance.instanceId)).toBe(false);
+    const logs = await adapter.captureLogs(instance.instanceId);
+    expect(logs.some((log) => log.message.includes('graceful stop signal'))).toBe(true);
   });
 
   it('maps GameAction objects to keyboard and mouse controls', async () => {

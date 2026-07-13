@@ -32,6 +32,7 @@ In short: instrumented adapters give the best results, `DesktopWindowAdapter` wo
 - `npm run desktop` starts the same desktop app entry point.
 - `npm run build` type-checks and builds the desktop app and placeholder runner.
 - `npm run test` runs the Vitest test suite.
+- `npm run example:instrumented-server` starts the fake local instrumented game server.
 
 ## Usage Examples
 
@@ -54,6 +55,10 @@ Create a Browser Game Profile with the local or staging URL. Select `browser` as
 ### Testing a Generic Desktop Game
 
 Create a Game Profile with engine type `custom` or `unknown`, launch platform `windows`, `linux`, or `mac`, and adapter type `desktop`. Map actions to controls such as `move up -> W`, `interact -> E`, `jump -> Space`, and `attack -> MouseLeft`. Desktop-window testing can launch the executable, send mapped input, capture screenshots, and collect limited process/window telemetry.
+
+### Testing The Instrumented Adapter
+
+Start the fake local game server with `npm run example:instrumented-server`, then create an instrumented Game Profile with endpoint `http://127.0.0.1:4317` and transport `Local HTTP`. See [examples/instrumented-test-server](examples/instrumented-test-server/README.md) for the full setup.
 
 ### Running Multiple Explorer Bots
 

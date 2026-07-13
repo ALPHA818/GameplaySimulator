@@ -19,12 +19,18 @@ import type {
   GitHubIssuePostRequest,
   GitHubIssuePostResult,
   ContentCoverageSummary,
+  DesktopControlTestRequest,
+  DesktopControlTestResult,
+  GameProfileTestRequest,
+  GameProfileTestResult,
+  PersistedSessionMetadata,
   SimulationBotStatus,
   SimulationSessionCreateResult,
   SimulationSessionStatusSnapshot,
   StructuredLogReadResult,
   SimulationValidationResult
 } from '../main/services/simulationService';
+import type { DesktopAdapterDependencyReport } from '../../../../packages/adapters/src';
 
 interface SimulationSessionPayload {
   runConfig: SimulationRunConfig;
@@ -47,10 +53,20 @@ const api = {
   simulation: {
     createSession: (payload: SimulationSessionPayload) =>
       ipcRenderer.invoke('simulation:createSession', payload) as Promise<SimulationSessionCreateResult>,
+    listSessions: () =>
+      ipcRenderer.invoke('simulation:listSessions') as Promise<PersistedSessionMetadata[]>,
+    reloadSessions: () =>
+      ipcRenderer.invoke('simulation:reloadSessions') as Promise<PersistedSessionMetadata[]>,
     validateSessionConfig: (payload: SimulationSessionPayload) =>
       ipcRenderer.invoke('simulation:validateSessionConfig', payload) as Promise<SimulationValidationResult>,
     estimateViability: (payload: SimulationSessionPayload) =>
       ipcRenderer.invoke('simulation:estimateViability', payload) as Promise<RuntimeViabilityReport>,
+    getDesktopAdapterDependencies: () =>
+      ipcRenderer.invoke('simulation:getDesktopAdapterDependencies') as Promise<DesktopAdapterDependencyReport>,
+    testGameProfile: (payload: GameProfileTestRequest) =>
+      ipcRenderer.invoke('simulation:testGameProfile', payload) as Promise<GameProfileTestResult>,
+    testDesktopControl: (payload: DesktopControlTestRequest) =>
+      ipcRenderer.invoke('simulation:testDesktopControl', payload) as Promise<DesktopControlTestResult>,
     startSession: (sessionId: string) =>
       ipcRenderer.invoke('simulation:startSession', sessionId) as Promise<SimulationSessionStatusSnapshot>,
     stopSession: (sessionId: string) =>

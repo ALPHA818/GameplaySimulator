@@ -1,20 +1,62 @@
 import { useEffect, useMemo, useState } from 'react';
+import type { PersistedSessionMetadata } from '../../../main/services/simulationService';
+import { FieldLabel } from '../components/FormFields';
 import { useConfigStore } from '../store/configStore';
+import { useSessionStore } from '../store/sessionStore';
+
+function sessionLabel(session: PersistedSessionMetadata): string {
+  const build = [session.version, session.buildId].filter(Boolean).join(' / ');
+  return `${session.sessionId} (${session.gameName}${build ? ` ${build}` : ''})`;
+}
+
+function formatCoverage(value: number | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value)}%` : 'Not measured';
+}
 
 export function ReportsPage() {
-  const runConfigs = useConfigStore((state) => state.runConfigs);
-  const sessionOptions = useMemo(
-    () =>
-      runConfigs.map((config) => ({
-        sessionId: config.sessionId,
-        label: `${config.sessionId} (${config.gameProfilePath.replace('memory://game-profiles/', '')})`
-      })),
-    [runConfigs]
-  );
+  const navigate = useConfigStore((state) => state.navigate);
+  const setReviewSessionId = useSessionStore((state) => state.setReviewSessionId);
+  const [sessions, setSessions] = useState<PersistedSessionMetadata[]>([]);
   const [oldSessionId, setOldSessionId] = useState('');
   const [newSessionId, setNewSessionId] = useState('');
   const [comparisonMessage, setComparisonMessage] = useState('');
   const [comparisonState, setComparisonState] = useState<'ready' | 'loading' | 'error'>('ready');
+  const [loadMessage, setLoadMessage] = useState('');
+  const [loadState, setLoadState] = useState<'ready' | 'loading' | 'error'>('loading');
+  const sessionOptions = useMemo(
+    () =>
+      sessions.map((session) => ({
+        sessionId: session.sessionId,
+        label: sessionLabel(session)
+      })),
+    [sessions]
+  );
+
+  async function loadSessions(reload = false) {
+    setLoadState('loading');
+    setLoadMessage(reload ? 'Reloading saved sessions...' : 'Loading saved sessions...');
+
+    try {
+      const loadedSessions = reload
+        ? await window.gameplaySimulator.simulation.reloadSessions()
+        : await window.gameplaySimulator.simulation.listSessions();
+
+      setSessions(loadedSessions);
+      setLoadState('ready');
+      setLoadMessage(
+        loadedSessions.length === 0
+          ? 'No saved sessions were found in the runs folder.'
+          : `${loadedSessions.length} saved session${loadedSessions.length === 1 ? '' : 's'} loaded from the runs folder.`
+      );
+    } catch (error) {
+      setLoadState('error');
+      setLoadMessage(error instanceof Error ? error.message : 'Unable to load saved sessions.');
+    }
+  }
+
+  useEffect(() => {
+    void loadSessions();
+  }, []);
 
   useEffect(() => {
     if (!newSessionId && sessionOptions[0]) {
@@ -27,7 +69,25 @@ export function ReportsPage() {
   }, [newSessionId, oldSessionId, sessionOptions]);
 
   async function openReport(sessionId: string) {
-    await window.gameplaySimulator.simulation.openReport(sessionId);
+    const result = await window.gameplaySimulator.simulation.openReport(sessionId);
+    setLoadState(result.opened ? 'ready' : 'error');
+    setLoadMessage(result.message);
+  }
+
+  async function openLogs(sessionId: string) {
+    const result = await window.gameplaySimulator.simulation.openLogs(sessionId);
+    setLoadState(result.opened ? 'ready' : 'error');
+    setLoadMessage(result.message);
+  }
+
+  function viewIssues(sessionId: string) {
+    setReviewSessionId(sessionId);
+    navigate('issues');
+  }
+
+  function exportIssues(sessionId: string) {
+    setReviewSessionId(sessionId);
+    navigate('issues');
   }
 
   async function generateComparison() {
@@ -65,13 +125,26 @@ export function ReportsPage() {
           <p className="eyebrow">Output</p>
           <h1>Reports</h1>
         </div>
+        <div className="page-actions">
+          <FieldLabel label="Reload Sessions" />
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={loadState === 'loading'}
+            onClick={() => void loadSessions(true)}
+          >
+            Reload
+          </button>
+        </div>
       </div>
+
+      {loadMessage ? <div className={`inline-notice inline-notice--${loadState}`}>{loadMessage}</div> : null}
 
       <section className="form-section">
         <div className="section-header-row">
           <div>
             <p className="eyebrow">Build comparison</p>
-            <h2>Compare Sessions</h2>
+            <h2><FieldLabel label="Compare Sessions" /></h2>
           </div>
           <button
             className="primary-button"
@@ -84,9 +157,10 @@ export function ReportsPage() {
         </div>
 
         <div className="field-grid">
-          <label className="field">
-            <span className="field__label">Old Session</span>
+          <div className="field">
+            <FieldLabel label="Old Session" htmlFor="old-session-comparison" />
             <select
+              id="old-session-comparison"
               className="input"
               value={oldSessionId}
               disabled={sessionOptions.length < 2}
@@ -99,11 +173,12 @@ export function ReportsPage() {
                 </option>
               ))}
             </select>
-          </label>
+          </div>
 
-          <label className="field">
-            <span className="field__label">New Session</span>
+          <div className="field">
+            <FieldLabel label="New Session" htmlFor="new-session-comparison" />
             <select
+              id="new-session-comparison"
               className="input"
               value={newSessionId}
               disabled={sessionOptions.length < 2}
@@ -116,7 +191,7 @@ export function ReportsPage() {
                 </option>
               ))}
             </select>
-          </label>
+          </div>
         </div>
 
         {sessionOptions.length < 2 ? (
@@ -128,40 +203,47 @@ export function ReportsPage() {
 
       <div className="table-surface">
         <div className="table-row table-row--head table-row--report">
-          <span>Session</span>
-          <span>Profile</span>
-          <span>Mode</span>
-          <span>Bots</span>
-          <span>Evidence</span>
-          <span>Report</span>
+          <FieldLabel label="Session" />
+          <FieldLabel label="Session Status" />
+          <FieldLabel label="Issue Count" />
+          <FieldLabel label="Coverage Percentage" />
+          <FieldLabel label="Mode" />
+          <FieldLabel label="Bots" />
+          <FieldLabel label="Report Actions" />
         </div>
-        {runConfigs.length === 0 ? (
+        {sessions.length === 0 ? (
           <div className="empty-row">No reports yet</div>
         ) : (
-          runConfigs.map((config) => {
-            const botCount = config.botPools.reduce(
-              (total, pool) => total + (pool.enabled ? pool.desiredCount : 0),
-              0
-            );
-
-            return (
-              <div className="table-row table-row--report" key={config.sessionId}>
-                <span>{config.sessionId}</span>
-                <span>{config.gameProfilePath.replace('memory://game-profiles/', '')}</span>
-                <span>{config.runMode}</span>
-                <span>{botCount}</span>
-                <span>
-                  {config.saveScreenshots ? 'Screenshots' : 'No screenshots'}
-                  {config.saveVideo ? ' + video' : ''}
-                </span>
-                <span>
-                  <button className="secondary-button" type="button" onClick={() => void openReport(config.sessionId)}>
-                    Open
-                  </button>
-                </span>
-              </div>
-            );
-          })
+          sessions.map((session) => (
+            <div className="table-row table-row--report" key={session.sessionId}>
+              <span>
+                <strong>{session.sessionId}</strong>
+                <small>{session.gameName}{session.buildId ? ` · ${session.buildId}` : ''}</small>
+              </span>
+              <span>{session.status}</span>
+              <span>{session.issueCounts.total}</span>
+              <span>{formatCoverage(session.coveragePercentage)}</span>
+              <span>{session.runMode ?? 'unknown'}</span>
+              <span>
+                {session.botCounts.actual}/{session.botCounts.requested}
+                <small>{session.botCounts.stuck} stuck</small>
+              </span>
+              <span className="report-actions">
+                <button className="secondary-button" type="button" onClick={() => void openReport(session.sessionId)}>
+                  Open report
+                </button>
+                <button className="secondary-button" type="button" onClick={() => viewIssues(session.sessionId)}>
+                  View issues
+                </button>
+                <button className="secondary-button" type="button" onClick={() => void openLogs(session.sessionId)}>
+                  View logs
+                </button>
+                <button className="secondary-button" type="button" onClick={() => exportIssues(session.sessionId)}>
+                  Export issues
+                </button>
+              </span>
+            </div>
+          ))
         )}
       </div>
     </section>

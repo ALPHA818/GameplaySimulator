@@ -20,12 +20,18 @@ import type {
   GitHubIssuePostRequest,
   GitHubIssuePostResult,
   ContentCoverageSummary,
+  DesktopControlTestRequest,
+  DesktopControlTestResult,
+  GameProfileTestRequest,
+  GameProfileTestResult,
+  PersistedSessionMetadata,
   SimulationBotStatus,
   SimulationSessionCreateResult,
   SimulationSessionStatusSnapshot,
   StructuredLogReadResult,
   SimulationValidationResult
 } from '../../main/services/simulationService';
+import type { DesktopAdapterDependencyReport } from '../../../../../packages/adapters/src';
 
 interface SimulationSessionPayload {
   runConfig: SimulationRunConfig;
@@ -47,8 +53,13 @@ declare global {
       };
       simulation: {
         createSession: (payload: SimulationSessionPayload) => Promise<SimulationSessionCreateResult>;
+        listSessions: () => Promise<PersistedSessionMetadata[]>;
+        reloadSessions: () => Promise<PersistedSessionMetadata[]>;
         validateSessionConfig: (payload: SimulationSessionPayload) => Promise<SimulationValidationResult>;
         estimateViability: (payload: SimulationSessionPayload) => Promise<RuntimeViabilityReport>;
+        getDesktopAdapterDependencies: () => Promise<DesktopAdapterDependencyReport>;
+        testGameProfile: (payload: GameProfileTestRequest) => Promise<GameProfileTestResult>;
+        testDesktopControl: (payload: DesktopControlTestRequest) => Promise<DesktopControlTestResult>;
         startSession: (sessionId: string) => Promise<SimulationSessionStatusSnapshot>;
         stopSession: (sessionId: string) => Promise<SimulationSessionStatusSnapshot>;
         pauseSession: (sessionId: string) => Promise<SimulationSessionStatusSnapshot>;

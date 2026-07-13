@@ -1,3 +1,4 @@
+import { FieldLabel } from '../components/FormFields';
 import { useConfigStore } from '../store/configStore';
 
 function percent(value: number | undefined): string {
@@ -18,11 +19,21 @@ export function BotProfilesPage() {
 
       <div className="table-surface table-surface--compact">
         <div className="table-row table-row--head table-row--bot">
-          <span>Bot</span>
-          <span>Playstyle</span>
-          <span>Traits</span>
-          <span>Actions</span>
-          <span>Counts</span>
+          <span>
+            <FieldLabel label="Bot" />
+          </span>
+          <span>
+            <FieldLabel label="Playstyle" />
+          </span>
+          <span>
+            <FieldLabel label="Traits" />
+          </span>
+          <span>
+            <FieldLabel label="Actions" />
+          </span>
+          <span>
+            <FieldLabel label="Counts" />
+          </span>
         </div>
         {botProfiles.map((profile) => (
           <div className="table-row table-row--bot" key={profile.profileId}>

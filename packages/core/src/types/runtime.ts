@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AdapterTypeSchema, LaunchConfigSchema } from './adapter';
 import { BotStatusSchema } from './bot';
+import { SaveIsolationModeSchema } from './gameProfile';
 
 export const GameStateSnapshotSchema = z.object({
   snapshotId: z.string().min(1),
@@ -40,12 +41,31 @@ export const ActionResultSchema = z.object({
   issueIds: z.array(z.string().min(1)).default([])
 });
 
+export const SaveIsolationRuntimeInfoSchema = z.object({
+  mode: SaveIsolationModeSchema,
+  profileId: z.string().min(1).optional(),
+  sourceSavePath: z.string().min(1).optional(),
+  workingSaveRoot: z.string().min(1).optional(),
+  isolatedSaveDirectory: z.string().min(1).optional(),
+  profileArgumentTemplate: z.string().min(1).optional(),
+  resolvedProfileArgument: z.string().min(1).optional(),
+  environmentVariableName: z.string().min(1).optional(),
+  environmentVariableValue: z.string().min(1).optional(),
+  cleanupTempSaves: z.boolean().default(false),
+  preserveBotSaves: z.boolean().default(true),
+  createdAt: z.string().min(1).optional(),
+  copiedFromSource: z.boolean().optional(),
+  cleanedUpAt: z.string().min(1).optional(),
+  warnings: z.array(z.string()).default([])
+});
+
 export const GameInstanceConfigSchema = z.object({
   instanceId: z.string().min(1),
   gameProfileId: z.string().min(1),
   launch: LaunchConfigSchema,
   saveProfileId: z.string().min(1).optional(),
   isolatedSaveDirectory: z.string().min(1).optional(),
+  saveIsolation: SaveIsolationRuntimeInfoSchema.optional(),
   maxBots: z.number().int().min(1),
   environment: z.record(z.string(), z.string()).default({})
 });
@@ -67,7 +87,8 @@ export const GameInstanceRuntimeStatusSchema = z.enum([
   'stopping',
   'stopped',
   'crashed',
-  'unresponsive'
+  'unresponsive',
+  'failed'
 ]);
 
 export const GameInstanceResourceUsageSchema = z.object({
@@ -85,6 +106,10 @@ export const GameInstanceStatusSchema = z.object({
   assignedBots: z.array(z.string().min(1)).default([]),
   startTime: z.string().min(1),
   lastHeartbeat: z.string().min(1),
+  saveProfileId: z.string().min(1).optional(),
+  isolatedSaveDirectory: z.string().min(1).optional(),
+  saveIsolationMode: SaveIsolationModeSchema.optional(),
+  saveIsolationCleanedUp: z.boolean().optional(),
   resourceUsage: GameInstanceResourceUsageSchema.optional()
 });
 
@@ -133,6 +158,7 @@ export const RuntimeBotSnapshotSchema = z.object({
 export type GameStateSnapshot = z.infer<typeof GameStateSnapshotSchema>;
 export type GameAction = z.infer<typeof GameActionSchema>;
 export type ActionResult = z.infer<typeof ActionResultSchema>;
+export type SaveIsolationRuntimeInfo = z.infer<typeof SaveIsolationRuntimeInfoSchema>;
 export type GameInstanceConfig = z.infer<typeof GameInstanceConfigSchema>;
 export type ResourceEstimate = z.infer<typeof ResourceEstimateSchema>;
 export type GameInstanceRuntimeStatus = z.infer<typeof GameInstanceRuntimeStatusSchema>;

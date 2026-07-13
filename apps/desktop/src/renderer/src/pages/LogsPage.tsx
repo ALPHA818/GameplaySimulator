@@ -1,5 +1,6 @@
 import { Copy, FileJson, Filter, RefreshCw, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { FieldLabel } from '../components/FormFields';
 import { useSessionStore } from '../store/sessionStore';
 
 type StructuredLogItem = Awaited<
@@ -171,18 +172,26 @@ export function LogsPage() {
       </div>
 
       <section className="filter-surface" aria-label="Log filters">
-        <label className="filter-field filter-field--search">
+        <div className="filter-field filter-field--search">
+          <FieldLabel label="Search" htmlFor="log-search" />
           <Search size={16} aria-hidden="true" />
           <input
+            id="log-search"
             className="input"
             value={query}
             placeholder="Search logs"
             onChange={(event) => setQuery(event.target.value)}
           />
-        </label>
-        <label className="filter-field">
+        </div>
+        <div className="filter-field">
+          <FieldLabel label="Source" htmlFor="log-source-filter" />
           <Filter size={16} aria-hidden="true" />
-          <select className="input" value={source} onChange={(event) => setSource(event.target.value)}>
+          <select
+            id="log-source-filter"
+            className="input"
+            value={source}
+            onChange={(event) => setSource(event.target.value)}
+          >
             <option value="all">All sources</option>
             {Object.entries(sourceLabels).map(([value, label]) => (
               <option value={value} key={value}>
@@ -190,9 +199,15 @@ export function LogsPage() {
               </option>
             ))}
           </select>
-        </label>
-        <label className="filter-field">
-          <select className="input" value={eventType} onChange={(event) => setEventType(event.target.value)}>
+        </div>
+        <div className="filter-field">
+          <FieldLabel label="Event Type" htmlFor="log-event-type-filter" />
+          <select
+            id="log-event-type-filter"
+            className="input"
+            value={eventType}
+            onChange={(event) => setEventType(event.target.value)}
+          >
             <option value="all">All event types</option>
             {eventTypes.map((item) => (
               <option value={item} key={item}>
@@ -200,9 +215,10 @@ export function LogsPage() {
               </option>
             ))}
           </select>
-        </label>
-        <label className="filter-field">
-          <select className="input" value={botId} onChange={(event) => setBotId(event.target.value)}>
+        </div>
+        <div className="filter-field">
+          <FieldLabel label="Bot" htmlFor="log-bot-filter" />
+          <select id="log-bot-filter" className="input" value={botId} onChange={(event) => setBotId(event.target.value)}>
             <option value="all">All bots</option>
             {botIds.map((item) => (
               <option value={item} key={item}>
@@ -210,9 +226,15 @@ export function LogsPage() {
               </option>
             ))}
           </select>
-        </label>
-        <label className="filter-field">
-          <select className="input" value={instanceId} onChange={(event) => setInstanceId(event.target.value)}>
+        </div>
+        <div className="filter-field">
+          <FieldLabel label="Instance" htmlFor="log-instance-filter" />
+          <select
+            id="log-instance-filter"
+            className="input"
+            value={instanceId}
+            onChange={(event) => setInstanceId(event.target.value)}
+          >
             <option value="all">All instances</option>
             {instanceIds.map((item) => (
               <option value={item} key={item}>
@@ -220,7 +242,7 @@ export function LogsPage() {
               </option>
             ))}
           </select>
-        </label>
+        </div>
       </section>
 
       {loadMessage ? <div className={`inline-notice inline-notice--${loadState}`}>{loadMessage}</div> : null}
@@ -278,19 +300,19 @@ export function LogsPage() {
 
               <div className="issue-meta-grid">
                 <div>
-                  <span>Timestamp</span>
+                  <FieldLabel label="Timestamp" />
                   <strong>{formatTimestamp(selectedLog.timestamp)}</strong>
                 </div>
                 <div>
-                  <span>Bot</span>
+                  <FieldLabel label="Bot" />
                   <strong>{selectedLog.botId ?? 'None'}</strong>
                 </div>
                 <div>
-                  <span>Instance</span>
+                  <FieldLabel label="Instance" />
                   <strong>{selectedLog.instanceId ?? 'None'}</strong>
                 </div>
                 <div>
-                  <span>Source</span>
+                  <FieldLabel label="Source" />
                   <strong>{sourceLabels[selectedLog.source]}</strong>
                 </div>
               </div>

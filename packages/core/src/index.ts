@@ -7,6 +7,7 @@ export * from './bot/BotPoolResolver';
 export * from './bot/defaultBotProfiles';
 export * from './bot/ProgressTracker';
 export * from './bot/RecoveryManager';
+export * from './config/advancedIntelligenceConfig';
 export * from './config/runConfig';
 export * from './coverage/CoverageTracker';
 export * from './detection/Issue';

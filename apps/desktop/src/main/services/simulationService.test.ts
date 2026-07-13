@@ -389,13 +389,89 @@ describe('SimulationService', () => {
     expect(started.status).toBe('running');
     expect(adapter.launchConfigs).toHaveLength(1);
     expect(adapter.launchConfigs[0].launch.url).toBe(gameProfile.launch.url);
-    expect(service.getInstanceStatuses(adapterRunConfig.sessionId).every((instance) => instance.status === 'running')).toBe(true);
+    expect((await service.getInstanceStatuses(adapterRunConfig.sessionId)).every((instance) => instance.status === 'running')).toBe(true);
 
     const stopped = await service.stopSession(adapterRunConfig.sessionId);
 
     expect(stopped.status).toBe('stopped');
     expect(adapter.stoppedAll).toBe(true);
-    expect(service.getInstanceStatuses(adapterRunConfig.sessionId).every((instance) => instance.status === 'stopped')).toBe(true);
+    expect((await service.getInstanceStatuses(adapterRunConfig.sessionId)).every((instance) => instance.status === 'stopped')).toBe(true);
+  });
+
+  it('tests a game profile through the selected adapter and cleans up the instance', async () => {
+    const adapter = new RecordingGameAdapter();
+    const createAdapter = vi.fn((_adapterType: SimulationRunConfig['adapterType'], _options?: unknown) => adapter);
+    const service = new SimulationService({
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot,
+      adapterFactory: { createAdapter }
+    });
+
+    const result = await service.testGameProfile({ gameProfile });
+
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe('succeeded');
+    expect(result.runtimeMode).toBe('browser');
+    expect(result.launched).toBe(true);
+    expect(result.stopped).toBe(true);
+    expect(result.availableActions).toEqual(['Wait']);
+    expect(result.stateSummary).toContain('Recording Adapter Scene');
+    expect(result.capabilities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'State read', supported: true }),
+        expect.objectContaining({ label: 'Keyboard/mouse input', supported: true })
+      ])
+    );
+    expect(adapter.launchConfigs).toHaveLength(1);
+    expect(adapter.launchConfigs[0].environment.GAMEPLAY_SIMULATOR_PROFILE_TEST).toBe('1');
+    expect(adapter.stoppedAll).toBe(true);
+  });
+
+  it('rejects invalid desktop adapter profiles before session startup', () => {
+    const createAdapter = vi.fn((_adapterType: SimulationRunConfig['adapterType'], _options?: unknown) => new RecordingGameAdapter());
+    const service = new SimulationService({
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot,
+      adapterFactory: { createAdapter }
+    });
+    const desktopRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-invalid-desktop-profile',
+      adapterType: 'desktop',
+      useMockRuntime: false
+    };
+    const desktopProfile: GameProfile = {
+      ...gameProfile,
+      engine: { type: 'unknown' },
+      launch: {
+        platform: 'windows',
+        arguments: []
+      },
+      adapter: {
+        ...gameProfile.adapter,
+        type: 'desktop',
+        supportsMultipleInstances: false,
+        supportsStateRead: false,
+        supportsDirectActions: false
+      },
+      controls: []
+    };
+    const payload = {
+      runConfig: desktopRunConfig,
+      gameProfile: desktopProfile,
+      botProfiles
+    };
+    const validation = service.validateSessionConfig(payload);
+
+    expect(validation.valid).toBe(false);
+    expect(validation.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: 'launch.executablePath' }),
+        expect.objectContaining({ path: 'controls' })
+      ])
+    );
+    expect(() => service.createSession(payload)).toThrow(/Desktop adapter profiles need an executable path/);
+    expect(createAdapter).not.toHaveBeenCalled();
   });
 
   it('reports adapter launch failures as failed sessions with critical issues', async () => {
@@ -632,6 +708,88 @@ describe('SimulationService', () => {
     expect(contents).toContain('## Crash Frequency Changes');
   });
 
+  it('loads saved sessions from disk after restart and compares persisted runs', async () => {
+    vi.useFakeTimers();
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-persisted-sessions-'));
+    const openedPaths: string[] = [];
+    let nowOffsetSeconds = 0;
+    const service = new SimulationService({
+      reportRoot,
+      now: () => new Date(Date.UTC(2026, 6, 4, 10, 0, nowOffsetSeconds++)).toISOString(),
+      systemSnapshot,
+      openPath: async (path) => {
+        openedPaths.push(path);
+        return '';
+      }
+    });
+    const oldRunConfig: SimulationRunConfig = {
+      ...boundaryRunConfig,
+      sessionId: 'session-persisted-old'
+    };
+    const newRunConfig: SimulationRunConfig = {
+      ...boundaryRunConfig,
+      sessionId: 'session-persisted-new'
+    };
+
+    service.createSession({
+      runConfig: oldRunConfig,
+      gameProfile: { ...gameProfile, version: '1.0.0', buildId: 'persisted-old-build' },
+      botProfiles: boundaryBotProfiles
+    });
+    await service.startSession(oldRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(350);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    service.createSession({
+      runConfig: newRunConfig,
+      gameProfile: { ...gameProfile, version: '1.0.1', buildId: 'persisted-new-build' },
+      botProfiles: boundaryBotProfiles
+    });
+    await service.startSession(newRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(350);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const restartedService = new SimulationService({
+      reportRoot,
+      now: () => new Date('2026-07-04T11:00:00.000Z').toISOString(),
+      systemSnapshot,
+      openPath: async (path) => {
+        openedPaths.push(path);
+        return '';
+      }
+    });
+    const savedSessions = restartedService.listSessions();
+    const oldMetadata = savedSessions.find((session) => session.sessionId === oldRunConfig.sessionId);
+    const newMetadata = savedSessions.find((session) => session.sessionId === newRunConfig.sessionId);
+
+    expect(oldMetadata).toEqual(expect.objectContaining({
+      gameName: gameProfile.gameName,
+      buildId: 'persisted-old-build',
+      status: 'stopped'
+    }));
+    expect(newMetadata).toEqual(expect.objectContaining({
+      buildId: 'persisted-new-build',
+      status: 'stopped'
+    }));
+    expect(oldMetadata?.issueCounts.total).toBeGreaterThan(0);
+    expect(existsSync(join(oldMetadata!.reportPaths.sessionDirectory, 'session.json'))).toBe(true);
+
+    const persistedIssues = restartedService.getIssues(oldRunConfig.sessionId);
+    expect(persistedIssues.some((issue) => issue.category === 'world_boundary')).toBe(true);
+
+    const report = await restartedService.openReport(oldRunConfig.sessionId);
+    const comparison = await restartedService.compareSessions(oldRunConfig.sessionId, newRunConfig.sessionId);
+    const comparisonContents = await readFile(comparison.reportPath, 'utf8');
+
+    expect(report.opened).toBe(true);
+    expect(comparison.opened).toBe(true);
+    expect(openedPaths).toContain(report.reportPath);
+    expect(openedPaths).toContain(comparison.reportPath);
+    expect(comparisonContents).toContain('Build Comparison');
+    expect(comparisonContents).toContain('persisted-old-build');
+    expect(comparisonContents).toContain('persisted-new-build');
+  });
+
   it('previews and exports GitHub issue markdown without a token', async () => {
     vi.useFakeTimers();
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-github-export-'));
@@ -752,7 +910,7 @@ describe('SimulationService', () => {
 
     expect(snapshots.find((snapshot) => snapshot.sessionId === interruptedRunConfig.sessionId)?.status).toBe('stopped');
     expect(service.getBotStatuses(interruptedRunConfig.sessionId).every((bot) => bot.status === 'stopped')).toBe(true);
-    expect(service.getInstanceStatuses(interruptedRunConfig.sessionId).every((instance) => instance.status === 'stopped')).toBe(true);
+    expect((await service.getInstanceStatuses(interruptedRunConfig.sessionId)).every((instance) => instance.status === 'stopped')).toBe(true);
     expect(sessionEvents.some((event) => event.eventType === 'manual_stop')).toBe(true);
     expect(sessionEvents.some((event) => event.eventType === 'session_stop')).toBe(true);
     expect(summary).toContain('GameplaySimulator Session');

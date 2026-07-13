@@ -9,10 +9,12 @@
     "desktop": "node scripts/electron-vite.mjs dev",
     "build": "tsc --noEmit && electron-vite build && npm run build:runner",
     "build:runner": "vite build --config apps/runner/vite.config.ts",
+    "example:instrumented-server": "node --experimental-strip-types examples/instrumented-test-server/src/server.ts",
     "test": "vitest run"
   },
   "dependencies": {
     "lucide-react": "^1.23.0",
+    "playwright": "^1.61.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "zod": "^4.4.3",

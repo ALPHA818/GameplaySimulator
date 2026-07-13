@@ -16,6 +16,10 @@ export type StructuredLogEventType =
   | 'session_stop'
   | 'instance_start'
   | 'instance_stop'
+  | 'instance_crash'
+  | 'instance_health_warning'
+  | 'instance_restart'
+  | 'instance_save_isolation'
   | 'bot_start'
   | 'bot_stop'
   | 'action_performed'
@@ -43,6 +47,7 @@ export interface StructuredRunLoggerOptions {
   rootDir: string;
   sessionId: string;
   createdAt: string;
+  sessionDir?: string;
   now?: () => string;
 }
 
@@ -261,7 +266,7 @@ export class SessionLogger {
 
   constructor(private readonly options: StructuredRunLoggerOptions) {
     this.now = options.now ?? (() => new Date().toISOString());
-    this.sessionDir = join(options.rootDir, `session-${timestampForFolder(options.createdAt)}`);
+    this.sessionDir = options.sessionDir ?? join(options.rootDir, `session-${timestampForFolder(options.createdAt)}`);
     this.sessionLogPath = join(this.sessionDir, 'session-log.jsonl');
     this.summaryPath = join(this.sessionDir, 'session-summary.md');
     this.htmlReportPath = join(this.sessionDir, 'session-report.html');
@@ -342,6 +347,13 @@ export class SessionLogger {
     const totalActions = input.bots.reduce((total, bot) => total + bot.actionCount, 0);
     const gameBuild = input.gameProfile.buildId ?? 'Not specified';
     const engineVersion = input.gameProfile.engine.version ? ` ${input.gameProfile.engine.version}` : '';
+    const saveIsolationRows = input.instances.map((instance) => [
+      instance.instanceId,
+      instance.saveIsolationMode ?? input.gameProfile.saveIsolation?.mode ?? 'none',
+      instance.saveProfileId ?? 'Shared/default',
+      instance.isolatedSaveDirectory ?? 'None',
+      instance.saveIsolationCleanedUp ? 'yes' : 'no'
+    ]);
     const lines = [
       `# GameplaySimulator Session: ${this.options.sessionId}`,
       '',
@@ -374,6 +386,18 @@ export class SessionLogger {
       `Game instances: ${input.instances.length}`,
       `Total actions: ${totalActions}`,
       `Total issues: ${input.issues.length}`,
+      '',
+      '## Save/Profile Isolation',
+      '',
+      `Configured mode: ${input.gameProfile.saveIsolation?.mode ?? 'none'}`,
+      `Source save path: ${input.gameProfile.saveIsolation?.sourceSavePath ?? 'None'}`,
+      `Working save root: ${input.gameProfile.saveIsolation?.workingSaveRoot ?? 'Default session saves folder'}`,
+      '',
+      ...markdownTable(
+        ['Instance', 'Mode', 'Profile', 'Save path', 'Cleaned up'],
+        saveIsolationRows,
+        'No game instances planned'
+      ),
       '',
       '## Resource Viability',
       '',

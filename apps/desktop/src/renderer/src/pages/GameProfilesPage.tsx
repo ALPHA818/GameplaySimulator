@@ -1,4 +1,5 @@
 import { Edit3, Plus } from 'lucide-react';
+import { FieldLabel } from '../components/FormFields';
 import { useConfigStore } from '../store/configStore';
 
 export function GameProfilesPage() {
@@ -20,11 +21,11 @@ export function GameProfilesPage() {
 
       <div className="table-surface">
         <div className="table-row table-row--head">
-          <span>Game</span>
-          <span>Engine</span>
-          <span>Adapter</span>
-          <span>Instances</span>
-          <span>Evidence</span>
+          <FieldLabel label="Game" />
+          <FieldLabel label="Engine" />
+          <FieldLabel label="Adapter" />
+          <FieldLabel label="Instances" />
+          <FieldLabel label="Evidence" />
           <span />
         </div>
         {profiles.map((profile) => (

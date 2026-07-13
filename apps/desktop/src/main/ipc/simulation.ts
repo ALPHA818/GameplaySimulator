@@ -6,10 +6,15 @@ const SessionIdSchema = z.string().min(1);
 
 export function registerSimulationIpc(service: SimulationService): void {
   ipcMain.handle('simulation:createSession', (_event, payload: unknown) => service.createSession(payload));
+  ipcMain.handle('simulation:listSessions', () => service.listSessions());
+  ipcMain.handle('simulation:reloadSessions', () => service.reloadPersistedSessions());
   ipcMain.handle('simulation:validateSessionConfig', (_event, payload: unknown) =>
     service.validateSessionConfig(payload)
   );
   ipcMain.handle('simulation:estimateViability', (_event, payload: unknown) => service.estimateViability(payload));
+  ipcMain.handle('simulation:getDesktopAdapterDependencies', () => service.getDesktopAdapterDependencies());
+  ipcMain.handle('simulation:testGameProfile', (_event, payload: unknown) => service.testGameProfile(payload));
+  ipcMain.handle('simulation:testDesktopControl', (_event, payload: unknown) => service.testDesktopControl(payload));
   ipcMain.handle('simulation:startSession', (_event, sessionId: unknown) =>
     service.startSession(SessionIdSchema.parse(sessionId))
   );

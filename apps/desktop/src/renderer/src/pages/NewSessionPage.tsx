@@ -11,7 +11,7 @@ import { planGameInstances } from '@core/sessions/GameInstanceManager';
 import { Pause, Play, Plus, RotateCw, Square, Trash2 } from 'lucide-react';
 import type { FormEvent } from 'react';
 import { useEffect, useMemo, useState } from 'react';
-import { SelectInput, TextInput, ToggleInput } from '../components/FormFields';
+import { FieldLabel, SelectInput, TextInput, ToggleInput } from '../components/FormFields';
 import { createBotPoolFromProfile, createDefaultBotPools, useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
 import type { FieldErrors } from '../utils/forms';
@@ -159,6 +159,8 @@ export function NewSessionPage() {
   const [validatedConfig, setValidatedConfig] = useState<SimulationRunConfig | null>(null);
   const [viabilityReport, setViabilityReport] = useState<RuntimeViabilityReport | null>(null);
   const [viabilityError, setViabilityError] = useState<string | null>(null);
+  const [adapterValidationErrors, setAdapterValidationErrors] = useState<string[]>([]);
+  const [adapterValidationWarnings, setAdapterValidationWarnings] = useState<string[]>([]);
   const [runAnyway, setRunAnyway] = useState(false);
   const [addPoolProfileId, setAddPoolProfileId] = useState('');
   const selectedProfile = gameProfiles.find((profile) => profile.gameId === form.gameProfileId);
@@ -182,6 +184,17 @@ export function NewSessionPage() {
     [adapterType, form, videoSupported]
   );
   const requestedBots = countRequestedBots(preview);
+  const screenshotEvery = optionalText(form.screenshotEveryNActions)
+    ? Math.max(1, Number(form.screenshotEveryNActions))
+    : undefined;
+  const estimatedScreenshotCount =
+    form.saveScreenshots && screenshotEvery
+      ? requestedBots * Math.ceil((optionalText(form.maxActionsPerBot) ? Number(form.maxActionsPerBot) : 250) / screenshotEvery)
+      : 0;
+  const diskUsageWarning =
+    form.saveScreenshots && screenshotEvery && (screenshotEvery < 10 || estimatedScreenshotCount > 300)
+      ? `This setup may create about ${estimatedScreenshotCount} periodic screenshots before issue/recovery evidence. Use a larger number like 20 or 50 to save disk space.`
+      : '';
   const resolvedLaunchPlans = useMemo<BotLaunchPlan[]>(() => {
     const parsed = SimulationRunConfigSchema.safeParse(preview);
 
@@ -212,6 +225,12 @@ export function NewSessionPage() {
       }
     });
   }, [preview, resolvedLaunchPlans, selectedProfile]);
+  const sharedSaveWarning =
+    plannedGameInstances &&
+    plannedGameInstances.instances.length > 1 &&
+    (selectedProfile?.saveIsolation?.mode ?? 'none') === 'none'
+      ? 'Multiple game instances are planned without save isolation. Bots may overwrite the same save/profile data.'
+      : '';
 
   useEffect(() => {
     let cancelled = false;
@@ -221,6 +240,8 @@ export function NewSessionPage() {
     if (!parsed.success || !selectedProfile) {
       setViabilityReport(null);
       setViabilityError('Complete the run configuration to estimate viability.');
+      setAdapterValidationErrors([]);
+      setAdapterValidationWarnings([]);
       return;
     }
 
@@ -238,6 +259,21 @@ export function NewSessionPage() {
         if (!cancelled) {
           setViabilityReport(null);
           setViabilityError('Resource estimate is unavailable.');
+        }
+      });
+
+    window.gameplaySimulator.simulation
+      .validateSessionConfig({ runConfig: parsed.data, gameProfile: selectedProfile, botProfiles })
+      .then((validation) => {
+        if (!cancelled) {
+          setAdapterValidationErrors(validation.errors.map((error) => `${error.path}: ${error.message}`));
+          setAdapterValidationWarnings(validation.warnings.map((warning) => `${warning.path}: ${warning.message}`));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAdapterValidationErrors(['Adapter profile validation is unavailable.']);
+          setAdapterValidationWarnings([]);
         }
       });
 
@@ -372,11 +408,14 @@ export function NewSessionPage() {
       setErrors({
         form: backendValidation.errors.map((error) => `${error.path}: ${error.message}`).join(' ')
       });
+      setAdapterValidationErrors(backendValidation.errors.map((error) => `${error.path}: ${error.message}`));
+      setAdapterValidationWarnings(backendValidation.warnings.map((warning) => `${warning.path}: ${warning.message}`));
       setValidatedConfig(null);
       return;
     }
 
     try {
+      setAdapterValidationWarnings(backendValidation.warnings.map((warning) => `${warning.path}: ${warning.message}`));
       const created = await window.gameplaySimulator.simulation.createSession(payload);
       const started = await window.gameplaySimulator.simulation.startSession(created.sessionId);
 
@@ -561,13 +600,13 @@ export function NewSessionPage() {
               onChange={(event) => update('stopOnCriticalIssue', event.target.checked)}
             />
             <ToggleInput
-              label="Screenshots"
+              label="Save screenshots"
               checked={form.saveScreenshots}
               disabled={!selectedProfile?.adapter.supportsScreenshots}
               onChange={(event) => update('saveScreenshots', event.target.checked)}
             />
             <ToggleInput
-              label="Video"
+              label="Save video"
               checked={videoSupported && form.saveVideo}
               disabled={!videoSupported}
               onChange={(event) => update('saveVideo', event.target.checked)}
@@ -583,6 +622,12 @@ export function NewSessionPage() {
               onChange={(event) => update('saveStateSnapshots', event.target.checked)}
             />
           </div>
+          {diskUsageWarning ? (
+            <div className="inline-notice inline-notice--loading">
+              <FieldLabel label="Disk usage warning" />
+              <span>{diskUsageWarning}</span>
+            </div>
+          ) : null}
         </section>
 
         <section className="form-section">
@@ -624,6 +669,7 @@ export function NewSessionPage() {
                 <div className="bot-pool-row" key={pool.profileId}>
                   <ToggleInput
                     label={profile?.displayName ?? pool.profileId}
+                    helpText={`This turns the ${profile?.displayName ?? pool.profileId} pool on or off. The simulator uses enabled pools to create bots for this session. For example, turn on Explorer Bot to test maps and hidden areas. If this is off, no bots from this pool will run. Beginners should keep one simple pool enabled first.`}
                     checked={pool.enabled}
                     onChange={(event) => updatePool(index, { enabled: event.target.checked })}
                   />
@@ -768,41 +814,67 @@ export function NewSessionPage() {
 
         {viabilityError ? <div className="form-error">{viabilityError}</div> : null}
 
+        {adapterValidationErrors.length > 0 ? (
+          <div className="notice-list notice-list--blocker">
+            <strong>Adapter profile errors</strong>
+            {adapterValidationErrors.map((message) => (
+              <span key={message}>{message}</span>
+            ))}
+          </div>
+        ) : null}
+
+        {adapterValidationWarnings.length > 0 ? (
+          <div className="notice-list notice-list--warning">
+            <strong>Adapter profile warnings</strong>
+            {adapterValidationWarnings.map((message) => (
+              <span key={message}>{message}</span>
+            ))}
+          </div>
+        ) : null}
+
         {viabilityReport ? (
           <>
             <div className="metric-grid">
               <div className="metric-card">
-                <span>Requested bots</span>
+                <FieldLabel label="Requested bots" />
                 <strong>{requestedBots}</strong>
               </div>
               <div className="metric-card">
-                <span>Recommended bots</span>
+                <FieldLabel label="Recommended bots" />
                 <strong>{viabilityReport.recommendedTotalBots}</strong>
               </div>
               <div className="metric-card">
-                <span>Final bots</span>
+                <FieldLabel label="Final bots" />
                 <strong>{resolvedLaunchPlans.length}</strong>
               </div>
               <div className="metric-card">
-                <span>Game instances</span>
+                <FieldLabel label="Game instances" />
                 <strong>{plannedGameInstances?.instances.length ?? 0}</strong>
               </div>
               <div className="metric-card">
-                <span>Estimated RAM</span>
+                <FieldLabel label="Estimated RAM" />
                 <strong>{viabilityReport.estimatedRamMb} MB</strong>
               </div>
               <div className="metric-card">
-                <span>Estimated CPU</span>
+                <FieldLabel label="Estimated CPU" />
                 <strong>{viabilityReport.estimatedCpuPercent}%</strong>
               </div>
             </div>
 
             <div className="allocation-table">
               <div className="allocation-row allocation-row--head">
-                <span>Bot profile</span>
-                <span>Requested</span>
-                <span>Recommended</span>
-                <span>Reason</span>
+                <span>
+                  <FieldLabel label="Bot profile" />
+                </span>
+                <span>
+                  <FieldLabel label="Requested" />
+                </span>
+                <span>
+                  <FieldLabel label="Recommended" />
+                </span>
+                <span>
+                  <FieldLabel label="Reason" />
+                </span>
               </div>
               {viabilityReport.botAllocation.map((allocation) => (
                 <div className="allocation-row" key={allocation.profileId}>
@@ -816,11 +888,21 @@ export function NewSessionPage() {
 
             <div className="allocation-table">
               <div className="launch-plan-row launch-plan-row--head">
-                <span>Launch</span>
-                <span>Bot ID</span>
-                <span>Display</span>
-                <span>Playstyle</span>
-                <span>Instance</span>
+                <span>
+                  <FieldLabel label="Launch" />
+                </span>
+                <span>
+                  <FieldLabel label="Bot ID" />
+                </span>
+                <span>
+                  <FieldLabel label="Display" />
+                </span>
+                <span>
+                  <FieldLabel label="Playstyle" />
+                </span>
+                <span>
+                  <FieldLabel label="Instance" />
+                </span>
               </div>
               {resolvedLaunchPlans.length === 0 ? (
                 <div className="empty-row">No bots resolved from the current limits</div>
@@ -839,11 +921,21 @@ export function NewSessionPage() {
 
             <div className="allocation-table">
               <div className="instance-row instance-row--head">
-                <span>Instance</span>
-                <span>Status</span>
-                <span>Active bots</span>
-                <span>Max bots</span>
-                <span>Save/profile</span>
+                <span>
+                  <FieldLabel label="Instance" />
+                </span>
+                <span>
+                  <FieldLabel label="Status" />
+                </span>
+                <span>
+                  <FieldLabel label="Active bots" />
+                </span>
+                <span>
+                  <FieldLabel label="Max bots" />
+                </span>
+                <span>
+                  <FieldLabel label="Save/profile" />
+                </span>
               </div>
               {!plannedGameInstances || plannedGameInstances.instances.length === 0 ? (
                 <div className="empty-row">No game instances planned yet</div>
@@ -854,7 +946,10 @@ export function NewSessionPage() {
                     <span>{instance.status.status}</span>
                     <span>{instance.status.assignedBots.join(', ') || 'None'}</span>
                     <span>{instance.config.maxBots}</span>
-                    <span>{instance.config.saveProfileId ?? 'Shared/default'}</span>
+                    <span>
+                      {instance.config.saveProfileId ?? 'Shared/default'}
+                      {instance.config.isolatedSaveDirectory ? <small>{instance.config.isolatedSaveDirectory}</small> : null}
+                    </span>
                   </div>
                 ))
               )}
@@ -867,9 +962,16 @@ export function NewSessionPage() {
               </div>
             ) : null}
 
+            {sharedSaveWarning ? (
+              <div className="notice-list notice-list--warning">
+                <FieldLabel label="Shared Save Warning" />
+                <span>{sharedSaveWarning}</span>
+              </div>
+            ) : null}
+
             {plannedGameInstances && plannedGameInstances.warnings.length > 0 ? (
               <div className="notice-list notice-list--warning">
-                <strong>Instance planning</strong>
+                <FieldLabel label="Instance planning" />
                 {plannedGameInstances.warnings.map((warning) => (
                   <span key={warning}>{warning}</span>
                 ))}
@@ -918,38 +1020,48 @@ export function NewSessionPage() {
 
         <div className="metric-grid">
           <div className="metric-card">
-            <span>Active session</span>
+            <FieldLabel label="Active session" />
             <strong>{activeSessionId ?? 'None'}</strong>
           </div>
           <div className="metric-card">
-            <span>Runtime bots</span>
+            <FieldLabel label="Runtime bots" />
             <strong>{runtimeBotStatuses.length}</strong>
           </div>
           <div className="metric-card">
-            <span>Instances</span>
+            <FieldLabel label="Instances" />
             <strong>{runtimeInstanceStatuses.length}</strong>
           </div>
           <div className="metric-card">
-            <span>Issues</span>
+            <FieldLabel label="Issues" />
             <strong>{runtimeIssues.length}</strong>
           </div>
           <div className="metric-card">
-            <span>Logs</span>
+            <FieldLabel label="Logs" />
             <strong>{runtimeLogs.length}</strong>
           </div>
           <div className="metric-card">
-            <span>Control</span>
+            <FieldLabel label="Control" />
             <strong>{canStop ? 'Live' : 'Idle'}</strong>
           </div>
         </div>
 
         <div className="allocation-table">
           <div className="instance-row instance-row--head">
-            <span>Instance</span>
-            <span>Status</span>
-            <span>Assigned bots</span>
-            <span>Process</span>
-            <span>Heartbeat</span>
+            <span>
+              <FieldLabel label="Instance" />
+            </span>
+            <span>
+              <FieldLabel label="Status" />
+            </span>
+            <span>
+              <FieldLabel label="Assigned bots" />
+            </span>
+            <span>
+              <FieldLabel label="Process" />
+            </span>
+            <span>
+              <FieldLabel label="Heartbeat" />
+            </span>
           </div>
           {runtimeInstanceStatuses.length === 0 ? (
             <div className="empty-row">No backend instance state yet</div>
@@ -968,11 +1080,21 @@ export function NewSessionPage() {
 
         <div className="allocation-table">
           <div className="runtime-row runtime-row--head">
-            <span>Bot</span>
-            <span>Status</span>
-            <span>Instance</span>
-            <span>Last action</span>
-            <span>Message</span>
+            <span>
+              <FieldLabel label="Bot" />
+            </span>
+            <span>
+              <FieldLabel label="Status" />
+            </span>
+            <span>
+              <FieldLabel label="Instance" />
+            </span>
+            <span>
+              <FieldLabel label="Last action" />
+            </span>
+            <span>
+              <FieldLabel label="Message" />
+            </span>
           </div>
           {runtimeBotStatuses.length === 0 ? (
             <div className="empty-row">No backend bot state yet</div>

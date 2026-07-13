@@ -312,6 +312,7 @@ export class CrashDetector extends BaseDetector {
     const processAlive = booleanValue(pick(state, ['processAlive', 'isProcessAlive']));
     const crashed =
       context.instanceStatus?.status === 'crashed' ||
+      context.instanceStatus?.status === 'failed' ||
       processAlive === false ||
       hasText(pick(state, ['processStatus', 'windowStatus', 'error', 'fatalError']), ['crash', 'fatal']);
 

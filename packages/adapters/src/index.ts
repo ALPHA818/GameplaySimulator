@@ -1,4 +1,5 @@
 export * from './AdapterFactory';
+export * from './ProfileAdapterOptions';
 export * from './base/BaseGameAdapter';
 export * from './base/EngineWrapperAdapter';
 export * from './base/GameAdapter';

@@ -2,6 +2,22 @@ import { z } from 'zod';
 import { AdapterTypeSchema, EngineTypeSchema, LaunchConfigSchema } from './adapter';
 import { SeveritySchema } from './issue';
 
+export const InstrumentationTransportSchema = z.enum([
+  'local-http',
+  'local-websocket',
+  'local-file-bridge',
+  'plugin-bridge'
+]);
+
+export const SaveIsolationModeSchema = z.enum([
+  'none',
+  'copy-directory',
+  'temp-directory',
+  'launch-argument-profile',
+  'environment-variable',
+  'adapter-managed'
+]);
+
 export const ControlBindingSchema = z.object({
   controlId: z.string().min(1),
   label: z.string().min(1),
@@ -54,6 +70,16 @@ export const KnownContentSchema = z.object({
   notes: z.array(z.string().min(1)).default([])
 });
 
+export const SaveIsolationConfigSchema = z.object({
+  mode: SaveIsolationModeSchema.default('none'),
+  sourceSavePath: z.string().min(1).optional(),
+  workingSaveRoot: z.string().min(1).optional(),
+  profileArgumentTemplate: z.string().min(1).optional(),
+  environmentVariableName: z.string().min(1).optional(),
+  cleanupTempSaves: z.boolean().default(false),
+  preserveBotSaves: z.boolean().default(true)
+});
+
 const emptyKnownContent = {
   scenes: [],
   levels: [],
@@ -96,16 +122,23 @@ export const GameProfileSchema = z.object({
     supportsDirectActions: z.boolean(),
     supportsScreenshots: z.boolean(),
     supportsVideo: z.boolean(),
-    supportsSaveIsolation: z.boolean()
+    supportsSaveIsolation: z.boolean(),
+    instrumentationEndpoint: z.string().min(1).optional(),
+    instrumentationTransport: InstrumentationTransportSchema.optional(),
+    browserName: z.string().min(1).optional()
   }),
   controls: z.array(ControlBindingSchema).default([]),
   testingTargets: z.array(TestingTargetSchema).default([]),
   progressSignals: z.array(SignalDefinitionSchema).default([]),
   failureSignals: z.array(SignalDefinitionSchema).default([]),
+  saveIsolation: SaveIsolationConfigSchema.optional(),
   knownContent: KnownContentSchema.default(emptyKnownContent)
 });
 
 export type ControlBinding = z.infer<typeof ControlBindingSchema>;
+export type InstrumentationTransportType = z.infer<typeof InstrumentationTransportSchema>;
+export type SaveIsolationMode = z.infer<typeof SaveIsolationModeSchema>;
+export type SaveIsolationConfig = z.infer<typeof SaveIsolationConfigSchema>;
 export type TestingTarget = z.infer<typeof TestingTargetSchema>;
 export type SignalDefinition = z.infer<typeof SignalDefinitionSchema>;
 export type KnownContent = z.infer<typeof KnownContentSchema>;

@@ -62,6 +62,12 @@
       "description": "A crash or fatal error dialog is visible."
     }
   ],
+  "saveIsolation": {
+    "mode": "temp-directory",
+    "workingSaveRoot": "runs/sample-browser-game/saves",
+    "cleanupTempSaves": false,
+    "preserveBotSaves": true
+  },
   "knownContent": {
     "scenes": ["Boot", "Main Menu", "Start Area", "Traversal Loop", "Interaction Check", "Results Review"],
     "levels": ["Level 1", "Level 2"],

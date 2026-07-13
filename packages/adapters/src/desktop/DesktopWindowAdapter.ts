@@ -9,8 +9,10 @@ import type {
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
+import { totalmem } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
+import type { LogEntry } from '@core/logging/LogEntry';
 import { BaseGameAdapter } from '../base/BaseGameAdapter';
 import type {
   AdapterCapabilities,
@@ -19,6 +21,10 @@ import type {
   GameAdapterInstance,
   ScreenshotCapture
 } from '../base/GameAdapter';
+import {
+  DesktopAdapterDependencyChecker,
+  type DesktopAdapterDependencyReport
+} from './DesktopAdapterDependencyChecker';
 
 const execFileAsync = promisify(execFile);
 
@@ -87,18 +93,34 @@ export interface DesktopWindowAdapterOptions {
   adapterType?: AdapterType;
   executablePath?: string;
   workingDirectory?: string;
+  launchArguments?: string[];
   controlBindings?: ControlBinding[];
   screenshotDirectory?: string;
   inputDriver?: DesktopInputDriver;
   screenshotDriver?: DesktopScreenshotDriver;
+  dependencyChecker?: DesktopAdapterDependencyChecker;
   processStopTimeoutMs?: number;
   capabilities?: Partial<AdapterCapabilities>;
+}
+
+interface DesktopStopEvent {
+  eventType:
+    | 'graceful_stop_requested'
+    | 'graceful_stop_completed'
+    | 'forced_kill_requested'
+    | 'forced_kill_completed'
+    | 'stop_failed';
+  timestamp: string;
+  signal?: NodeJS.Signals;
+  message: string;
 }
 
 interface DesktopInstanceRuntime {
   child?: ChildProcess;
   processInfo: DesktopProcessInfo;
   windowInfo?: DesktopWindowInfo;
+  lastHeartbeatAt?: string;
+  lastSuccessfulInputAt?: string;
   lastKnownAction?: {
     actionId: string;
     type: string;
@@ -108,6 +130,7 @@ interface DesktopInstanceRuntime {
     message?: string;
   };
   lastScreenshotPath?: string;
+  stopEvents: DesktopStopEvent[];
 }
 
 function now(): string {
@@ -154,8 +177,42 @@ function safeNumber(value: string | undefined): number | undefined {
     return undefined;
   }
 
-  const parsed = Number(value);
+  const parsed = Number(value.replace(/[,%]/g, ''));
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function memoryPercentFromKb(memoryKb: number | undefined): number | undefined {
+  if (memoryKb === undefined) {
+    return undefined;
+  }
+
+  const totalKb = totalmem() / 1024;
+
+  return totalKb > 0 ? Number(((memoryKb / totalKb) * 100).toFixed(2)) : undefined;
+}
+
+function parseWindowsTasklistMemoryKb(output: string): number | undefined {
+  const line = output
+    .split('\n')
+    .map((item) => item.trim())
+    .find((item) => item.length > 0 && !item.toLowerCase().startsWith('"image name"'));
+
+  if (!line) {
+    return undefined;
+  }
+
+  const columns = line
+    .split('","')
+    .map((item) => item.replace(/^"|"$/g, '').trim());
+  const memoryColumn = columns[4];
+
+  if (!memoryColumn) {
+    return undefined;
+  }
+
+  const kb = Number(memoryColumn.replace(/[^0-9]/g, ''));
+
+  return Number.isFinite(kb) ? kb : undefined;
 }
 
 function normalizeKeyboardBinding(binding: string): string {
@@ -277,12 +334,15 @@ class PlatformScreenshotDriver implements DesktopScreenshotDriver {
 export class DesktopWindowAdapter extends BaseGameAdapter {
   readonly executablePath?: string;
   readonly workingDirectory?: string;
+  readonly launchArguments: string[];
   private readonly controlBindings: ControlBinding[];
   private readonly screenshotDirectory: string;
   private readonly inputDriver: DesktopInputDriver;
   private readonly screenshotDriver: DesktopScreenshotDriver;
+  private readonly dependencyChecker: DesktopAdapterDependencyChecker;
   private readonly processStopTimeoutMs: number;
   private readonly desktopInstances = new Map<string, DesktopInstanceRuntime>();
+  private dependencyReport?: DesktopAdapterDependencyReport;
 
   constructor(options: DesktopWindowAdapterOptions = {}) {
     super({
@@ -307,16 +367,24 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
 
     this.executablePath = options.executablePath;
     this.workingDirectory = options.workingDirectory;
+    this.launchArguments = options.launchArguments ? [...options.launchArguments] : [];
     this.controlBindings = options.controlBindings ?? [];
     this.screenshotDirectory = options.screenshotDirectory ?? join(process.cwd(), 'runs', 'screenshots');
     this.inputDriver = options.inputDriver ?? new PlatformDesktopInputDriver();
     this.screenshotDriver = options.screenshotDriver ?? new PlatformScreenshotDriver();
+    this.dependencyChecker = options.dependencyChecker ?? new DesktopAdapterDependencyChecker();
     this.processStopTimeoutMs = options.processStopTimeoutMs ?? 2500;
   }
 
+  async checkDependencies(): Promise<DesktopAdapterDependencyReport> {
+    this.dependencyReport = await this.dependencyChecker.checkDependencies();
+    return this.dependencyReport;
+  }
+
   override async launchInstance(config: GameInstanceConfig): Promise<GameAdapterInstance> {
+    const dependencyReport = await this.checkDependencies();
     const executablePath = ensureExecutablePath(config.launch.executablePath ?? this.executablePath);
-    const args = config.launch.arguments ?? [];
+    const args = config.launch.arguments.length > 0 ? config.launch.arguments : this.launchArguments;
     const workingDirectory = config.launch.workingDirectory ?? this.workingDirectory;
     const child = spawn(executablePath, args, {
       cwd: workingDirectory,
@@ -347,12 +415,18 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
         processId: child.pid,
         executablePath,
         workingDirectory,
+        dependencyReport,
         browserSpecific: false
       }
     };
 
     this.instances.set(config.instanceId, { instance, running: true });
-    this.desktopInstances.set(config.instanceId, { child, processInfo });
+    this.desktopInstances.set(config.instanceId, {
+      child,
+      processInfo,
+      lastHeartbeatAt: startedAt,
+      stopEvents: []
+    });
 
     child.once('exit', (exitCode, signalCode) => {
       const runtime = this.desktopInstances.get(config.instanceId);
@@ -392,11 +466,25 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     }
 
     if (runtime.child && !hasExited(runtime.child)) {
+      runtime.stopEvents.push({
+        eventType: 'graceful_stop_requested',
+        timestamp: now(),
+        signal: 'SIGTERM',
+        message: 'Sent graceful stop signal to desktop game process.'
+      });
       runtime.child.kill('SIGTERM');
 
       await new Promise<void>((resolveStop) => {
+        let forcedKillSent = false;
         const timeout = setTimeout(() => {
           if (runtime.child && !hasExited(runtime.child)) {
+            forcedKillSent = true;
+            runtime.stopEvents.push({
+              eventType: 'forced_kill_requested',
+              timestamp: now(),
+              signal: 'SIGKILL',
+              message: `Graceful stop timed out after ${this.processStopTimeoutMs} ms; sent forced kill signal.`
+            });
             runtime.child.kill('SIGKILL');
           }
 
@@ -405,6 +493,14 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
 
         runtime.child?.once('exit', () => {
           clearTimeout(timeout);
+          runtime.stopEvents.push({
+            eventType: forcedKillSent ? 'forced_kill_completed' : 'graceful_stop_completed',
+            timestamp: now(),
+            signal: forcedKillSent ? 'SIGKILL' : 'SIGTERM',
+            message: forcedKillSent
+              ? 'Desktop game process exited after forced kill signal.'
+              : 'Desktop game process exited after graceful stop signal.'
+          });
           resolveStop();
         });
       });
@@ -492,9 +588,35 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
       } catch {
         // Keep the last known process info if the OS cannot provide details.
       }
+    } else {
+      try {
+        const { stdout } = await execFileAsync('tasklist.exe', [
+          '/fi',
+          `PID eq ${runtime.processInfo.pid}`,
+          '/fo',
+          'csv',
+          '/nh'
+        ]);
+        const memoryKb = parseWindowsTasklistMemoryKb(stdout);
+        runtime.processInfo.memoryPercent = memoryPercentFromKb(memoryKb);
+      } catch {
+        // Keep the last known process info if tasklist is unavailable.
+      }
+
+      try {
+        const { stdout } = await execFileAsync('powershell.exe', [
+          '-NoProfile',
+          '-Command',
+          `(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | Where-Object { $_.IDProcess -eq ${runtime.processInfo.pid} } | Select-Object -First 1 -ExpandProperty PercentProcessorTime)`
+        ]);
+        runtime.processInfo.cpuPercent = safeNumber(stdout.trim());
+      } catch {
+        // Keep CPU empty when Windows performance counters are unavailable.
+      }
     }
 
     runtime.processInfo.alive = await this.isRunning(instanceId);
+    runtime.lastHeartbeatAt = now();
     return { ...runtime.processInfo };
   }
 
@@ -542,6 +664,18 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     }
 
     const windowInfo = await this.focusWindow(instanceId);
+
+    if (!windowInfo.focused) {
+      return this.recordAction(
+        runtime,
+        action,
+        botId,
+        'failed',
+        startedAt,
+        `Could not focus the game window (${windowInfo.focusMethod ?? 'unknown focus method'}).`,
+        binding.binding
+      );
+    }
 
     try {
       if (binding.inputType === 'keyboard') {
@@ -623,6 +757,8 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
         windowStatus: runtime.windowInfo ?? { focused: false },
         screenshotPath: runtime.lastScreenshotPath,
         lastKnownAction: runtime.lastKnownAction,
+        lastHeartbeatAt: runtime.lastHeartbeatAt,
+        lastSuccessfulInputAt: runtime.lastSuccessfulInputAt,
         telemetry: {
           cpuPercent: processInfo.cpuPercent,
           memoryPercent: processInfo.memoryPercent,
@@ -644,24 +780,59 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
       return super.getHealth(instanceId);
     }
 
+    const dependencyReport = this.dependencyReport ?? (await this.checkDependencies());
     const processInfo = await this.getProcessInfo(instanceId);
     const running = await this.isRunning(instanceId);
+    const stopRequested = runtime.stopEvents.some((event) =>
+      ['graceful_stop_requested', 'forced_kill_requested'].includes(event.eventType)
+    );
+    const failedExit =
+      !running &&
+      !stopRequested &&
+      (processInfo?.signalCode !== undefined ||
+        (typeof processInfo?.exitCode === 'number' && processInfo.exitCode !== 0));
+    const status = failedExit ? 'failed' : running ? 'running' : 'stopped';
 
     return {
       instanceId,
-      status: running ? 'running' : 'stopped',
+      status,
       checkedAt: now(),
-      message: running ? 'Desktop process is running.' : 'Desktop process is not running.',
+      message: failedExit
+        ? 'Desktop process exited unexpectedly.'
+        : running
+          ? 'Desktop process is running.'
+          : 'Desktop process is not running.',
       details: {
         adapterId: this.id,
         adapterType: this.adapterType,
+        dependencyReport,
+        dependencyWarnings: dependencyReport.warnings,
         processInfo,
         windowInfo: runtime.windowInfo,
         lastKnownAction: runtime.lastKnownAction,
+        lastHeartbeatAt: runtime.lastHeartbeatAt,
+        lastSuccessfulInputAt: runtime.lastSuccessfulInputAt,
+        stopEvents: runtime.stopEvents,
         noInjection: true,
         browserSpecific: false
       }
     };
+  }
+
+  override async captureLogs(instanceId: string): Promise<LogEntry[]> {
+    const runtime = this.desktopInstances.get(instanceId);
+
+    if (!runtime) {
+      return super.captureLogs(instanceId);
+    }
+
+    return runtime.stopEvents.map((event, index) => ({
+      id: `${instanceId}-desktop-stop-${index + 1}`,
+      level: event.eventType === 'forced_kill_requested' || event.eventType === 'stop_failed' ? 'warn' : 'info',
+      message: event.message,
+      timestamp: event.timestamp,
+      source: this.id
+    }));
   }
 
   private requireDesktopRuntime(instanceId: string): DesktopInstanceRuntime {
@@ -727,6 +898,10 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
       status,
       message
     };
+
+    if (status === 'succeeded') {
+      runtime.lastSuccessfulInputAt = completedAt;
+    }
 
     return {
       actionId: action.actionId,

@@ -7,7 +7,12 @@ import {
   type InstrumentedGameState
 } from '@instrumentation-sdk';
 import { BaseGameAdapter } from '../base/BaseGameAdapter';
-import type { AdapterCapabilities, AvailableGameAction, GameAdapterInstance } from '../base/GameAdapter';
+import type {
+  AdapterCapabilities,
+  AvailableGameAction,
+  GameAdapterInstance,
+  ScreenshotCapture
+} from '../base/GameAdapter';
 
 export interface InstrumentedAdapterOptions {
   id?: string;
@@ -155,6 +160,43 @@ export class InstrumentedAdapter extends BaseGameAdapter {
       timestamp: state.timestamp,
       source: this.id
     }));
+  }
+
+  override async captureScreenshot(instanceId: string, botId: string): Promise<ScreenshotCapture> {
+    if (!this.instrumentationClient) {
+      return super.captureScreenshot(instanceId, botId);
+    }
+
+    const state = await this.instrumentationClient.getState(instanceId, botId);
+    const screenshotPath = typeof state.state.screenshotPath === 'string' ? state.state.screenshotPath : undefined;
+    const screenshotBase64 = typeof state.state.screenshotBase64 === 'string' ? state.state.screenshotBase64 : undefined;
+    const mimeType = typeof state.state.screenshotMimeType === 'string'
+      ? state.state.screenshotMimeType
+      : screenshotBase64
+        ? 'image/png'
+        : undefined;
+
+    if (screenshotPath) {
+      return {
+        instanceId,
+        botId,
+        capturedAt: state.timestamp,
+        path: screenshotPath,
+        mimeType
+      };
+    }
+
+    if (screenshotBase64) {
+      return {
+        instanceId,
+        botId,
+        capturedAt: state.timestamp,
+        data: Buffer.from(screenshotBase64, 'base64'),
+        mimeType
+      };
+    }
+
+    return super.captureScreenshot(instanceId, botId);
   }
 
   private toGameStateSnapshot(state: InstrumentedGameState, botId: string): GameStateSnapshot {

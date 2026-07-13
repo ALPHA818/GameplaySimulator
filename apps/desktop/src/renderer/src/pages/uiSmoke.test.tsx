@@ -1,11 +1,14 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { DetectedIssue, GameInstanceStatus, SimulationRunConfig } from '@core/types';
 import type { LogEntry } from '@core/logging/LogEntry';
+import { defaultAdvancedIntelligenceConfig } from '@core/config/advancedIntelligenceConfig';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { IssuesPage } from './IssuesPage';
 import { LiveSessionPage } from './LiveSessionPage';
 import { NewSessionPage } from './NewSessionPage';
 import { ReportsPage } from './ReportsPage';
+import { SettingsPage } from './SettingsPage';
+import { GameProfileEditorPage } from './GameProfileEditorPage';
 import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
 
@@ -95,8 +98,10 @@ describe('renderer workflow smoke tests', () => {
   beforeEach(() => {
     useConfigStore.setState({
       currentPage: 'dashboard',
+      editingGameId: null,
       runConfigs: [runConfig],
-      lastValidatedRunConfig: runConfig
+      lastValidatedRunConfig: runConfig,
+      advancedIntelligence: defaultAdvancedIntelligenceConfig
     });
     useSessionStore.setState({
       status: 'running',
@@ -145,6 +150,16 @@ describe('renderer workflow smoke tests', () => {
     expect(html).toContain('Bot-count viability');
   });
 
+  it('renders guided game profile setup with profile testing controls', () => {
+    const html = renderToStaticMarkup(<GameProfileEditorPage />);
+
+    expect(html).toContain('Guided Setup');
+    expect(html).toContain('Setup Wizard');
+    expect(html).toContain('Desktop Game Wizard');
+    expect(html).toContain('Profile Readiness');
+    expect(html).toContain('Test Profile');
+  });
+
   it('renders live dashboard monitoring and stop/report controls', () => {
     const html = renderToStaticMarkup(<LiveSessionPage />);
 
@@ -159,8 +174,9 @@ describe('renderer workflow smoke tests', () => {
     const html = renderToStaticMarkup(<IssuesPage />);
 
     expect(html).toContain('Issues');
-    expect(html).toContain('Player fell out of the world');
+    expect(html).toContain('No matching issues');
     expect(html).toContain('Issue Markdown');
+    expect(html).toContain('Search');
     expect(html).toContain('Preview');
     expect(html).toContain('Export Markdown');
   });
@@ -170,7 +186,18 @@ describe('renderer workflow smoke tests', () => {
 
     expect(html).toContain('Reports');
     expect(html).toContain('Compare Sessions');
-    expect(html).toContain('ui-session');
-    expect(html).toContain('Open');
+    expect(html).toContain('Old Session');
+    expect(html).toContain('New Session');
+    expect(html).toContain('No reports yet');
+  });
+
+  it('renders gated advanced intelligence settings with hover-help labels', () => {
+    const html = renderToStaticMarkup(<SettingsPage />);
+
+    expect(html).toContain('Advanced Intelligence');
+    expect(html).toContain('Real Runtime Prerequisite');
+    expect(html).toContain('Vision Model');
+    expect(html).toContain('Bug Deduplication');
+    expect(html).toContain('Help for Vision Model');
   });
 });
