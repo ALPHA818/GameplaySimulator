@@ -1,15 +1,17 @@
 import type {
   AdapterType,
+  BrowserDomScanMode,
   ControlBinding,
   EngineType,
   GameProfile,
   InstrumentationTransportType,
   KnownContent,
   LaunchPlatform,
-  SaveIsolationMode
+  SaveIsolationMode,
+  UIFlow
 } from '@core/types';
-import { GameProfileSchema } from '@core/types';
-import { Activity, ArrowLeft, Play, Save } from 'lucide-react';
+import { GameProfileSchema, UIFlowSchema } from '@core/types';
+import { Activity, ArrowLeft, Play, Plus, Save } from 'lucide-react';
 import type { FormEvent } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import type { GameProfileTestResult } from '../../../main/services/simulationService';
@@ -52,6 +54,12 @@ const transportOptions: Array<{ value: InstrumentationTransportType; label: stri
   { value: 'local-websocket', label: 'Local WebSocket' },
   { value: 'local-file-bridge', label: 'Local file/socket bridge' },
   { value: 'plugin-bridge', label: 'Plugin bridge' }
+];
+
+const browserDomScanModeOptions: Array<{ value: BrowserDomScanMode; label: string }> = [
+  { value: 'fallback', label: 'Fallback when UI hooks are missing' },
+  { value: 'always', label: 'Always merge DOM clues' },
+  { value: 'off', label: 'Off' }
 ];
 
 const saveIsolationModeOptions: Array<{ value: SaveIsolationMode; label: string }> = [
@@ -124,6 +132,7 @@ interface GameProfileFormState {
   instrumentationEndpoint: string;
   instrumentationTransport: InstrumentationTransportType;
   browserName: string;
+  browserDomScanMode: BrowserDomScanMode;
   controlMappings: string;
   supportsMultipleInstances: boolean;
   supportsStateRead: boolean;
@@ -138,6 +147,7 @@ interface GameProfileFormState {
   environmentVariableName: string;
   cleanupTempSaves: boolean;
   preserveBotSaves: boolean;
+  uiFlowsText: string;
   knownContent: Record<KnownContentEditorKey, string>;
 }
 
@@ -147,6 +157,14 @@ interface ControlTestViewResult {
   launched: boolean;
   stopped: boolean;
   binding?: string;
+}
+
+interface UIFlowTestViewResult {
+  status: 'succeeded' | 'failed' | 'skipped';
+  message: string;
+  flowId?: string;
+  stepId?: string;
+  recordedAt: string;
 }
 
 type ProfileWizardKind = 'desktop' | 'instrumented' | 'engine' | 'browser' | 'custom';
@@ -221,6 +239,111 @@ function parseControlMappings(value: string): ControlBinding[] {
     });
 }
 
+function sampleUIFlow(): UIFlow {
+  return {
+    flowId: 'create-world',
+    name: 'Create World',
+    description: 'Open the main menu, create a game, confirm settings, and wait for gameplay to load.',
+    startState: 'main-menu',
+    endState: 'world-loaded',
+    steps: [
+      {
+        stepId: 'open-main-menu',
+        expectedScreen: 'boot',
+        actionType: 'open-main-menu',
+        keyBinding: 'Escape',
+        waitAfterMs: 500,
+        successCondition: 'Main menu is visible',
+        fallbackAction: 'wait',
+        maxRetries: 2
+      },
+      {
+        stepId: 'choose-play-game',
+        expectedScreen: 'main-menu',
+        actionType: 'choose-play-game',
+        targetLabel: 'Play Game',
+        keyBinding: 'Enter',
+        waitAfterMs: 500,
+        successCondition: 'Play menu is visible',
+        fallbackAction: 'open-main-menu',
+        maxRetries: 3
+      },
+      {
+        stepId: 'choose-create-game',
+        expectedScreen: 'play-menu',
+        actionType: 'choose-create-game',
+        targetLabel: 'Create Game',
+        keyBinding: 'Enter',
+        waitAfterMs: 500,
+        successCondition: 'Game settings screen is visible',
+        fallbackAction: 'cancel-back',
+        maxRetries: 3
+      },
+      {
+        stepId: 'confirm-game-settings',
+        expectedScreen: 'game-settings',
+        actionType: 'confirm-game-settings',
+        targetLabel: 'Create',
+        keyBinding: 'Enter',
+        waitAfterMs: 750,
+        successCondition: 'Start world button is visible',
+        fallbackAction: 'wait',
+        maxRetries: 2
+      },
+      {
+        stepId: 'start-world',
+        expectedScreen: 'game-settings',
+        actionType: 'start-world',
+        targetLabel: 'Start World',
+        keyBinding: 'Enter',
+        waitAfterMs: 1500,
+        successCondition: 'Loading or gameplay begins',
+        fallbackAction: 'wait',
+        maxRetries: 3
+      },
+      {
+        stepId: 'wait-for-world-loaded',
+        expectedScreen: 'loading',
+        actionType: 'wait',
+        waitAfterMs: 2000,
+        successCondition: 'World loaded',
+        fallbackAction: 'wait',
+        maxRetries: 5
+      }
+    ]
+  };
+}
+
+function uiFlowsText(flows: UIFlow[] | undefined): string {
+  return JSON.stringify(flows ?? [], null, 2);
+}
+
+function parseUiFlowsText(value: string): UIFlow[] {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return [];
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error('UI flows must be valid JSON. Use the sample button if you want a safe starting point.');
+  }
+
+  const result = UIFlowSchema.array().safeParse(parsed);
+
+  if (!result.success) {
+    const firstIssue = result.error.issues[0];
+    const path = firstIssue?.path.length ? firstIssue.path.join('.') : 'uiFlows';
+    throw new Error(`${path}: ${firstIssue?.message ?? 'UI flow data is not valid.'}`);
+  }
+
+  return result.data;
+}
+
 function contentText(profile: GameProfile | undefined, key: KnownContentEditorKey): string {
   return (profile?.knownContent[key] ?? []).join('\n');
 }
@@ -242,6 +365,7 @@ function formFromProfile(profile?: GameProfile): GameProfileFormState {
     instrumentationEndpoint: profile?.adapter.instrumentationEndpoint ?? '',
     instrumentationTransport: profile?.adapter.instrumentationTransport ?? 'local-http',
     browserName: profile?.adapter.browserName ?? '',
+    browserDomScanMode: profile?.adapter.browserDomScanMode ?? 'fallback',
     controlMappings: profile?.controls.map(controlBindingText).join('\n') ?? '',
     supportsMultipleInstances: profile?.adapter.supportsMultipleInstances ?? false,
     supportsStateRead: profile?.adapter.supportsStateRead ?? false,
@@ -256,6 +380,7 @@ function formFromProfile(profile?: GameProfile): GameProfileFormState {
     environmentVariableName: profile?.saveIsolation?.environmentVariableName ?? '',
     cleanupTempSaves: profile?.saveIsolation?.cleanupTempSaves ?? false,
     preserveBotSaves: profile?.saveIsolation?.preserveBotSaves ?? true,
+    uiFlowsText: uiFlowsText(profile?.uiFlows),
     knownContent: knownContentFields.reduce<Record<KnownContentEditorKey, string>>((content, field) => {
       content[field.key] = contentText(profile, field.key);
       return content;
@@ -361,6 +486,7 @@ function missingWizardFields(
 
 function buildProfile(form: GameProfileFormState): GameProfile {
   const gameId = optionalText(form.gameId) ?? slugify(form.gameName);
+  const uiFlows = parseUiFlowsText(form.uiFlowsText);
   const knownContent = knownContentFields.reduce<Record<KnownContentEditorKey, string[]>>((content, field) => {
     content[field.key] = splitArguments(form.knownContent[field.key]);
     return content;
@@ -392,12 +518,14 @@ function buildProfile(form: GameProfileFormState): GameProfile {
       supportsSaveIsolation: form.supportsSaveIsolation,
       instrumentationEndpoint: optionalText(form.instrumentationEndpoint),
       instrumentationTransport: form.instrumentationTransport,
-      browserName: optionalText(form.browserName)
+      browserName: optionalText(form.browserName),
+      browserDomScanMode: form.browserDomScanMode
     },
     controls: parseControlMappings(form.controlMappings),
     testingTargets: [],
     progressSignals: [],
     failureSignals: [],
+    uiFlows,
     saveIsolation: {
       mode: form.saveIsolationMode,
       sourceSavePath: optionalText(form.sourceSavePath),
@@ -417,6 +545,96 @@ function buildProfile(form: GameProfileFormState): GameProfile {
   };
 }
 
+interface BrowserGameWizardPanelProps {
+  url: string;
+  browserName: string;
+  browserDomScanMode: BrowserDomScanMode;
+  controlMappings: string;
+  urlError?: string;
+  onUrlChange: (value: string) => void;
+  onBrowserNameChange: (value: string) => void;
+  onDomScanModeChange: (value: BrowserDomScanMode) => void;
+  onControlMappingsChange: (value: string) => void;
+}
+
+export function BrowserGameWizardPanel(props: BrowserGameWizardPanelProps) {
+  return (
+    <div className="wizard-panel">
+      <h3>Browser Game Wizard</h3>
+      <div className="field-grid">
+        <TextInput
+          label="Game URL"
+          name="url"
+          value={props.url}
+          error={props.urlError}
+          onChange={(event) => props.onUrlChange(event.target.value)}
+        />
+        <TextInput
+          label="Browser Type"
+          name="browserName"
+          value={props.browserName}
+          onChange={(event) => props.onBrowserNameChange(event.target.value)}
+        />
+        <SelectInput
+          label="DOM Scan Mode"
+          name="browserDomScanMode"
+          value={props.browserDomScanMode}
+          onChange={(event) => props.onDomScanModeChange(event.target.value as BrowserDomScanMode)}
+        >
+          {browserDomScanModeOptions.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </SelectInput>
+        <TextareaInput
+          label="Control Mappings"
+          name="browserControlMappings"
+          value={props.controlMappings}
+          onChange={(event) => props.onControlMappingsChange(event.target.value)}
+        />
+      </div>
+      <div className="adapter-readiness">
+        <h3>Browser Adapter Readiness</h3>
+        <div className="metric-grid">
+          <div className="metric-card">
+            <FieldLabel label="Browser Context" />
+            <strong>One per instance</strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel label="Read Browser Game State" />
+            <strong>Hooks first, DOM fallback</strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel label="DOM UI Clues" />
+            <strong>{props.browserDomScanMode}</strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel label="Capture Console Errors" />
+            <strong>On</strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel label="Capture Page Errors" />
+            <strong>On</strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel label="Use Keyboard Input" />
+            <strong>Mapped or generic</strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel label="Use Mouse Input" />
+            <strong>Mapped or generic</strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel label="Reload Page" />
+            <strong>Available</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function GameProfileEditorPage() {
   const editingGameId = useConfigStore((state) => state.editingGameId);
   const existingProfile = useConfigStore((state) =>
@@ -431,6 +649,7 @@ export function GameProfileEditorPage() {
   const [desktopDependencyError, setDesktopDependencyError] = useState<string | null>(null);
   const [controlToTest, setControlToTest] = useState('');
   const [controlTestResult, setControlTestResult] = useState<ControlTestViewResult | null>(null);
+  const [flowTestResult, setFlowTestResult] = useState<UIFlowTestViewResult | null>(null);
   const [wizardKind, setWizardKind] = useState<ProfileWizardKind>(() => wizardKindForForm(form));
   const [engineMode, setEngineModeState] = useState<EngineWizardMode>(() =>
     optionalText(form.instrumentationEndpoint) ? 'instrumented' : 'desktop-fallback'
@@ -503,6 +722,7 @@ export function GameProfileEditorPage() {
     setForm((current) => ({ ...current, [key]: value }));
     setProfileTestResult(null);
     setProfileTestError(null);
+    setFlowTestResult(null);
   }
 
   function applyWizard(kind: ProfileWizardKind) {
@@ -612,7 +832,17 @@ export function GameProfileEditorPage() {
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const result = GameProfileSchema.safeParse(buildProfile(form));
+    let profile: GameProfile;
+
+    try {
+      profile = buildProfile(form);
+    } catch (error) {
+      setErrors({ form: error instanceof Error ? error.message : 'The game profile could not be built.' });
+      setValidatedProfile(null);
+      return;
+    }
+
+    const result = GameProfileSchema.safeParse(profile);
 
     if (!result.success) {
       setErrors(zodFieldErrors(result.error));
@@ -626,7 +856,22 @@ export function GameProfileEditorPage() {
   }
 
   async function testControl() {
-    const profileResult = GameProfileSchema.safeParse(buildProfile(form));
+    let profile: GameProfile;
+
+    try {
+      profile = buildProfile(form);
+    } catch (error) {
+      setErrors({ form: error instanceof Error ? error.message : 'Fix the game profile fields before testing.' });
+      setControlTestResult({
+        status: 'failed',
+        message: 'Fix the game profile fields before testing a control.',
+        launched: false,
+        stopped: false
+      });
+      return;
+    }
+
+    const profileResult = GameProfileSchema.safeParse(profile);
 
     if (!profileResult.success) {
       setErrors(zodFieldErrors(profileResult.error));
@@ -666,7 +911,18 @@ export function GameProfileEditorPage() {
   }
 
   async function testGameProfile() {
-    const profileResult = GameProfileSchema.safeParse(buildProfile(form));
+    let profile: GameProfile;
+
+    try {
+      profile = buildProfile(form);
+    } catch (error) {
+      setErrors({ form: error instanceof Error ? error.message : 'Fix the game profile fields before testing.' });
+      setProfileTestResult(null);
+      setProfileTestError('Fix the highlighted game profile fields before testing.');
+      return;
+    }
+
+    const profileResult = GameProfileSchema.safeParse(profile);
 
     if (!profileResult.success) {
       setErrors(zodFieldErrors(profileResult.error));
@@ -693,6 +949,80 @@ export function GameProfileEditorPage() {
       setProfileTestError(error instanceof Error ? error.message : 'Profile test failed.');
     } finally {
       setProfileTestRunning(false);
+    }
+  }
+
+  function insertSampleFlow() {
+    update('uiFlowsText', uiFlowsText([sampleUIFlow()]));
+    setFlowTestResult({
+      status: 'succeeded',
+      message: 'Added a sample Create World flow. Edit the screens, labels, and keys so they match your game.',
+      flowId: 'create-world',
+      recordedAt: new Date().toISOString()
+    });
+  }
+
+  function testFirstFlowStep() {
+    try {
+      const flows = parseUiFlowsText(form.uiFlowsText);
+      const flow = flows[0];
+      const step = flow?.steps[0];
+
+      if (!flow || !step) {
+        setFlowTestResult({
+          status: 'skipped',
+          message: 'No UI flow steps are configured yet. Add a sample flow or paste a flow JSON first.',
+          recordedAt: new Date().toISOString()
+        });
+        return;
+      }
+
+      setFlowTestResult({
+        status: 'succeeded',
+        flowId: flow.flowId,
+        stepId: step.stepId ?? step.actionType,
+        message: `First step is valid. It will try "${step.actionType}"${step.expectedScreen ? ` when the screen is "${step.expectedScreen}"` : ''}${step.keyBinding ? ` using ${step.keyBinding}` : ''}.`,
+        recordedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      setFlowTestResult({
+        status: 'failed',
+        message: error instanceof Error ? error.message : 'The first flow step could not be tested.',
+        recordedAt: new Date().toISOString()
+      });
+    }
+  }
+
+  function testFullFlow() {
+    try {
+      const flows = parseUiFlowsText(form.uiFlowsText);
+      const stepCount = flows.reduce((total, flow) => total + flow.steps.length, 0);
+
+      if (flows.length === 0 || stepCount === 0) {
+        setFlowTestResult({
+          status: 'skipped',
+          message: 'No UI flow steps are configured yet. Add at least one flow with one step.',
+          recordedAt: new Date().toISOString()
+        });
+        return;
+      }
+
+      const stateMethod = form.supportsStateRead
+        ? 'The bot will use exposed UI state when the adapter can read it.'
+        : 'The bot will use configured waits, keys, and screenshots because this profile does not expose UI state.';
+
+      setFlowTestResult({
+        status: 'succeeded',
+        flowId: flows[0].flowId,
+        message: `${flows.length} flow${flows.length === 1 ? '' : 's'} and ${stepCount} step${stepCount === 1 ? '' : 's'} validated. ${stateMethod}`,
+        recordedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      setFlowTestResult({
+        status: 'failed',
+        message: error instanceof Error ? error.message : 'The full UI flow could not be tested.',
+        recordedAt: new Date().toISOString()
+      });
     }
   }
 
@@ -960,63 +1290,17 @@ export function GameProfileEditorPage() {
           ) : null}
 
           {wizardKind === 'browser' ? (
-            <div className="wizard-panel">
-              <h3>Browser Game Wizard</h3>
-              <div className="field-grid">
-                <TextInput
-                  label="Game URL"
-                  name="url"
-                  value={form.url}
-                  error={errors['launch.url']}
-                  onChange={(event) => update('url', event.target.value)}
-                />
-                <TextInput
-                  label="Browser Type"
-                  name="browserName"
-                  value={form.browserName}
-                  onChange={(event) => update('browserName', event.target.value)}
-                />
-                <TextareaInput
-                  label="Control Mappings"
-                  name="browserControlMappings"
-                  value={form.controlMappings}
-                  onChange={(event) => update('controlMappings', event.target.value)}
-                />
-              </div>
-              <div className="adapter-readiness">
-                <h3>Browser Adapter Readiness</h3>
-                <div className="metric-grid">
-                  <div className="metric-card">
-                    <FieldLabel label="Browser Context" />
-                    <strong>One per instance</strong>
-                  </div>
-                  <div className="metric-card">
-                    <FieldLabel label="Read Browser Game State" />
-                    <strong>Hook first</strong>
-                  </div>
-                  <div className="metric-card">
-                    <FieldLabel label="Capture Console Errors" />
-                    <strong>On</strong>
-                  </div>
-                  <div className="metric-card">
-                    <FieldLabel label="Capture Page Errors" />
-                    <strong>On</strong>
-                  </div>
-                  <div className="metric-card">
-                    <FieldLabel label="Use Keyboard Input" />
-                    <strong>Mapped or generic</strong>
-                  </div>
-                  <div className="metric-card">
-                    <FieldLabel label="Use Mouse Input" />
-                    <strong>Mapped or generic</strong>
-                  </div>
-                  <div className="metric-card">
-                    <FieldLabel label="Reload Page" />
-                    <strong>Available</strong>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <BrowserGameWizardPanel
+              url={form.url}
+              browserName={form.browserName}
+              browserDomScanMode={form.browserDomScanMode}
+              controlMappings={form.controlMappings}
+              urlError={errors['launch.url']}
+              onUrlChange={(value) => update('url', value)}
+              onBrowserNameChange={(value) => update('browserName', value)}
+              onDomScanModeChange={(value) => update('browserDomScanMode', value)}
+              onControlMappingsChange={(value) => update('controlMappings', value)}
+            />
           ) : null}
 
           {wizardKind === 'custom' ? (
@@ -1361,6 +1645,50 @@ export function GameProfileEditorPage() {
               {form.saveIsolationMode === 'none'
                 ? 'Multiple bots or game instances may share the same save/profile data.'
                 : 'Each launched game instance will receive its own save/profile information when the adapter starts it.'}
+            </span>
+          </div>
+        </section>
+
+        <section className="form-section">
+          <h2>UI Flows</h2>
+          <div className="field-grid">
+            <TextareaInput
+              label="UI Flow JSON"
+              name="uiFlows"
+              rows={14}
+              spellCheck={false}
+              value={form.uiFlowsText}
+              onChange={(event) => update('uiFlowsText', event.target.value)}
+            />
+          </div>
+          <div className="form-actions">
+            <button className="secondary-button" type="button" onClick={insertSampleFlow}>
+              <Plus size={18} aria-hidden="true" />
+              <span>Add Sample Flow</span>
+            </button>
+            <button className="secondary-button" type="button" onClick={testFirstFlowStep}>
+              <Activity size={18} aria-hidden="true" />
+              <span>Test First Step</span>
+            </button>
+            <button className="secondary-button" type="button" onClick={testFullFlow}>
+              <Play size={18} aria-hidden="true" />
+              <span>Test Full Flow</span>
+            </button>
+          </div>
+          {flowTestResult ? (
+            <div className={flowTestResult.status === 'failed' ? 'notice-list notice-list--blocker' : 'notice-list'}>
+              <FieldLabel label="Flow Test Result" />
+              <span>
+                {flowTestResult.status}: {flowTestResult.message}
+              </span>
+              {flowTestResult.flowId ? <span>Flow: {flowTestResult.flowId}</span> : null}
+              {flowTestResult.stepId ? <span>Step: {flowTestResult.stepId}</span> : null}
+            </div>
+          ) : null}
+          <div className="notice-list">
+            <FieldLabel label="UI Journey Bot" />
+            <span>
+              Add the UI Journey Bot on the New Session page to run these steps before normal bots begin exploring.
             </span>
           </div>
         </section>

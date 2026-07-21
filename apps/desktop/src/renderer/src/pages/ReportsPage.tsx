@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { PersistedSessionMetadata } from '../../../main/services/simulationService';
-import { FieldLabel } from '../components/FormFields';
+import { FieldLabel, ToggleInput } from '../components/FormFields';
 import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
 
@@ -23,6 +23,13 @@ export function ReportsPage() {
   const [comparisonState, setComparisonState] = useState<'ready' | 'loading' | 'error'>('ready');
   const [loadMessage, setLoadMessage] = useState('');
   const [loadState, setLoadState] = useState<'ready' | 'loading' | 'error'>('loading');
+  const [cleanupSessionId, setCleanupSessionId] = useState('');
+  const [deleteRawStateLogs, setDeleteRawStateLogs] = useState(false);
+  const [keepScreenshots, setKeepScreenshots] = useState(true);
+  const [keepSummaries, setKeepSummaries] = useState(true);
+  const [archiveSessionBundle, setArchiveSessionBundle] = useState(false);
+  const [cleanupMessage, setCleanupMessage] = useState('');
+  const [cleanupState, setCleanupState] = useState<'ready' | 'loading' | 'error'>('ready');
   const sessionOptions = useMemo(
     () =>
       sessions.map((session) => ({
@@ -66,7 +73,11 @@ export function ReportsPage() {
     if (!oldSessionId && sessionOptions[1]) {
       setOldSessionId(sessionOptions[1].sessionId);
     }
-  }, [newSessionId, oldSessionId, sessionOptions]);
+
+    if (!cleanupSessionId && sessionOptions[0]) {
+      setCleanupSessionId(sessionOptions[0].sessionId);
+    }
+  }, [cleanupSessionId, newSessionId, oldSessionId, sessionOptions]);
 
   async function openReport(sessionId: string) {
     const result = await window.gameplaySimulator.simulation.openReport(sessionId);
@@ -76,6 +87,24 @@ export function ReportsPage() {
 
   async function openLogs(sessionId: string) {
     const result = await window.gameplaySimulator.simulation.openLogs(sessionId);
+    setLoadState(result.opened ? 'ready' : 'error');
+    setLoadMessage(result.message);
+  }
+
+  async function openSessionFolder(sessionId: string) {
+    const result = await window.gameplaySimulator.simulation.openSessionFolder(sessionId);
+    setLoadState(result.opened ? 'ready' : 'error');
+    setLoadMessage(result.message);
+  }
+
+  async function openIssueFolder(sessionId: string) {
+    const result = await window.gameplaySimulator.simulation.openIssueFolder(sessionId);
+    setLoadState(result.opened ? 'ready' : 'error');
+    setLoadMessage(result.message);
+  }
+
+  async function openScreenshotsFolder(sessionId: string) {
+    const result = await window.gameplaySimulator.simulation.openScreenshotsFolder(sessionId);
     setLoadState(result.opened ? 'ready' : 'error');
     setLoadMessage(result.message);
   }
@@ -115,6 +144,33 @@ export function ReportsPage() {
     } catch (error) {
       setComparisonState('error');
       setComparisonMessage(error instanceof Error ? error.message : 'Unable to generate comparison report.');
+    }
+  }
+
+  async function cleanupBundle() {
+    if (!cleanupSessionId) {
+      setCleanupState('error');
+      setCleanupMessage('Choose a saved session before cleaning up a bundle.');
+      return;
+    }
+
+    setCleanupState('loading');
+    setCleanupMessage('Cleaning up session bundle...');
+
+    try {
+      const result = await window.gameplaySimulator.simulation.cleanupSessionBundle({
+        sessionId: cleanupSessionId,
+        deleteRawStateLogs,
+        keepScreenshots,
+        keepSummaries,
+        archiveSessionBundle
+      });
+      setCleanupState('ready');
+      setCleanupMessage(result.message);
+      await loadSessions(true);
+    } catch (error) {
+      setCleanupState('error');
+      setCleanupMessage(error instanceof Error ? error.message : 'Unable to clean up session bundle.');
     }
   }
 
@@ -201,9 +257,69 @@ export function ReportsPage() {
         ) : null}
       </section>
 
+      <section className="form-section">
+        <div className="section-header-row">
+          <div>
+            <p className="eyebrow">Bundle cleanup</p>
+            <h2><FieldLabel label="Cleanup Options" /></h2>
+          </div>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!cleanupSessionId || cleanupState === 'loading'}
+            onClick={() => void cleanupBundle()}
+          >
+            Apply Cleanup
+          </button>
+        </div>
+        <div className="field-grid">
+          <div className="field">
+            <FieldLabel label="Cleanup Session" htmlFor="cleanup-session" />
+            <select
+              id="cleanup-session"
+              className="input"
+              value={cleanupSessionId}
+              disabled={sessionOptions.length === 0}
+              onChange={(event) => setCleanupSessionId(event.target.value)}
+            >
+              <option value="">Select session</option>
+              {sessionOptions.map((option) => (
+                <option value={option.sessionId} key={option.sessionId}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="toggle-grid">
+          <ToggleInput
+            label="Delete old raw state logs"
+            checked={deleteRawStateLogs}
+            onChange={(event) => setDeleteRawStateLogs(event.target.checked)}
+          />
+          <ToggleInput
+            label="Keep screenshots"
+            checked={keepScreenshots}
+            onChange={(event) => setKeepScreenshots(event.target.checked)}
+          />
+          <ToggleInput
+            label="Keep summaries"
+            checked={keepSummaries}
+            onChange={(event) => setKeepSummaries(event.target.checked)}
+          />
+          <ToggleInput
+            label="Archive session bundle"
+            checked={archiveSessionBundle}
+            onChange={(event) => setArchiveSessionBundle(event.target.checked)}
+          />
+        </div>
+        {cleanupMessage ? <div className={`inline-notice inline-notice--${cleanupState}`}>{cleanupMessage}</div> : null}
+      </section>
+
       <div className="table-surface">
         <div className="table-row table-row--head table-row--report">
           <FieldLabel label="Session" />
+          <FieldLabel label="Session Label" />
           <FieldLabel label="Session Status" />
           <FieldLabel label="Issue Count" />
           <FieldLabel label="Coverage Percentage" />
@@ -220,6 +336,7 @@ export function ReportsPage() {
                 <strong>{session.sessionId}</strong>
                 <small>{session.gameName}{session.buildId ? ` · ${session.buildId}` : ''}</small>
               </span>
+              <span>{session.sessionLabel ?? 'Custom'}</span>
               <span>{session.status}</span>
               <span>{session.issueCounts.total}</span>
               <span>{formatCoverage(session.coveragePercentage)}</span>
@@ -229,8 +346,17 @@ export function ReportsPage() {
                 <small>{session.botCounts.stuck} stuck</small>
               </span>
               <span className="report-actions">
+                <button className="secondary-button" type="button" onClick={() => void openSessionFolder(session.sessionId)}>
+                  Open folder
+                </button>
                 <button className="secondary-button" type="button" onClick={() => void openReport(session.sessionId)}>
-                  Open report
+                  Summary report
+                </button>
+                <button className="secondary-button" type="button" onClick={() => void openIssueFolder(session.sessionId)}>
+                  Issue folder
+                </button>
+                <button className="secondary-button" type="button" onClick={() => void openScreenshotsFolder(session.sessionId)}>
+                  Screenshots
                 </button>
                 <button className="secondary-button" type="button" onClick={() => viewIssues(session.sessionId)}>
                   View issues

@@ -5,7 +5,8 @@ import type {
   BotStatus,
   DetectedIssue,
   RuntimeBotSnapshot,
-  SimulationRunConfig
+  SimulationRunConfig,
+  UIFlow
 } from '../types';
 import type { CoverageData } from './ActionPlanner';
 import { Bot, type BotAdapter, type BotMemory } from './Bot';
@@ -32,6 +33,9 @@ export interface BotManagerOptions {
   maxConcurrentBots?: number;
   getCoverageData?: () => CoverageData;
   getRecentIssues?: () => DetectedIssue[];
+  uiFlows?: UIFlow[];
+  startupBotIds?: string[];
+  continueAfterStartupFailure?: boolean;
   getInstanceHeartbeat?: (instanceId: string) => string | undefined;
   getProcessResponsive?: (instanceId: string) => boolean | undefined;
   maxRecoveryAttempts?: number;
@@ -92,6 +96,15 @@ function isTerminal(status: BotStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }
 
+function normalize(value: string | undefined): string {
+  return value?.trim().toLowerCase().replace(/[\s_]+/g, '-') ?? '';
+}
+
+function isUIJourneyProfile(profile: BotProfile): boolean {
+  const text = normalize([profile.profileId, profile.botType, profile.playstyle].filter(Boolean).join(' '));
+  return text.includes('ui-journey') || text.includes('journey');
+}
+
 export class BotManager {
   private readonly records = new Map<string, ManagedBotRecord>();
   private readonly orderedBotIds: string[];
@@ -99,6 +112,9 @@ export class BotManager {
   private readonly onStatusChange?: BotManagerOptions['onStatusChange'];
   private readonly onLog?: BotManagerOptions['onLog'];
   private readonly onIdle?: BotManagerOptions['onIdle'];
+  private readonly journeyGateEnabled: boolean;
+  private readonly startupBotIds: Set<string>;
+  private readonly continueAfterStartupFailure: boolean;
   private readonly idleResolvers: Array<() => void> = [];
   private running = false;
   private paused = false;
@@ -108,6 +124,10 @@ export class BotManager {
     this.onStatusChange = options.onStatusChange;
     this.onLog = options.onLog;
     this.onIdle = options.onIdle;
+    this.startupBotIds = new Set(options.startupBotIds ?? []);
+    this.continueAfterStartupFailure = options.continueAfterStartupFailure ?? false;
+    this.journeyGateEnabled =
+      this.startupBotIds.size === 0 && Boolean(options.uiFlows?.some((flow) => flow.steps.length > 0));
     this.maxConcurrentBots = concurrencyLimit({
       runConfig: options.runConfig,
       launchPlans: options.launchPlans,
@@ -153,6 +173,7 @@ export class BotManager {
           seed: plan.seed,
           getCoverageData: options.getCoverageData,
           getRecentIssues: options.getRecentIssues,
+          uiFlows: options.uiFlows,
           getInstanceHeartbeat: options.getInstanceHeartbeat,
           getProcessResponsive: options.getProcessResponsive,
           maxRecoveryAttempts: options.maxRecoveryAttempts,
@@ -288,7 +309,48 @@ export class BotManager {
   }
 
   private nextQueuedRecord(): ManagedBotRecord | undefined {
+    if (this.startupBotIds.size > 0) {
+      if (this.hasUnfinishedStartupRecords()) {
+        return this.orderedRecords().find(
+          (record) => record.bot.status === 'queued' && !record.runPromise && this.startupBotIds.has(record.plan.botId)
+        );
+      }
+
+      if (this.hasFailedStartupRecords() && !this.continueAfterStartupFailure) {
+        return undefined;
+      }
+
+      return this.orderedRecords().find(
+        (record) => record.bot.status === 'queued' && !record.runPromise && !this.startupBotIds.has(record.plan.botId)
+      );
+    }
+
+    if (this.journeyGateEnabled && this.hasUnfinishedJourneyRecords()) {
+      return this.orderedRecords().find(
+        (record) => record.bot.status === 'queued' && !record.runPromise && isUIJourneyProfile(record.profile)
+      );
+    }
+
     return this.orderedRecords().find((record) => record.bot.status === 'queued' && !record.runPromise);
+  }
+
+  private hasUnfinishedJourneyRecords(): boolean {
+    return this.orderedRecords().some((record) => isUIJourneyProfile(record.profile) && !isTerminal(record.bot.status));
+  }
+
+  private hasUnfinishedStartupRecords(): boolean {
+    return this.orderedRecords().some(
+      (record) => this.startupBotIds.has(record.plan.botId) && !isTerminal(record.bot.status)
+    );
+  }
+
+  private hasFailedStartupRecords(): boolean {
+    return this.orderedRecords().some(
+      (record) =>
+        this.startupBotIds.has(record.plan.botId) &&
+        isTerminal(record.bot.status) &&
+        record.bot.status !== 'completed'
+    );
   }
 
   private dispatch(): void {

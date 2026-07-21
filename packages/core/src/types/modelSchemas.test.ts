@@ -15,6 +15,7 @@ describe('core model schemas', () => {
 
     expect(profile.gameId).toBe('sample-browser-game');
     expect(profile.adapter.supportsScreenshots).toBe(true);
+    expect(profile.adapter.browserDomScanMode).toBe('fallback');
     expect(profile.saveIsolation?.mode).toBe('temp-directory');
     expect(profile.knownContent.sideQuests).toContain('Side quest');
     expect(profile.knownContent.hiddenAreas).toContain('Hidden area');

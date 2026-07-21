@@ -13,7 +13,12 @@ describe('instrumentation protocol schemas', () => {
       instanceId: 'instance-001',
       timestamp: '2026-07-02T20:00:00.000Z',
       playerPosition: { playerId: 'player', x: 1, y: 2 },
-      uiState: { screenId: 'hud' },
+      uiState: {
+        screenId: 'hud',
+        currentScreen: 'gameplay',
+        visibleButtons: [{ label: 'Pause', selector: '#pause' }],
+        isInGameplay: true
+      },
       performance: { fps: 60 },
       state: { hp: 10 }
     });
@@ -29,6 +34,7 @@ describe('instrumentation protocol schemas', () => {
     });
 
     expect(state.inventory).toEqual([]);
+    expect(state.uiState).toMatchObject({ currentScreen: 'gameplay', isInGameplay: true });
     expect(action.metadata).toEqual({});
     expect(request.payload).toEqual({});
   });

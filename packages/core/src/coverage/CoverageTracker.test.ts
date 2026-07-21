@@ -21,6 +21,7 @@ const gameProfile: GameProfile = {
   testingTargets: [],
   progressSignals: [],
   failureSignals: [],
+  uiFlows: [],
   knownContent: {
     scenes: ['Town'],
     levels: ['Level 1'],

@@ -1,15 +1,29 @@
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import type {
   ActionResult,
+  BotProfile,
   DetectedIssue,
   GameAction,
   GameInstanceStatus,
   GameProfile,
   GameStateSnapshot,
   RuntimeViabilityReport,
+  SessionBundle,
+  SessionBundlePaths,
+  SessionLabel,
   SimulationRunConfig
 } from '../types';
+import { actionInsightFromAction, plannerMetadataForLog } from '../bot/ActionExplanation';
 
 export type StructuredLogEventType =
   | 'session_start'
@@ -25,6 +39,12 @@ export type StructuredLogEventType =
   | 'action_performed'
   | 'state_snapshot'
   | 'issue_detected'
+  | 'flow_started'
+  | 'flow_step_started'
+  | 'flow_step_succeeded'
+  | 'flow_step_failed'
+  | 'flow_completed'
+  | 'flow_abandoned'
   | 'recovery_attempt'
   | 'recovery_success'
   | 'recovery_failed'
@@ -91,6 +111,25 @@ export interface SessionSummaryReportInput {
   createdAt?: string;
   startedAt?: string;
   stoppedAt?: string;
+  startupFlow?: {
+    flowId: string;
+    flowName: string;
+    status: string;
+    message?: string;
+    startedAt?: string;
+    completedAt?: string;
+    timeoutMs?: number;
+    issueId?: string;
+    screenshotPath?: string;
+    timeline?: Array<Record<string, unknown>>;
+  };
+}
+
+interface StructuredLogFileSource {
+  path: string;
+  source: 'session' | 'bot-actions' | 'bot-states' | 'bot-issues' | 'instance';
+  botId?: string;
+  instanceId?: string;
 }
 
 export interface IssueReportContext {
@@ -99,6 +138,47 @@ export interface IssueReportContext {
   gameVersion?: string;
   gameBuild?: string;
   adapterType?: string;
+}
+
+export interface IssueEventLoggerContext extends IssueReportContext {
+  botProfile?: BotProfile;
+  lastAction?: GameAction | null;
+  previousState?: GameStateSnapshot | null;
+  currentState?: GameStateSnapshot | null;
+  recoveryAttempts?: unknown[];
+  isRepeated?: boolean;
+}
+
+export interface RichIssueEventPayload extends Record<string, unknown> {
+  issueId: string;
+  title: string;
+  severity: string;
+  category: string;
+  confidence?: number;
+  botId?: string;
+  botProfile?: Record<string, unknown>;
+  gameInstanceId?: string;
+  sceneArea: string;
+  lastAction?: string;
+  last10Actions: string[];
+  currentStateSummary?: string;
+  expectedBehavior?: string;
+  actualBehavior?: string;
+  screenshotPath?: string;
+  videoPath?: string;
+  evidencePaths: string[];
+  likelyCause: string;
+  reproductionSteps: string[];
+  recoveryAttempts: unknown[];
+  occurrence: 'new' | 'repeated';
+  summary: string;
+  timeline: Array<Record<string, unknown>>;
+  whyFlagged: {
+    detectorName: string;
+    detectorRule: string;
+    triggeredData: unknown;
+  };
+  whatToCheckNext: string[];
 }
 
 function ensureDirectory(path: string): void {
@@ -111,6 +191,11 @@ function writeJson(path: string, value: unknown): void {
 
 function appendJsonl(path: string, value: unknown): void {
   appendFileSync(path, `${JSON.stringify(value)}\n`, 'utf8');
+}
+
+function writeJsonl(path: string, values: unknown[]): void {
+  ensureDirectory(dirname(path));
+  writeFileSync(path, values.map((value) => JSON.stringify(value)).join('\n') + (values.length > 0 ? '\n' : ''), 'utf8');
 }
 
 function timestampForFolder(timestamp: string): string {
@@ -216,6 +301,105 @@ function jsonBlock(value: unknown): string[] {
   return ['```json', JSON.stringify(value ?? null, null, 2), '```'];
 }
 
+function compactJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? null);
+  } catch {
+    return String(value);
+  }
+}
+
+function readJsonlRecords(path: string): Array<Record<string, unknown>> {
+  if (!existsSync(path)) {
+    return [];
+  }
+
+  return readFileSync(path, 'utf8')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line) as unknown;
+        return isRecord(parsed) ? [parsed] : [];
+      } catch {
+        return [
+          {
+            eventType: 'invalid_json',
+            line
+          }
+        ];
+      }
+    });
+}
+
+function sourcedJsonlRecords(source: StructuredLogFileSource): Array<Record<string, unknown>> {
+  return readJsonlRecords(source.path).map((record) => ({
+    bundleSource: source.source,
+    bundleFile: source.path,
+    botId: source.botId ?? stringValue(record.botId) ?? stringValue(record.action && isRecord(record.action) ? record.action.botId : undefined),
+    gameInstanceId:
+      source.instanceId ??
+      stringValue(record.gameInstanceId) ??
+      stringValue(record.action && isRecord(record.action) ? record.action.gameInstanceId : undefined),
+    ...record
+  }));
+}
+
+function isImportantStructuredEvent(record: Record<string, unknown>): boolean {
+  const eventType = String(record.eventType ?? '').toLowerCase();
+  const source = String(record.bundleSource ?? '').toLowerCase();
+  const payload = isRecord(record.payload) ? record.payload : {};
+  const payloadText = compactJson(payload).toLowerCase();
+
+  return (
+    source === 'bot-issues' ||
+    eventType.includes('issue') ||
+    eventType.includes('crash') ||
+    eventType.includes('freeze') ||
+    eventType.includes('failed') ||
+    eventType.includes('warning') ||
+    eventType.includes('resource') ||
+    eventType.includes('recovery') ||
+    eventType.includes('flow_') ||
+    eventType.includes('instance_start') ||
+    eventType.includes('instance_stop') ||
+    eventType.includes('instance_crash') ||
+    eventType.includes('instance_restart') ||
+    eventType.includes('manual_stop') ||
+    payloadText.includes('critical') ||
+    payloadText.includes('error') ||
+    payloadText.includes('warning') ||
+    payloadText.includes('failed') ||
+    payloadText.includes('stuck')
+  );
+}
+
+function listFilesRecursive(path: string): string[] {
+  if (!existsSync(path)) {
+    return [];
+  }
+
+  return readdirSync(path).flatMap((name) => {
+    const child = join(path, name);
+    const stats = statSync(child);
+    return stats.isDirectory() ? listFilesRecursive(child) : [child];
+  });
+}
+
+function copyIfExists(source: string, destination: string): void {
+  if (!existsSync(source)) {
+    return;
+  }
+
+  ensureDirectory(dirname(destination));
+  copyFileSync(source, destination);
+}
+
+function bundleLabel(runConfig: SimulationRunConfig): SessionLabel {
+  return runConfig.sessionLabel ?? 'Custom';
+}
+
 function recoveryAttempts(issue: DetectedIssue): unknown[] {
   const raw = issue.rawEvidence;
 
@@ -241,6 +425,324 @@ function issueArea(issue: DetectedIssue): string {
   return issue.scene ?? issue.area ?? 'Unknown';
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+interface ActionReportRow {
+  timestamp: string;
+  actionId: string;
+  actionType: string;
+  quality: string;
+  result: string;
+  explanation: string;
+}
+
+function actionReportRows(path: string): ActionReportRow[] {
+  return readJsonlRecords(path).flatMap((record) => {
+    const action = isRecord(record.action) ? record.action : undefined;
+
+    if (!action) {
+      return [];
+    }
+
+    const payload = isRecord(action.payload) ? action.payload : {};
+    const result = isRecord(record.result) ? record.result : {};
+    const actionType = stringValue(action.type) ?? 'unknown-action';
+    const resultStatus = stringValue(result.status) ?? 'not-recorded';
+    const resultMessage = stringValue(result.message);
+
+    return [{
+      timestamp: stringValue(record.timestamp) ?? stringValue(action.requestedAt) ?? 'Unknown',
+      actionId: stringValue(action.actionId) ?? 'Unknown',
+      actionType,
+      quality: stringValue(payload.quality) ?? (payload.recovery === true ? 'recovery' : 'planned'),
+      result: resultMessage ? `${resultStatus}: ${resultMessage}` : resultStatus,
+      explanation:
+        stringValue(payload.explanation) ??
+        stringValue(payload.reason) ??
+        `The bot chose ${actionType}; this older action did not record a full planner explanation.`
+    }];
+  });
+}
+
+function topRepeatedActionRows(actions: ActionReportRow[]): string[][] {
+  const counts = new Map<string, number>();
+
+  for (const action of actions) {
+    counts.set(action.actionType, (counts.get(action.actionType) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 10)
+    .map(([actionType, count]) => [actionType, String(count)]);
+}
+
+function rawEvidenceRecord(issue: DetectedIssue): Record<string, unknown> {
+  return isRecord(issue.rawEvidence) ? issue.rawEvidence : {};
+}
+
+function detectorName(issue: DetectedIssue): string {
+  const raw = rawEvidenceRecord(issue);
+  const explicitName =
+    stringValue(raw.detectorName) ??
+    stringValue(raw.detectorId) ??
+    stringValue(raw.detector) ??
+    stringValue(raw.sourceDetector);
+
+  if (explicitName) {
+    return explicitName;
+  }
+
+  return `${issue.category.replace(/_/g, ' ')} detector`;
+}
+
+function detectorRule(issue: DetectedIssue): string {
+  const raw = rawEvidenceRecord(issue);
+  const explicitRule =
+    stringValue(raw.detectorRule) ??
+    stringValue(raw.rule) ??
+    stringValue(raw.reason) ??
+    stringValue(raw.stuckReason);
+
+  if (explicitRule) {
+    return explicitRule;
+  }
+
+  switch (issue.category) {
+    case 'crash':
+      return 'The game process, page, or adapter reported a crash or fatal error.';
+    case 'hang':
+      return 'The game was alive but stopped responding or stopped changing for too long.';
+    case 'softlock':
+      return 'The bot appeared unable to continue progression even though the game was still running.';
+    case 'world_boundary':
+      return 'The player position or scene state looked outside the expected playable bounds.';
+    case 'exploit':
+      return 'State changed in a way that could allow unintended rewards, progression, or resource gain.';
+    case 'ui':
+      return 'The UI state matched a broken, trapped, missing, or invalid interface pattern.';
+    case 'quest':
+      return 'Quest state or objective progress did not match expected progression rules.';
+    case 'inventory':
+      return 'Inventory state changed in an impossible or unsafe way.';
+    case 'economy':
+      return 'Currency, price, buy/sell, or reward data looked unsafe.';
+    case 'performance':
+      return 'Performance metrics crossed a configured warning or failure threshold.';
+    default:
+      return `The ${issue.category.replace(/_/g, ' ')} detector matched the saved state or action evidence.`;
+  }
+}
+
+function likelyCause(issue: DetectedIssue): string {
+  const raw = rawEvidenceRecord(issue);
+  const explicitCause = stringValue(raw.likelyCause) ?? stringValue(raw.cause) ?? stringValue(raw.exploitType);
+
+  if (explicitCause) {
+    return explicitCause.replace(/_/g, ' ');
+  }
+
+  switch (issue.category) {
+    case 'crash':
+      return 'The game or adapter reported a crash. Check engine logs, console errors, and the action immediately before the issue.';
+    case 'world_boundary':
+      return 'Collision, level bounds, spawn placement, or movement handling may have allowed the player outside the playable space.';
+    case 'softlock':
+      return 'Progression, UI state, loading, or available actions may have reached a state with no safe way forward.';
+    case 'exploit':
+      return 'A state diff found a possible unintended reward, resource, flag, or progression change.';
+    case 'ui':
+      return 'The UI may be stuck, missing a usable control, or failing to close after the last action.';
+    case 'quest':
+      return 'Quest flags, objective updates, NPC availability, or turn-in logic may not match the expected flow.';
+    case 'inventory':
+      return 'Item quantities, equipment state, or inventory limits may have changed unexpectedly.';
+    case 'economy':
+      return 'Currency, pricing, reward, buy/sell, or crafting rules may allow an unsafe loop or invalid value.';
+    case 'performance':
+      return 'Runtime metrics suggest the scene, action, or instance created too much load.';
+    default:
+      return 'The detector matched saved evidence. Review the state, last action, and screenshot before confirming it is a bug.';
+  }
+}
+
+function botProfileSummary(profile: BotProfile | undefined): Record<string, unknown> | undefined {
+  if (!profile) {
+    return undefined;
+  }
+
+  return {
+    profileId: profile.profileId,
+    displayName: profile.displayName,
+    botType: profile.botType,
+    playstyle: profile.playstyle,
+    description: profile.description
+  };
+}
+
+function lastActionText(issue: DetectedIssue, context: IssueEventLoggerContext): string | undefined {
+  return context.lastAction?.type ?? issue.lastActions[issue.lastActions.length - 1];
+}
+
+function stateBeforeIssueSummary(context: IssueEventLoggerContext): string | undefined {
+  const state = context.previousState ?? context.currentState;
+
+  if (!state) {
+    return undefined;
+  }
+
+  return compactJson({
+    snapshotId: state.snapshotId,
+    scene: state.scene,
+    capturedAt: state.capturedAt,
+    state: state.state,
+    screenshotPath: state.screenshotPath
+  }).slice(0, 2000);
+}
+
+function issueTimeline(issue: DetectedIssue, context: IssueEventLoggerContext): Array<Record<string, unknown>> {
+  const action = context.lastAction;
+  const state = context.previousState ?? context.currentState;
+  const attempts = context.recoveryAttempts ?? recoveryAttempts(issue);
+  const latestAttempt = attempts[attempts.length - 1];
+  const screenshotEvidence = rawEvidenceRecord(issue).screenshotEvidence;
+
+  return [
+    {
+      step: 'action_before_issue',
+      label: 'Action before issue',
+      timestamp: action?.requestedAt ?? issue.timestamp ?? issue.firstSeenAt,
+      summary: action?.type ?? issue.lastActions[0] ?? 'No action captured',
+      actionId: action?.actionId
+    },
+    {
+      step: 'state_before_issue',
+      label: 'State before issue',
+      timestamp: state?.capturedAt ?? issue.timestamp ?? issue.firstSeenAt,
+      summary: state ? stateBeforeIssueSummary(context) : issue.stateSummary ?? 'No state snapshot captured',
+      snapshotId: state?.snapshotId
+    },
+    {
+      step: 'issue_detected',
+      label: 'Issue detected',
+      timestamp: issue.timestamp ?? issue.firstSeenAt,
+      summary: issue.title,
+      severity: issue.severity,
+      category: issue.category
+    },
+    {
+      step: 'screenshot_captured',
+      label: 'Screenshot captured',
+      timestamp: isRecord(screenshotEvidence) ? stringValue(screenshotEvidence.capturedAt) : undefined,
+      summary: issue.screenshotPath ? 'Screenshot evidence is attached.' : 'No screenshot evidence was captured.',
+      screenshotPath: issue.screenshotPath
+    },
+    {
+      step: 'recovery_attempted',
+      label: 'Recovery attempted',
+      summary: attempts.length > 0 ? `${attempts.length} recovery attempt(s) captured.` : 'No recovery attempts captured.',
+      attempts
+    },
+    {
+      step: 'recovery_result',
+      label: 'Recovery result',
+      summary: isRecord(latestAttempt)
+        ? `Last recovery attempt: ${String(latestAttempt.recovered ?? latestAttempt.status ?? 'unknown')}`
+        : 'No recovery result captured.',
+      result: latestAttempt
+    }
+  ];
+}
+
+function whatToCheckNext(issue: DetectedIssue): string[] {
+  const checks = [
+    issue.screenshotPath ? `Open screenshot: ${issue.screenshotPath}` : 'Open screenshot if available after evidence capture.',
+    'Inspect raw state in this log entry.',
+    'Replay or read the action timeline before the issue.',
+    'Compare with a previous run if this game build was tested before.',
+    'Export a GitHub issue when the confidence and evidence look good.'
+  ];
+
+  if (issue.videoPath) {
+    checks.unshift(`Open video evidence: ${issue.videoPath}`);
+  }
+
+  return checks;
+}
+
+function issueSummary(issue: DetectedIssue, context: IssueEventLoggerContext): string {
+  const lastAction = lastActionText(issue, context) ?? 'no action captured';
+  const confidence = issue.confidence === undefined ? 'unknown confidence' : `${Math.round(issue.confidence * 100)}% confidence`;
+  const evidence = issue.screenshotPath ? ` Screenshot: ${issue.screenshotPath}.` : '';
+
+  return `${issue.severity.toUpperCase()} ${issue.category}: ${issue.title} in ${issueArea(issue)} after ${lastAction}. ${confidence}.${evidence}`;
+}
+
+function buildIssueEventPayload(issue: DetectedIssue, context: IssueEventLoggerContext = {}): RichIssueEventPayload {
+  const attempts = context.recoveryAttempts ?? recoveryAttempts(issue);
+
+  return {
+    issueId: issue.issueId,
+    title: issue.title,
+    severity: issue.severity,
+    category: issue.category,
+    confidence: issue.confidence,
+    botId: issue.botId,
+    botProfile: botProfileSummary(context.botProfile),
+    gameInstanceId: issue.gameInstanceId ?? issue.instanceId,
+    sceneArea: issueArea(issue),
+    lastAction: lastActionText(issue, context),
+    last10Actions: issue.lastActions.slice(-10),
+    currentStateSummary: issue.stateSummary ?? stateBeforeIssueSummary(context),
+    expectedBehavior: issue.expectedBehavior,
+    actualBehavior: issue.actualBehavior ?? issue.description,
+    screenshotPath: issue.screenshotPath,
+    videoPath: issue.videoPath,
+    evidencePaths: unique([issue.screenshotPath, issue.videoPath, ...(issue.evidencePaths ?? [])]),
+    likelyCause: likelyCause(issue),
+    reproductionSteps: reproductionSteps(issue),
+    recoveryAttempts: attempts,
+    occurrence: context.isRepeated ? 'repeated' : 'new',
+    summary: issueSummary(issue, context),
+    timeline: issueTimeline(issue, context),
+    whyFlagged: {
+      detectorName: detectorName(issue),
+      detectorRule: detectorRule(issue),
+      triggeredData: issue.rawEvidence ?? {
+        stateSummary: issue.stateSummary,
+        lastActions: issue.lastActions,
+        severity: issue.severity,
+        category: issue.category
+      }
+    },
+    whatToCheckNext: whatToCheckNext(issue)
+  };
+}
+
+export class IssueEventLogger {
+  buildPayload(issue: DetectedIssue, context: IssueEventLoggerContext = {}): RichIssueEventPayload {
+    return buildIssueEventPayload(issue, context);
+  }
+
+  enrichEvent(
+    event: StructuredLogEvent,
+    issue: DetectedIssue,
+    context: IssueEventLoggerContext = {}
+  ): StructuredLogEvent<RichIssueEventPayload> {
+    return {
+      ...event,
+      payload: this.buildPayload(issue, context)
+    };
+  }
+}
+
 export class JsonlLogger {
   constructor(readonly filePath: string) {
     ensureDirectory(dirname(filePath));
@@ -255,10 +757,20 @@ export class JsonlLogger {
 export class SessionLogger {
   readonly sessionDir: string;
   readonly sessionLogPath: string;
+  readonly summaryJsonPath: string;
   readonly summaryPath: string;
   readonly htmlReportPath: string;
   readonly configPath: string;
   readonly viabilityReportPath: string;
+  readonly importantEventsPath: string;
+  readonly fullStructuredLogsPath: string;
+  readonly issuesJsonPath: string;
+  readonly issueTimelinePath: string;
+  readonly metadataPath: string;
+  readonly screenshotsDir: string;
+  readonly reportsDir: string;
+  readonly exportsDir: string;
+  readonly replayDir: string;
 
   private readonly logger: JsonlLogger;
   private readonly now: () => string;
@@ -268,13 +780,39 @@ export class SessionLogger {
     this.now = options.now ?? (() => new Date().toISOString());
     this.sessionDir = options.sessionDir ?? join(options.rootDir, `session-${timestampForFolder(options.createdAt)}`);
     this.sessionLogPath = join(this.sessionDir, 'session-log.jsonl');
+    this.summaryJsonPath = join(this.sessionDir, 'session-summary.json');
     this.summaryPath = join(this.sessionDir, 'session-summary.md');
     this.htmlReportPath = join(this.sessionDir, 'session-report.html');
     this.configPath = join(this.sessionDir, 'config.json');
     this.viabilityReportPath = join(this.sessionDir, 'viability-report.json');
+    this.importantEventsPath = join(this.sessionDir, 'important-events.jsonl');
+    this.fullStructuredLogsPath = join(this.sessionDir, 'full-structured-logs.jsonl');
+    this.issuesJsonPath = join(this.sessionDir, 'issues.json');
+    this.issueTimelinePath = join(this.sessionDir, 'issue-timeline.json');
+    this.metadataPath = join(this.sessionDir, 'metadata.json');
+    this.screenshotsDir = join(this.sessionDir, 'screenshots');
+    this.reportsDir = join(this.sessionDir, 'reports');
+    this.exportsDir = join(this.sessionDir, 'exports');
+    this.replayDir = join(this.sessionDir, 'replay');
 
     ensureDirectory(this.sessionDir);
+    ensureDirectory(this.screenshotsDir);
+    ensureDirectory(this.reportsDir);
+    ensureDirectory(this.exportsDir);
+    ensureDirectory(this.replayDir);
     this.logger = new JsonlLogger(this.sessionLogPath);
+  }
+
+  get sessionId(): string {
+    return this.options.sessionId;
+  }
+
+  get createdAt(): string {
+    return this.options.createdAt;
+  }
+
+  currentTimestamp(): string {
+    return this.now();
   }
 
   log<TPayload extends Record<string, unknown>>(
@@ -345,6 +883,22 @@ export class SessionLogger {
         bot.stopReason?.toLowerCase().includes('stop') === true)
     );
     const totalActions = input.bots.reduce((total, bot) => total + bot.actionCount, 0);
+    const actionOutcomeRows = input.bots.map((bot) => {
+      const actions = actionReportRows(join(this.sessionDir, 'bots', safePathSegment(bot.botId), 'actions.jsonl'));
+      const failed = actions.filter((action) => action.result.startsWith('failed') || action.result.startsWith('timed_out')).length;
+      const skipped = actions.filter((action) => action.result.startsWith('skipped')).length;
+      const repeated = topRepeatedActionRows(actions).map(([actionType, count]) => `${actionType} (${count})`).join(', ');
+      const lastAction = actions.at(-1);
+
+      return [
+        bot.botId,
+        String(actions.length || bot.actionCount),
+        String(failed),
+        String(skipped),
+        repeated || 'None',
+        lastAction ? `${lastAction.actionType}: ${lastAction.explanation}` : 'None captured'
+      ];
+    });
     const gameBuild = input.gameProfile.buildId ?? 'Not specified';
     const engineVersion = input.gameProfile.engine.version ? ` ${input.gameProfile.engine.version}` : '';
     const saveIsolationRows = input.instances.map((instance) => [
@@ -353,6 +907,13 @@ export class SessionLogger {
       instance.saveProfileId ?? 'Shared/default',
       instance.isolatedSaveDirectory ?? 'None',
       instance.saveIsolationCleanedUp ? 'yes' : 'no'
+    ]);
+    const startupTimelineRows = (input.startupFlow?.timeline ?? []).map((item) => [
+      String(item.eventType ?? 'event'),
+      String(item.stepId ?? item.completedStepId ?? item.lastStepId ?? item.flowId ?? ''),
+      String(item.resultStatus ?? item.status ?? item.botStatus ?? ''),
+      String(item.message ?? item.resultMessage ?? item.reason ?? ''),
+      String(item.timestamp ?? '')
     ]);
     const lines = [
       `# GameplaySimulator Session: ${this.options.sessionId}`,
@@ -367,6 +928,25 @@ export class SessionLogger {
       `Started: ${input.startedAt ?? 'Not started'}`,
       `Stopped: ${input.stoppedAt ?? 'Not stopped'}`,
       `Total runtime: ${formatDuration(input.startedAt, input.stoppedAt)}`,
+      '',
+      '## Startup Flow',
+      '',
+      input.startupFlow
+        ? `Flow: ${input.startupFlow.flowName} (${input.startupFlow.flowId})`
+        : 'Flow: None configured',
+      input.startupFlow ? `Status: ${input.startupFlow.status}` : 'Status: Not used',
+      input.startupFlow ? `Message: ${input.startupFlow.message ?? 'None'}` : 'Message: None',
+      input.startupFlow ? `Timeout: ${input.startupFlow.timeoutMs ?? 'Default'} ms` : 'Timeout: None',
+      input.startupFlow ? `Issue: ${input.startupFlow.issueId ?? 'None'}` : 'Issue: None',
+      input.startupFlow ? `Screenshot: ${input.startupFlow.screenshotPath ?? 'None'}` : 'Screenshot: None',
+      '',
+      '### Startup Flow Timeline',
+      '',
+      ...markdownTable(
+        ['Event', 'Step', 'Status', 'Message', 'Timestamp'],
+        startupTimelineRows,
+        input.startupFlow ? 'No startup flow timeline events captured' : 'No startup flow configured'
+      ),
       '',
       '## Bot Counts',
       '',
@@ -457,6 +1037,14 @@ export class SessionLogger {
         'No issues found'
       ),
       '',
+      '## Action Outcomes',
+      '',
+      ...markdownTable(
+        ['Bot', 'Actions', 'Failed', 'Skipped', 'Top Repeated', 'Latest Explained Action'],
+        actionOutcomeRows,
+        'No bot actions captured'
+      ),
+      '',
       '## Bot Outcomes',
       '',
       '### Stuck Bots',
@@ -524,6 +1112,8 @@ export class SessionLogger {
       ].join('\n'),
       'utf8'
     );
+    copyIfExists(this.summaryPath, join(this.reportsDir, 'session-summary.md'));
+    copyIfExists(this.htmlReportPath, join(this.reportsDir, 'session-report.html'));
   }
 }
 
@@ -557,8 +1147,21 @@ export class BotLogger {
   }
 
   logAction(event: StructuredLogEvent, action: GameAction, result?: ActionResult): void {
+    const insight = actionInsightFromAction(action);
+
     this.actionsLogger.append({
       ...event,
+      payload: {
+        ...event.payload,
+        actionId: action.actionId,
+        actionType: action.type,
+        status: result?.status,
+        resultMessage: result?.message,
+        actionQuality: insight?.quality,
+        explanation: insight?.explanation,
+        nextLikelyAction: insight?.nextLikelyAction,
+        plannerMetadata: plannerMetadataForLog(action)
+      },
       action,
       result
     });
@@ -579,6 +1182,9 @@ export class BotLogger {
   }
 
   writeReport(input: BotReportInput): void {
+    const actions = actionReportRows(this.actionsPath);
+    const failedActions = actions.filter((action) => action.result.startsWith('failed') || action.result.startsWith('timed_out'));
+    const skippedActions = actions.filter((action) => action.result.startsWith('skipped'));
     const lines = [
       `# Bot Report: ${this.botId}`,
       '',
@@ -601,6 +1207,40 @@ export class BotLogger {
       '## Recent Actions',
       '',
       ...bulletList(input.lastActions.slice(-20), 'No actions captured'),
+      '',
+      '## Action Timeline With Explanations',
+      '',
+      ...markdownTable(
+        ['Time', 'Action', 'Quality', 'Result', 'Why'],
+        actions.map((action) => [
+          action.timestamp,
+          action.actionType,
+          action.quality,
+          action.result,
+          action.explanation
+        ]),
+        'No action timeline captured'
+      ),
+      '',
+      '## Top Repeated Actions',
+      '',
+      ...markdownTable(['Action', 'Count'], topRepeatedActionRows(actions), 'No repeated actions'),
+      '',
+      '## Failed Actions',
+      '',
+      ...markdownTable(
+        ['Time', 'Action', 'Result', 'Why'],
+        failedActions.map((action) => [action.timestamp, action.actionType, action.result, action.explanation]),
+        'No failed actions'
+      ),
+      '',
+      '## Skipped Actions',
+      '',
+      ...markdownTable(
+        ['Time', 'Action', 'Result', 'Why'],
+        skippedActions.map((action) => [action.timestamp, action.actionType, action.result, action.explanation]),
+        'No skipped actions'
+      ),
       '',
       '## Issues Found',
       '',
@@ -637,10 +1277,16 @@ export class IssueLogger {
     ensureDirectory(this.issuesDir);
   }
 
-  writeIssue(event: StructuredLogEvent, issue: DetectedIssue, index: number, context: IssueReportContext = {}): string {
+  writeIssue(event: StructuredLogEvent, issue: DetectedIssue, index: number, context: IssueEventLoggerContext = {}): string {
     const issuePath = join(this.issuesDir, `issue-${String(index).padStart(3, '0')}.md`);
     const attempts = recoveryAttempts(issue);
     const lastActions = issue.lastActions.slice(-20);
+    const issuePayload = buildIssueEventPayload(issue, context);
+    const timelineRows = issuePayload.timeline.map((item) => [
+      String(item.label ?? item.step ?? 'Unknown'),
+      String(item.summary ?? 'No summary'),
+      String(item.timestamp ?? 'No timestamp')
+    ]);
     const lines = [
       `# ${issue.title}`,
       '',
@@ -681,6 +1327,25 @@ export class IssueLogger {
       '## State Summary',
       '',
       issue.stateSummary ?? 'No state summary captured',
+      '',
+      '## Likely Cause',
+      '',
+      issuePayload.likelyCause,
+      '',
+      '## Why This Was Flagged',
+      '',
+      `Detector: ${issuePayload.whyFlagged.detectorName}`,
+      `Rule: ${issuePayload.whyFlagged.detectorRule}`,
+      '',
+      ...jsonBlock(issuePayload.whyFlagged.triggeredData),
+      '',
+      '## Issue Timeline',
+      '',
+      ...markdownTable(['Step', 'Summary', 'Timestamp'], timelineRows, 'No timeline captured'),
+      '',
+      '## What To Check Next',
+      '',
+      ...bulletList(issuePayload.whatToCheckNext, 'No follow-up checks captured'),
       '',
       '## Recovery Attempts',
       '',
@@ -742,6 +1407,7 @@ export class InstanceLogger {
 export class StructuredRunLogger {
   readonly sessionLogger: SessionLogger;
   readonly issueLogger: IssueLogger;
+  readonly issueEventLogger: IssueEventLogger;
   readonly actionTimelineLogger: ActionTimelineLogger;
   readonly stateSnapshotLogger: StateSnapshotLogger;
 
@@ -751,6 +1417,7 @@ export class StructuredRunLogger {
   constructor(options: StructuredRunLoggerOptions) {
     this.sessionLogger = new SessionLogger(options);
     this.issueLogger = new IssueLogger(this.sessionLogger.sessionDir);
+    this.issueEventLogger = new IssueEventLogger();
     this.actionTimelineLogger = new ActionTimelineLogger(this.botLoggers);
     this.stateSnapshotLogger = new StateSnapshotLogger(this.botLoggers);
   }
@@ -765,6 +1432,10 @@ export class StructuredRunLogger {
 
   get sessionLogPath(): string {
     return this.sessionLogger.sessionLogPath;
+  }
+
+  get bundlePaths(): SessionBundlePaths {
+    return this.bundlePathsForSession();
   }
 
   ensureBot(botId: string): BotLogger {
@@ -801,6 +1472,7 @@ export class StructuredRunLogger {
 
   writeSummary(input: SessionSummaryReportInput): void {
     this.sessionLogger.writeSummary(input);
+    this.writeSessionBundle(input);
   }
 
   logSession<TPayload extends Record<string, unknown>>(
@@ -830,18 +1502,188 @@ export class StructuredRunLogger {
     this.stateSnapshotLogger.logState(event, snapshot);
   }
 
-  logIssue(event: StructuredLogEvent, issue: DetectedIssue, index: number, context: IssueReportContext = {}): string {
+  logIssue(event: StructuredLogEvent, issue: DetectedIssue, index: number, context: IssueEventLoggerContext = {}): string {
+    const richEvent = this.issueEventLogger.enrichEvent(event, issue, context);
+
     if (issue.botId) {
-      this.ensureBot(issue.botId).logIssue(event, issue);
+      this.ensureBot(issue.botId).logIssue(richEvent, issue);
     }
 
-    return this.issueLogger.writeIssue(event, issue, index, context);
+    return this.issueLogger.writeIssue(richEvent, issue, index, context);
   }
 
   writeBotReports(bots: BotReportInput[]): void {
     for (const bot of bots) {
       this.ensureBot(bot.botId).writeReport(bot);
     }
+  }
+
+  private bundlePathsForSession(): SessionBundlePaths {
+    return {
+      sessionDirectory: this.sessionDir,
+      metadataJson: this.sessionLogger.metadataPath,
+      summaryJson: this.sessionLogger.summaryJsonPath,
+      summaryMarkdown: this.sessionLogger.summaryPath,
+      importantEventsJsonl: this.sessionLogger.importantEventsPath,
+      fullStructuredLogsJsonl: this.sessionLogger.fullStructuredLogsPath,
+      issuesJson: this.sessionLogger.issuesJsonPath,
+      issueTimelineJson: this.sessionLogger.issueTimelinePath,
+      screenshotsDirectory: this.sessionLogger.screenshotsDir,
+      reportsDirectory: this.sessionLogger.reportsDir,
+      exportsDirectory: this.sessionLogger.exportsDir,
+      replayDirectory: this.sessionLogger.replayDir
+    };
+  }
+
+  private structuredLogSources(): StructuredLogFileSource[] {
+    return [
+      {
+        path: this.sessionLogger.sessionLogPath,
+        source: 'session'
+      },
+      ...[...this.botLoggers.values()].flatMap((logger): StructuredLogFileSource[] => [
+        {
+          path: logger.actionsPath,
+          source: 'bot-actions',
+          botId: logger.botId
+        },
+        {
+          path: logger.statesPath,
+          source: 'bot-states',
+          botId: logger.botId
+        },
+        {
+          path: logger.issuesPath,
+          source: 'bot-issues',
+          botId: logger.botId
+        }
+      ]),
+      ...[...this.instanceLoggers.values()].map((logger): StructuredLogFileSource => ({
+        path: logger.logPath,
+        source: 'instance',
+        instanceId: logger.instanceId
+      }))
+    ];
+  }
+
+  private writeSessionBundle(input: SessionSummaryReportInput): void {
+    const paths = this.bundlePathsForSession();
+    const fullLogs = this.structuredLogSources()
+      .flatMap(sourcedJsonlRecords)
+      .sort((a, b) => String(a.timestamp ?? '').localeCompare(String(b.timestamp ?? '')));
+    const importantEvents = fullLogs.filter(isImportantStructuredEvent);
+    const issueTimeline = input.issues.map((issue) => ({
+      issueId: issue.issueId,
+      title: issue.title,
+      severity: issue.severity,
+      category: issue.category,
+      botId: issue.botId,
+      gameInstanceId: issue.gameInstanceId ?? issue.instanceId,
+      sceneArea: issueArea(issue),
+      firstSeenAt: issue.firstSeenAt,
+      lastSeenAt: issue.lastSeenAt,
+      evidencePaths: unique([issue.screenshotPath, issue.videoPath, ...(issue.evidencePaths ?? [])]),
+      timeline: buildIssueEventPayload(issue).timeline
+    }));
+    const actionTimeline = fullLogs
+      .filter((event) => event.eventType === 'action_performed' || isRecord(event.action))
+      .map((event) => ({
+        eventId: event.eventId,
+        timestamp: event.timestamp,
+        botId: event.botId,
+        gameInstanceId: event.gameInstanceId,
+        actionId: stringValue(isRecord(event.action) ? event.action.actionId : undefined) ??
+          stringValue(isRecord(event.payload) ? event.payload.actionId : undefined),
+        actionType: stringValue(isRecord(event.action) ? event.action.type : undefined) ??
+          stringValue(isRecord(event.payload) ? event.payload.actionType : undefined),
+        status: stringValue(isRecord(event.result) ? event.result.status : undefined) ??
+          stringValue(isRecord(event.payload) ? event.payload.status : undefined),
+        quality: stringValue(isRecord(event.payload) ? event.payload.actionQuality : undefined) ??
+          stringValue(isRecord(event.action) && isRecord(event.action.payload) ? event.action.payload.quality : undefined),
+        explanation: stringValue(isRecord(event.payload) ? event.payload.explanation : undefined) ??
+          stringValue(isRecord(event.action) && isRecord(event.action.payload) ? event.action.payload.explanation : undefined),
+        nextLikelyAction: stringValue(isRecord(event.payload) ? event.payload.nextLikelyAction : undefined) ??
+          stringValue(isRecord(event.action) && isRecord(event.action.payload) ? event.action.payload.nextLikelyAction : undefined),
+        plannerMetadata: isRecord(event.payload) && isRecord(event.payload.plannerMetadata)
+          ? event.payload.plannerMetadata
+          : undefined
+      }));
+    const screenshotFiles = [...this.botLoggers.values()]
+      .flatMap((logger) => listFilesRecursive(logger.screenshotsDir))
+      .filter((path) => /\.(png|jpe?g|webp|gif|svg)$/i.test(path));
+    const summaryJson = {
+      sessionId: this.sessionLogger.sessionId,
+      label: bundleLabel(input.runConfig),
+      status: input.status,
+      game: {
+        gameId: input.gameProfile.gameId,
+        gameName: input.gameProfile.gameName,
+        version: input.gameProfile.version,
+        buildId: input.gameProfile.buildId,
+        engine: input.gameProfile.engine
+      },
+      adapterType: input.runConfig.adapterType,
+      createdAt: input.createdAt,
+      startedAt: input.startedAt,
+      stoppedAt: input.stoppedAt,
+      totalRuntime: formatDuration(input.startedAt, input.stoppedAt),
+      counts: {
+        bots: input.bots.length,
+        instances: input.instances.length,
+        issues: input.issues.length,
+        totalLogs: fullLogs.length,
+        importantEvents: importantEvents.length,
+        screenshots: screenshotFiles.length
+      },
+      issuesBySeverity: Object.fromEntries(countBy(input.issues, (issue) => issue.severity)),
+      issuesByCategory: Object.fromEntries(countBy(input.issues, (issue) => issue.category)),
+      contentCoveragePercent: input.contentCoveragePercent,
+      bundlePaths: paths
+    };
+    const bundle: SessionBundle = {
+      schemaVersion: 1,
+      sessionId: this.sessionLogger.sessionId,
+      label: bundleLabel(input.runConfig),
+      gameName: input.gameProfile.gameName,
+      gameId: input.gameProfile.gameId,
+      version: input.gameProfile.version,
+      buildId: input.gameProfile.buildId,
+      adapterType: input.runConfig.adapterType,
+      status: input.status,
+      createdAt: input.createdAt ?? this.sessionLogger.createdAt,
+      startedAt: input.startedAt,
+      stoppedAt: input.stoppedAt,
+      generatedAt: this.sessionLogger.currentTimestamp(),
+      paths,
+      counts: {
+        totalLogs: fullLogs.length,
+        importantEvents: importantEvents.length,
+        issues: input.issues.length,
+        bots: input.bots.length,
+        instances: input.instances.length,
+        screenshots: screenshotFiles.length
+      }
+    };
+
+    ensureDirectory(paths.screenshotsDirectory);
+    ensureDirectory(paths.reportsDirectory);
+    ensureDirectory(paths.exportsDirectory);
+    ensureDirectory(paths.replayDirectory);
+    writeJson(paths.summaryJson, summaryJson);
+    writeJson(paths.issuesJson, input.issues);
+    writeJson(paths.issueTimelineJson, issueTimeline);
+    writeJson(join(paths.screenshotsDirectory, 'manifest.json'), {
+      sessionId: bundle.sessionId,
+      screenshots: screenshotFiles
+    });
+    writeJson(join(paths.replayDirectory, 'action-timeline.json'), {
+      sessionId: bundle.sessionId,
+      actions: actionTimeline
+    });
+    writeJson(paths.metadataJson, bundle);
+    copyIfExists(paths.summaryJson, join(paths.reportsDirectory, 'session-summary.json'));
+    writeJsonl(paths.fullStructuredLogsJsonl, fullLogs);
+    writeJsonl(paths.importantEventsJsonl, importantEvents);
   }
 
   static directoryExists(path: string): boolean {

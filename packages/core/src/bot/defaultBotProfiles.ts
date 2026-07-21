@@ -224,6 +224,34 @@ export const defaultBotProfiles: BotProfile[] = [
     tags: ['ui', 'menus', 'hud']
   }),
   profile({
+    id: 'ui-journey-bot',
+    name: 'UI Journey Bot',
+    type: 'ui-journey',
+    playstyle: 'configured-menu-journeys',
+    description: 'Follows configured layered UI flows such as Play Game, Create Game, Game Settings, and Start World.',
+    aggression: 0.18,
+    curiosity: 0.52,
+    riskTolerance: 0.28,
+    repetitionTolerance: 0.72,
+    bugHuntingBias: 0.74,
+    preferredActions: ['ui-flow-step', 'open-main-menu', 'choose-play-game', 'choose-create-game', 'confirm-game-settings', 'start-world'],
+    avoidedActions: ['random-input', 'combat-only', 'skip-ui-flow'],
+    goals: [
+      {
+        goalId: 'configured-ui-flow',
+        name: 'Configured UI Flow',
+        description: 'Follow the game profile UI flow before normal exploration begins.',
+        priority: 10,
+        successCriteria: ['Reach the configured end state', 'Report blocked or failed UI journey steps'],
+        targetIssueCategories: ['ui', 'input', 'progression']
+      }
+    ],
+    defaultResourceWeight: 'medium',
+    recommendedMinCount: 1,
+    recommendedMaxCount: 4,
+    tags: ['ui', 'journey', 'menus', 'first-run']
+  }),
+  profile({
     id: 'economy-tester-bot',
     name: 'Economy Tester Bot',
     type: 'economy',

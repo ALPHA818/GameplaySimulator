@@ -45,6 +45,7 @@ const gameProfile: GameProfile = {
   testingTargets: [],
   progressSignals: [],
   failureSignals: [],
+  uiFlows: [],
   knownContent: {
     scenes: ['Start Area', 'Traversal Loop'],
     levels: ['Level 1'],
@@ -299,6 +300,163 @@ class FailingLaunchAdapter extends RecordingGameAdapter {
   }
 }
 
+class StartupFlowGameAdapter extends RecordingGameAdapter {
+  readonly actionOrder: Array<{ botId: string; actionType: string }> = [];
+  readonly screenshotRequests: Array<{ instanceId: string; botId: string }> = [];
+  private inGameplay = false;
+
+  constructor(
+    private readonly startupGate?: Promise<void>,
+    private readonly failStartupAction = false
+  ) {
+    super();
+  }
+
+  override async getState(instanceId: string, botId: string): Promise<GameStateSnapshot | null> {
+    if (!(await this.isRunning(instanceId))) {
+      return null;
+    }
+
+    const currentScreen = this.inGameplay ? 'Gameplay' : 'Main Menu';
+
+    return {
+      snapshotId: `${instanceId}-${botId}-${currentScreen.toLowerCase().replace(/\s+/g, '-')}`,
+      sessionId: 'session-startup-flow',
+      gameId: gameProfile.gameId,
+      gameInstanceId: instanceId,
+      botId,
+      capturedAt: '2026-07-04T09:00:00.000Z',
+      scene: currentScreen,
+      uiState: {
+        currentScreen,
+        openMenus: this.inGameplay ? [] : ['main-menu'],
+        visibleButtons: this.inGameplay ? [] : [{ label: 'Start World', disabled: false }],
+        modalStack: [],
+        canStartGame: !this.inGameplay,
+        isInGameplay: this.inGameplay,
+        isPaused: false,
+        isLoading: false,
+        source: 'hook'
+      },
+      state: { currentScreen },
+      metrics: {}
+    };
+  }
+
+  override async getAvailableActions(_instanceId?: string, botId?: string): Promise<AvailableGameAction[]> {
+    return botId === 'startup-flow-001'
+      ? [{ actionType: 'start-world', label: 'Start World', requiresDirectAction: true }]
+      : [{ actionType: 'move-forward', label: 'Move Forward', requiresDirectAction: true }];
+  }
+
+  override async performAction(
+    _instanceId: string,
+    botId: string,
+    action: GameAction
+  ): Promise<ActionResult> {
+    this.actionOrder.push({ botId, actionType: action.type });
+
+    if (botId === 'startup-flow-001') {
+      await this.startupGate;
+
+      if (this.failStartupAction) {
+        throw new Error('Start World button did not open the game.');
+      }
+
+      this.inGameplay = true;
+    }
+
+    return {
+      actionId: action.actionId,
+      botId,
+      status: 'succeeded',
+      startedAt: action.requestedAt,
+      completedAt: '2026-07-04T09:00:00.000Z',
+      durationMs: 1,
+      message: `${action.type} succeeded.`,
+      issueIds: []
+    };
+  }
+
+  async captureScreenshot(instanceId: string, botId: string) {
+    this.screenshotRequests.push({ instanceId, botId });
+
+    return {
+      instanceId,
+      botId,
+      capturedAt: '2026-07-04T09:00:00.000Z',
+      mimeType: 'image/png',
+      data: new Uint8Array([137, 80, 78, 71])
+    };
+  }
+}
+
+function startupFlowProfile(): GameProfile {
+  return {
+    ...gameProfile,
+    uiFlows: [
+      {
+        flowId: 'create-world',
+        name: 'Create World',
+        startState: 'Main Menu',
+        endState: 'Gameplay',
+        steps: [
+          {
+            stepId: 'start-world',
+            expectedScreen: 'Main Menu',
+            actionType: 'start-world',
+            targetLabel: 'Start World',
+            successCondition: 'Gameplay screen is visible.',
+            maxRetries: 0
+          }
+        ]
+      }
+    ]
+  };
+}
+
+function startupFlowRunConfig(sessionId: string): SimulationRunConfig {
+  return {
+    ...runConfig,
+    sessionId,
+    useMockRuntime: false,
+    startupFlowId: 'create-world',
+    startupFlowTimeoutMs: 5_000,
+    continueOnStartupFlowFailure: false,
+    actionDelayMs: 0,
+    maxActionsPerBot: 1,
+    globalBotLimit: 2,
+    botPools: [
+      {
+        profileId: 'explorer',
+        enabled: true,
+        minCount: 1,
+        desiredCount: 1,
+        maxCount: 1,
+        scalingMode: 'fixed',
+        priority: 10,
+        resourceWeight: 'medium'
+      }
+    ]
+  };
+}
+
+async function waitForCondition(assertion: () => void): Promise<void> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+
+  throw lastError;
+}
+
 describe('SimulationService', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -396,6 +554,136 @@ describe('SimulationService', () => {
     expect(stopped.status).toBe('stopped');
     expect(adapter.stoppedAll).toBe(true);
     expect((await service.getInstanceStatuses(adapterRunConfig.sessionId)).every((instance) => instance.status === 'stopped')).toBe(true);
+  });
+
+  it('completes a startup flow before running the normal bot pool', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-startup-success-'));
+    const adapter = new StartupFlowGameAdapter();
+    const sessionConfig = startupFlowRunConfig('session-startup-success');
+    const service = new SimulationService({
+      reportRoot,
+      now: () => '2026-07-04T09:00:00.000Z',
+      systemSnapshot,
+      adapterFactory: { createAdapter: vi.fn(() => adapter) }
+    });
+
+    service.createSession({
+      runConfig: sessionConfig,
+      gameProfile: startupFlowProfile(),
+      botProfiles
+    });
+    await service.startSession(sessionConfig.sessionId);
+
+    await waitForCondition(() => {
+      expect(adapter.actionOrder.map((entry) => entry.botId)).toEqual([
+        'startup-flow-001',
+        'explorer-001'
+      ]);
+      expect(service.getBotStatuses(sessionConfig.sessionId)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ botId: 'startup-flow-001', status: 'completed' }),
+          expect.objectContaining({ botId: 'explorer-001', status: 'completed' })
+        ])
+      );
+    });
+
+    const metadata = service.listSessions().find((session) => session.sessionId === sessionConfig.sessionId);
+    const summaryPath = metadata?.reportPaths.summaryMarkdown;
+
+    expect(summaryPath).toBeTruthy();
+    const summary = await readFile(summaryPath!, 'utf8');
+    expect(summary).toContain('## Startup Flow');
+    expect(summary).toContain('Status: succeeded');
+    expect(summary).toContain('startup_flow_succeeded');
+
+    await service.stopSession(sessionConfig.sessionId);
+  });
+
+  it('keeps normal bots queued until the startup flow ends', async () => {
+    let releaseStartup!: () => void;
+    const startupGate = new Promise<void>((resolve) => {
+      releaseStartup = resolve;
+    });
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-startup-gate-'));
+    const adapter = new StartupFlowGameAdapter(startupGate);
+    const sessionConfig = startupFlowRunConfig('session-startup-gate');
+    const service = new SimulationService({
+      reportRoot,
+      now: () => '2026-07-04T09:00:00.000Z',
+      systemSnapshot,
+      adapterFactory: { createAdapter: vi.fn(() => adapter) }
+    });
+
+    service.createSession({
+      runConfig: sessionConfig,
+      gameProfile: startupFlowProfile(),
+      botProfiles
+    });
+    await service.startSession(sessionConfig.sessionId);
+
+    await waitForCondition(() => {
+      expect(adapter.actionOrder).toEqual([
+        { botId: 'startup-flow-001', actionType: 'start-world' }
+      ]);
+    });
+    expect(service.getBotStatuses(sessionConfig.sessionId)).toContainEqual(
+      expect.objectContaining({
+        botId: 'explorer-001',
+        status: 'queued',
+        progressState: 'Waiting for startup flow'
+      })
+    );
+
+    releaseStartup();
+
+    await waitForCondition(() => {
+      expect(adapter.actionOrder.some((entry) => entry.botId === 'explorer-001')).toBe(true);
+    });
+
+    await service.stopSession(sessionConfig.sessionId);
+  });
+
+  it('records a failed startup step with screenshot evidence and never starts normal bots', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-startup-failure-'));
+    const adapter = new StartupFlowGameAdapter(undefined, true);
+    const sessionConfig = startupFlowRunConfig('session-startup-failure');
+    const service = new SimulationService({
+      reportRoot,
+      now: () => '2026-07-04T09:00:00.000Z',
+      systemSnapshot,
+      adapterFactory: { createAdapter: vi.fn(() => adapter) }
+    });
+
+    service.createSession({
+      runConfig: sessionConfig,
+      gameProfile: startupFlowProfile(),
+      botProfiles
+    });
+    await service.startSession(sessionConfig.sessionId);
+
+    await waitForCondition(() => {
+      expect(service.getSessionStatus(sessionConfig.sessionId).status).toBe('failed');
+      expect(service.getIssues(sessionConfig.sessionId)).toContainEqual(
+        expect.objectContaining({
+          title: 'Startup flow failed',
+          severity: 'critical',
+          category: 'ui',
+          screenshotPath: expect.stringMatching(/issue-detected.*\.png$/)
+        })
+      );
+    });
+
+    const issue = service.getIssues(sessionConfig.sessionId)[0];
+
+    expect(issue.screenshotPath && existsSync(issue.screenshotPath)).toBe(true);
+    expect(issue.evidencePaths).toContain(issue.screenshotPath);
+    expect(adapter.screenshotRequests).toEqual([
+      expect.objectContaining({ botId: 'startup-flow-001' })
+    ]);
+    expect(adapter.actionOrder.map((entry) => entry.botId)).toEqual(['startup-flow-001']);
+    expect(service.getBotStatuses(sessionConfig.sessionId)).toContainEqual(
+      expect.objectContaining({ botId: 'explorer-001', status: 'stopped' })
+    );
   });
 
   it('tests a game profile through the selected adapter and cleans up the instance', async () => {
@@ -568,7 +856,7 @@ describe('SimulationService', () => {
 
     expect(result.opened).toBe(true);
     expect(openedPaths).toEqual([result.logsPath]);
-    expect(result.logsPath.endsWith('session-log.jsonl')).toBe(true);
+    expect(result.logsPath.endsWith('full-structured-logs.jsonl')).toBe(true);
     expect(sessionEvents.some((event) => event.eventType === 'session_start')).toBe(true);
     expect(sessionEvents.some((event) => event.eventType === 'instance_start')).toBe(true);
     expect(sessionEvents.some((event) => event.eventType === 'bot_start')).toBe(true);
@@ -578,6 +866,14 @@ describe('SimulationService', () => {
     expect(states.length).toBeGreaterThan(0);
     expect(existsSync(join(sessionDirectory, 'config.json'))).toBe(true);
     expect(existsSync(join(sessionDirectory, 'viability-report.json'))).toBe(true);
+    expect(existsSync(join(sessionDirectory, 'session-summary.json'))).toBe(true);
+    expect(existsSync(join(sessionDirectory, 'important-events.jsonl'))).toBe(true);
+    expect(existsSync(join(sessionDirectory, 'issues.json'))).toBe(true);
+    expect(existsSync(join(sessionDirectory, 'issue-timeline.json'))).toBe(true);
+    expect(existsSync(join(sessionDirectory, 'metadata.json'))).toBe(true);
+    expect(existsSync(join(sessionDirectory, 'reports'))).toBe(true);
+    expect(existsSync(join(sessionDirectory, 'exports'))).toBe(true);
+    expect(existsSync(join(sessionDirectory, 'replay'))).toBe(true);
     expect(existsSync(join(botDirectory, 'bot-report.md'))).toBe(true);
   });
 

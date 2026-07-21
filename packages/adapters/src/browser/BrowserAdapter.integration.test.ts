@@ -8,18 +8,40 @@ import { BrowserAdapter } from './BrowserAdapter';
 
 interface RunningHtmlServer {
   url: string;
+  domOnlyUrl: string;
   stop: () => Promise<void>;
 }
 
 async function startHtmlGameServer(): Promise<RunningHtmlServer> {
-  const server: Server = createServer((_request, response) => {
+  const server: Server = createServer((request, response) => {
     response.writeHead(200, {
       'content-type': 'text/html; charset=utf-8'
     });
+
+    if (request.url?.includes('dom-only')) {
+      response.end(`<!doctype html>
+<html>
+  <head><title>DOM-only Browser Game</title></head>
+  <body>
+    <h1>Main Menu</h1>
+    <button id="create-world">Create World</button>
+    <script>
+      document.querySelector('#create-world').addEventListener('click', () => {
+        document.body.innerHTML = '<h1>Gameplay</h1><canvas id="game" width="320" height="180"></canvas>';
+        document.body.dataset.gameplay = 'true';
+      });
+    </script>
+  </body>
+</html>`);
+      return;
+    }
+
     response.end(`<!doctype html>
 <html>
   <head><title>GameplaySimulator Browser Integration</title></head>
   <body>
+    <h1>Browser Test Menu</h1>
+    <button id="open-menu">Open Menu</button>
     <canvas id="game" width="320" height="180"></canvas>
     <script>
       window.__gameplayTick = 0;
@@ -43,6 +65,17 @@ async function startHtmlGameServer(): Promise<RunningHtmlServer> {
         { actionType: 'move-forward', label: 'Move Forward', description: 'Move for ' + botId },
         { actionType: 'open-menu', label: 'Open Menu' }
       ];
+      window.__GAMEPLAY_SIM_UI_STATE__ = () => ({
+        currentScreen: window.__gameplayScene === 'Browser Start' ? 'main-menu' : 'gameplay',
+        openMenus: window.__gameplayScene === 'Browser Menu' ? ['pause-menu'] : [],
+        focusedElement: document.activeElement?.id,
+        visibleButtons: [{ label: 'Open Menu', selector: '#open-menu' }],
+        modalStack: [],
+        canStartGame: window.__gameplayScene === 'Browser Start',
+        isInGameplay: window.__gameplayScene === 'Browser Field',
+        isPaused: window.__gameplayScene === 'Browser Menu',
+        isLoading: false
+      });
       window.__GAMEPLAY_SIM_PERFORM_ACTION__ = (action) => {
         window.__gameplayTick += 1;
         if (action.type === 'move-forward') {
@@ -73,6 +106,7 @@ async function startHtmlGameServer(): Promise<RunningHtmlServer> {
 
   return {
     url: `http://127.0.0.1:${port}/game.html`,
+    domOnlyUrl: `http://127.0.0.1:${port}/dom-only.html`,
     stop: () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => {
@@ -145,9 +179,11 @@ describe('BrowserAdapter integration', () => {
       const logs = await adapter.captureLogs(instanceConfig.instanceId);
 
       expect(firstState.scene).toBe('Browser Start');
+      expect(firstState.uiState).toMatchObject({ currentScreen: 'main-menu', canStartGame: true, source: 'hook' });
       expect(actions.map((available) => available.actionType)).toEqual(['move-forward', 'open-menu']);
       expect(result).toEqual(expect.objectContaining({ status: 'succeeded', message: 'Handled move-forward' }));
       expect(nextState.scene).toBe('Browser Field');
+      expect(nextState.uiState).toMatchObject({ currentScreen: 'gameplay', isInGameplay: true });
       expect(nextState.tick).toBeGreaterThan(firstState.tick ?? -1);
       expect(nextState.state).toEqual(expect.objectContaining({ moves: 1 }));
       expect(screenshot.path).toContain(screenshotDirectory);
@@ -156,6 +192,57 @@ describe('BrowserAdapter integration', () => {
           expect.objectContaining({ level: 'warn', message: 'browser integration warning' })
         ])
       );
+    } finally {
+      await adapter.stopAll();
+      await server.stop();
+    }
+  });
+
+  it('scans and clicks a layered DOM menu when custom browser hooks are absent', async () => {
+    const server = await startHtmlGameServer();
+    const adapter = new BrowserAdapter({
+      targetUrl: server.domOnlyUrl,
+      browserName: 'chromium',
+      domScanMode: 'fallback',
+      headless: true
+    });
+    adapters.push(adapter);
+    const instanceConfig: GameInstanceConfig = {
+      instanceId: 'browser-dom-instance-001',
+      gameProfileId: 'browser-dom-game',
+      launch: {
+        platform: 'browser',
+        url: server.domOnlyUrl,
+        arguments: []
+      },
+      maxBots: 1,
+      environment: {}
+    };
+
+    try {
+      await adapter.launchInstance(instanceConfig);
+
+      const menuState = await adapter.getState(instanceConfig.instanceId, 'ui-journey-bot-001');
+      const actions = await adapter.getAvailableActions(instanceConfig.instanceId, 'ui-journey-bot-001');
+      const createWorld = actions.find((available) => available.label === 'Create World');
+      const result = await adapter.performAction(
+        instanceConfig.instanceId,
+        'ui-journey-bot-001',
+        {
+          ...action(createWorld?.actionType ?? 'click-create-world', instanceConfig.instanceId),
+          payload: { adapterPayload: createWorld?.payloadSchema }
+        }
+      );
+      const gameplayState = await adapter.getState(instanceConfig.instanceId, 'ui-journey-bot-001');
+
+      expect(menuState.uiState).toMatchObject({
+        currentScreen: 'main-menu',
+        canStartGame: true,
+        source: 'dom'
+      });
+      expect(createWorld?.payloadSchema).toMatchObject({ domTarget: true, domTargetLabel: 'Create World' });
+      expect(result.status).toBe('succeeded');
+      expect(gameplayState.uiState).toMatchObject({ currentScreen: 'gameplay', isInGameplay: true });
     } finally {
       await adapter.stopAll();
       await server.stop();

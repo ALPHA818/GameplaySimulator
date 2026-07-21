@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { cp, mkdir, rm } from 'node:fs/promises';
 import { readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import {
   AdapterFactory,
@@ -17,11 +17,13 @@ import type {
 import { type BotAdapter, type BotMemory } from '@core/bot/Bot';
 import { BotManager } from '@core/bot/BotManager';
 import { resolveBotPools } from '@core/bot/BotPoolResolver';
+import { defaultBotProfiles } from '@core/bot/defaultBotProfiles';
 import type { AvailableGameActionLike, CoverageData } from '@core/bot/ActionPlanner';
+import { actionInsightFromAction, plannerMetadataForLog } from '@core/bot/ActionExplanation';
 import { CoverageTracker, type ContentCoverageSummary } from '@core/coverage/CoverageTracker';
 import { IssueDetectionRunner } from '@core/detection/IssueDetectors';
 import type { LogEntry } from '@core/logging/LogEntry';
-import { StructuredRunLogger, type BotReportInput } from '@core/logging/StructuredLoggers';
+import { StructuredRunLogger, type BotReportInput, type IssueEventLoggerContext } from '@core/logging/StructuredLoggers';
 import { resourceManager, type SystemResourceSnapshot } from '@core/resources/ResourceManager';
 import {
   GameInstanceManager,
@@ -42,7 +44,8 @@ import type {
   RuntimeBotSnapshot,
   RuntimeViabilityReport,
   Severity,
-  SimulationRunConfig
+  SimulationRunConfig,
+  UIFlow
 } from '@core/types';
 import {
   BotProfileSchema,
@@ -191,6 +194,28 @@ export interface OpenEvidenceResult {
   message: string;
 }
 
+export interface OpenSessionPathResult {
+  sessionId: string;
+  path: string;
+  opened: boolean;
+  message: string;
+}
+
+export interface SessionCleanupOptions {
+  sessionId: string;
+  deleteRawStateLogs: boolean;
+  keepScreenshots: boolean;
+  keepSummaries: boolean;
+  archiveSessionBundle: boolean;
+}
+
+export interface SessionCleanupResult {
+  sessionId: string;
+  deletedPaths: string[];
+  archivePath?: string;
+  message: string;
+}
+
 export interface ComparisonReportSummary {
   oldTotalIssues: number;
   newTotalIssues: number;
@@ -323,6 +348,14 @@ const GitHubIssuePostRequestSchema = GitHubIssueExportRequestSchema.extend({
   labels: z.array(z.string().min(1)).default([])
 });
 
+const SessionCleanupOptionsSchema = z.object({
+  sessionId: z.string().min(1),
+  deleteRawStateLogs: z.boolean().default(false),
+  keepScreenshots: z.boolean().default(true),
+  keepSummaries: z.boolean().default(true),
+  archiveSessionBundle: z.boolean().default(false)
+});
+
 interface SimulationSessionRecord {
   request: Required<SimulationSessionRequest>;
   viabilityReport: RuntimeViabilityReport;
@@ -351,6 +384,11 @@ interface SimulationSessionRecord {
   loggedRecoverySuccessIds: Set<string>;
   loggedRecoveryFailedIds: Set<string>;
   loggedEvidenceKeys: Set<string>;
+  loggedFlowStartIds: Set<string>;
+  loggedFlowStepActionIds: Set<string>;
+  loggedFlowCompletionIds: Set<string>;
+  loggedFlowAbandonedIds: Set<string>;
+  startupFlow?: StartupFlowRuntimeState;
   lastPeriodicScreenshotActionCountByBot: Map<string, number>;
   videoPathsByBot: Map<string, string>;
   evidenceCaptureService: EvidenceCaptureService;
@@ -364,7 +402,36 @@ interface SimulationSessionRecord {
   persistedCoverageSummary?: ContentCoverageSummary;
   finalizing?: boolean;
   startupTimer?: NodeJS.Timeout;
+  startupFlowTimeoutTimer?: NodeJS.Timeout;
   instanceHealthTimer?: NodeJS.Timeout;
+}
+
+type StartupFlowRuntimeStatus =
+  | 'pending'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'timed_out'
+  | 'continued';
+
+interface StartupFlowRuntimeState {
+  flowId: string;
+  flowName: string;
+  botId: string;
+  status: StartupFlowRuntimeStatus;
+  continueOnFailure: boolean;
+  timeoutMs: number;
+  startedAt?: string;
+  completedAt?: string;
+  message?: string;
+  issueId?: string;
+  screenshotPath?: string;
+  timeline: Array<Record<string, unknown>>;
+  failureHandled?: boolean;
+}
+
+function startupFlowTimeoutIsTerminal(status: StartupFlowRuntimeStatus): boolean {
+  return ['succeeded', 'failed', 'timed_out', 'continued'].includes(status);
 }
 
 function fallbackBotProfiles(runConfig: SimulationRunConfig, botProfiles: BotProfile[]): BotProfile[] {
@@ -574,6 +641,84 @@ function safePathSegment(value: string): string {
     .trim()
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'unknown';
+}
+
+const STARTUP_FLOW_BOT_ID = 'startup-flow-001';
+const STARTUP_FLOW_PROFILE_ID = 'ui-journey-bot';
+const DEFAULT_STARTUP_FLOW_TIMEOUT_MS = 60_000;
+
+function startupFlowFor(gameProfile: GameProfile, runConfig: SimulationRunConfig): UIFlow | undefined {
+  if (!runConfig.startupFlowId) {
+    return undefined;
+  }
+
+  return gameProfile.uiFlows.find((flow) => flow.flowId === runConfig.startupFlowId);
+}
+
+function ensureStartupFlowProfile(botProfiles: BotProfile[]): BotProfile[] {
+  if (botProfiles.some((profile) => profile.profileId === STARTUP_FLOW_PROFILE_ID)) {
+    return botProfiles;
+  }
+
+  const defaultProfile = defaultBotProfiles.find((profile) => profile.profileId === STARTUP_FLOW_PROFILE_ID);
+
+  if (!defaultProfile) {
+    return botProfiles;
+  }
+
+  return [defaultProfile, ...botProfiles];
+}
+
+function prependStartupLaunchPlan(
+  launchPlans: BotLaunchPlan[],
+  startupFlow: UIFlow | undefined,
+  sessionId: string
+): BotLaunchPlan[] {
+  if (!startupFlow) {
+    return launchPlans;
+  }
+
+  const startupPlan: BotLaunchPlan = {
+    botId: STARTUP_FLOW_BOT_ID,
+    profileId: STARTUP_FLOW_PROFILE_ID,
+    displayName: `Startup Flow: ${startupFlow.name}`,
+    playstyle: 'pre-run-ui-setup',
+    seed: 1_000_001,
+    resourceWeight: 'medium',
+    launchIndex: 1
+  };
+
+  return [
+    {
+      ...startupPlan,
+      seed: Math.abs(
+        Array.from(`${sessionId}:${startupFlow.flowId}`).reduce((hash, char) => {
+          hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+          return hash >>> 0;
+        }, 2166136261)
+      )
+    },
+    ...launchPlans.map((plan) => ({
+      ...plan,
+      launchIndex: plan.launchIndex + 1
+    }))
+  ];
+}
+
+function recordPayload(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringPayloadValue(payload: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = payload?.[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function numberPayloadValue(payload: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = payload?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 const severityRanks: Record<Severity, number> = {
@@ -1096,6 +1241,10 @@ function statusLabel(record: SimulationSessionRecord): string {
   }
 
   if (record.status === 'running') {
+    if (record.startupFlow && ['pending', 'running'].includes(record.startupFlow.status)) {
+      return `Running startup flow "${record.startupFlow.flowName}"`;
+    }
+
     return `Running ${record.request.runConfig.sessionId} (${botCount} bots)`;
   }
 
@@ -1159,11 +1308,30 @@ export class SimulationService {
 
     const useMockRuntime = result.data.runConfig.useMockRuntime ?? this.useMockRuntime;
     const adapterOptions = createAdapterOptionsFromGameProfile(result.data.gameProfile, result.data.runConfig);
+    const startupFlowMissing =
+      result.data.runConfig.startupFlowId && !startupFlowFor(result.data.gameProfile, result.data.runConfig)
+        ? [
+            {
+              path: 'startupFlowId',
+              message: `Startup flow "${result.data.runConfig.startupFlowId}" does not exist on this game profile.`
+            }
+          ]
+        : [];
+    const startupFlowEmpty =
+      startupFlowFor(result.data.gameProfile, result.data.runConfig)?.steps.length === 0
+        ? [
+            {
+              path: 'startupFlowId',
+              message: 'Startup flow must include at least one step before it can be used.'
+            }
+          ]
+        : [];
     const adapterErrors = useMockRuntime ? [] : adapterOptions.errors;
+    const errors = [...adapterErrors, ...startupFlowMissing, ...startupFlowEmpty];
 
     return {
-      valid: adapterErrors.length === 0,
-      errors: adapterErrors,
+      valid: errors.length === 0,
+      errors,
       warnings: useMockRuntime ? [] : adapterOptions.warnings
     };
   }
@@ -1525,7 +1693,15 @@ export class SimulationService {
       throw new Error(formatSimulationValidationErrors(adapterOptions.errors));
     }
 
-    const botProfiles = fallbackBotProfiles(request.runConfig, request.botProfiles);
+    const startupFlow = startupFlowFor(request.gameProfile, request.runConfig);
+
+    if (request.runConfig.startupFlowId && !startupFlow) {
+      throw new Error(`Startup flow "${request.runConfig.startupFlowId}" does not exist on this game profile.`);
+    }
+
+    const botProfiles = startupFlow
+      ? ensureStartupFlowProfile(fallbackBotProfiles(request.runConfig, request.botProfiles))
+      : fallbackBotProfiles(request.runConfig, request.botProfiles);
     const viabilityReport = this.estimateViability({
       ...request,
       botProfiles
@@ -1536,6 +1712,7 @@ export class SimulationService {
       viabilityReport
     });
     const sessionId = request.runConfig.sessionId;
+    const plannedLaunchPlans = prependStartupLaunchPlan(resolvedLaunchPlans, startupFlow, sessionId);
     const createdAt = this.now();
     const profilesById = new Map(botProfiles.map((profile) => [profile.profileId, profile]));
     const gameAdapter = useMockRuntime
@@ -1549,7 +1726,7 @@ export class SimulationService {
           adapter: gameAdapter,
           runConfig: request.runConfig,
           gameProfile: request.gameProfile,
-          launchPlans: resolvedLaunchPlans,
+          launchPlans: plannedLaunchPlans,
           fileSystem: { cp, mkdir, rm },
           now: this.now
         })
@@ -1557,7 +1734,7 @@ export class SimulationService {
     const instancePlan = gameInstanceManager?.getPlan() ?? planGameInstances({
       runConfig: request.runConfig,
       gameProfile: request.gameProfile,
-      launchPlans: resolvedLaunchPlans,
+      launchPlans: plannedLaunchPlans,
       adapterCapabilities: {
         supportsMultipleInstances: request.gameProfile.adapter.supportsMultipleInstances,
         supportsMultipleBotsPerInstance:
@@ -1590,6 +1767,7 @@ export class SimulationService {
       maxConcurrentBots: maxConcurrentBotsForHybrid(request.runConfig, viabilityReport, launchPlans.length),
       getCoverageData: () => this.coverageForRecord(record),
       getRecentIssues: () => this.getIssues(sessionId),
+      uiFlows: startupFlow ? [startupFlow] : request.gameProfile.uiFlows,
       getInstanceHeartbeat: (instanceId) =>
         record.instanceStatuses.find((instance) => instance.instanceId === instanceId)?.lastHeartbeat,
       getProcessResponsive: (instanceId) => {
@@ -1605,7 +1783,9 @@ export class SimulationService {
       },
       onIdle: () => {
         this.completeSessionIfNoActiveBots(record);
-      }
+      },
+      startupBotIds: startupFlow ? [STARTUP_FLOW_BOT_ID] : undefined,
+      continueAfterStartupFailure: request.runConfig.continueOnStartupFlowFailure ?? false
     });
 
     record = {
@@ -1629,6 +1809,7 @@ export class SimulationService {
           status: 'queued',
           gameInstanceId: plan.assignedGameInstanceId,
           currentGoalId: profile?.goals[0]?.goalId,
+          currentGoal: profile?.goals[0]?.name,
           lastActionId: undefined,
           currentArea: 'Queued',
           progressState: 'Queued',
@@ -1668,6 +1849,21 @@ export class SimulationService {
       loggedRecoverySuccessIds: new Set(),
       loggedRecoveryFailedIds: new Set(),
       loggedEvidenceKeys: new Set(),
+      loggedFlowStartIds: new Set(),
+      loggedFlowStepActionIds: new Set(),
+      loggedFlowCompletionIds: new Set(),
+      loggedFlowAbandonedIds: new Set(),
+      startupFlow: startupFlow
+        ? {
+            flowId: startupFlow.flowId,
+            flowName: startupFlow.name,
+            botId: STARTUP_FLOW_BOT_ID,
+            status: 'pending',
+            continueOnFailure: request.runConfig.continueOnStartupFlowFailure ?? false,
+            timeoutMs: request.runConfig.startupFlowTimeoutMs ?? DEFAULT_STARTUP_FLOW_TIMEOUT_MS,
+            timeline: []
+          }
+        : undefined,
       lastPeriodicScreenshotActionCountByBot: new Map(),
       videoPathsByBot: new Map(),
       evidenceCaptureService,
@@ -1765,12 +1961,35 @@ export class SimulationService {
       record.status = 'running';
       record.botStatuses = record.botStatuses.map((bot) => ({
         ...bot,
-        status: bot.status === 'stopped' ? 'stopped' : 'running',
+        status:
+          bot.status === 'stopped'
+            ? 'stopped'
+            : record.startupFlow && bot.botId !== record.startupFlow.botId
+              ? 'queued'
+              : 'running',
         currentArea: bot.status === 'stopped' ? bot.currentArea : 'Adapter Runtime',
-        progressState: bot.status === 'stopped' ? bot.progressState : 'Running',
-        message: bot.status === 'stopped' ? bot.message : 'Bot runtime is using the selected game adapter.'
+        progressState:
+          bot.status === 'stopped'
+            ? bot.progressState
+            : record.startupFlow && bot.botId !== record.startupFlow.botId
+              ? 'Waiting for startup flow'
+              : 'Running',
+        message:
+          bot.status === 'stopped'
+            ? bot.message
+            : record.startupFlow && bot.botId !== record.startupFlow.botId
+              ? `Waiting for startup flow "${record.startupFlow.flowName}".`
+              : 'Bot runtime is using the selected game adapter.'
       }));
-      record.logs.push(this.createLog(sessionId, 'info', 'Game adapter instances are running; starting bot runtime loops.'));
+      record.logs.push(
+        this.createLog(
+          sessionId,
+          'info',
+          record.startupFlow
+            ? `Game adapter instances are running; starting startup flow "${record.startupFlow.flowName}".`
+            : 'Game adapter instances are running; starting bot runtime loops.'
+        )
+      );
       record.label = statusLabel(record);
       for (const instance of record.instanceStatuses) {
         this.logInstanceStart(record, instance);
@@ -1778,6 +1997,7 @@ export class SimulationService {
       this.startInstanceHealthMonitor(record);
       this.startVideoEvidence(record);
       this.writeStructuredReports(record);
+      this.startStartupFlowTimeout(record);
       record.botManager.startAll();
     } catch (error) {
       await this.failAdapterStartup(record, error);
@@ -2016,7 +2236,9 @@ export class SimulationService {
   async openLogs(sessionId: string): Promise<OpenLogsResult> {
     const record = this.requireSession(sessionId);
     this.writeStructuredReports(record);
-    const logsPath = record.structuredLogger.sessionLogPath;
+    const logsPath = existsSync(record.structuredLogger.sessionLogger.fullStructuredLogsPath)
+      ? record.structuredLogger.sessionLogger.fullStructuredLogsPath
+      : record.structuredLogger.sessionLogPath;
 
     const openError = await this.openPath(logsPath);
 
@@ -2028,11 +2250,186 @@ export class SimulationService {
     };
   }
 
+  async openSessionFolder(sessionId: string): Promise<OpenSessionPathResult> {
+    const record = this.requireSession(sessionId);
+    this.writeStructuredReports(record);
+    return this.openSessionPath(record, record.structuredLogger.sessionDir, 'Session folder opened.');
+  }
+
+  async openIssueFolder(sessionId: string): Promise<OpenSessionPathResult> {
+    const record = this.requireSession(sessionId);
+    this.writeStructuredReports(record);
+    return this.openSessionPath(record, join(record.structuredLogger.sessionDir, 'issues'), 'Issue folder opened.');
+  }
+
+  async openScreenshotsFolder(sessionId: string): Promise<OpenSessionPathResult> {
+    const record = this.requireSession(sessionId);
+    this.writeStructuredReports(record);
+    return this.openSessionPath(record, record.structuredLogger.sessionLogger.screenshotsDir, 'Screenshots folder opened.');
+  }
+
+  async cleanupSessionBundle(payload: unknown): Promise<SessionCleanupResult> {
+    const options = SessionCleanupOptionsSchema.parse(payload);
+    const record = this.requireSession(options.sessionId);
+    this.writeStructuredReports(record);
+
+    const deletedPaths: string[] = [];
+    let archivePath: string | undefined;
+
+    if (options.archiveSessionBundle) {
+      archivePath = this.writeSessionBundleArchive(record);
+    }
+
+    if (options.deleteRawStateLogs) {
+      for (const bot of record.botStatuses) {
+        const stateLogPath = record.structuredLogger.ensureBot(bot.botId).statesPath;
+
+        if (existsSync(stateLogPath)) {
+          rmSync(stateLogPath, { force: true });
+          deletedPaths.push(stateLogPath);
+        }
+      }
+    }
+
+    if (!options.keepScreenshots && existsSync(record.structuredLogger.sessionLogger.screenshotsDir)) {
+      rmSync(record.structuredLogger.sessionLogger.screenshotsDir, { recursive: true, force: true });
+      mkdirSync(record.structuredLogger.sessionLogger.screenshotsDir, { recursive: true });
+      deletedPaths.push(record.structuredLogger.sessionLogger.screenshotsDir);
+    }
+
+    if (!options.keepSummaries) {
+      for (const path of [
+        record.structuredLogger.sessionLogger.summaryJsonPath,
+        record.structuredLogger.sessionLogger.summaryPath,
+        record.structuredLogger.sessionLogger.htmlReportPath,
+        join(record.structuredLogger.sessionLogger.reportsDir, 'session-summary.json'),
+        join(record.structuredLogger.sessionLogger.reportsDir, 'session-summary.md'),
+        join(record.structuredLogger.sessionLogger.reportsDir, 'session-report.html')
+      ]) {
+        if (existsSync(path)) {
+          rmSync(path, { force: true });
+          deletedPaths.push(path);
+        }
+      }
+    }
+
+    if (options.keepSummaries) {
+      this.writeStructuredReports(record);
+    } else {
+      this.metadataForRecord(record);
+    }
+
+    return {
+      sessionId: options.sessionId,
+      deletedPaths,
+      archivePath,
+      message: [
+        archivePath ? `Archive manifest saved to ${archivePath}.` : undefined,
+        deletedPaths.length > 0
+          ? `Deleted ${deletedPaths.length} raw artifact${deletedPaths.length === 1 ? '' : 's'}.`
+          : 'No artifacts were deleted.'
+      ].filter(Boolean).join(' ')
+    };
+  }
+
+  private async openSessionPath(
+    record: SimulationSessionRecord,
+    path: string,
+    successMessage: string
+  ): Promise<OpenSessionPathResult> {
+    const resolvedPath = resolve(path);
+    const sessionDirectory = resolve(record.structuredLogger.sessionDir);
+
+    if (!resolvedPath.startsWith(sessionDirectory)) {
+      return {
+        sessionId: record.request.runConfig.sessionId,
+        path,
+        opened: false,
+        message: 'Path is not part of this session bundle.'
+      };
+    }
+
+    mkdirSync(resolvedPath, { recursive: true });
+    const openError = await this.openPath(resolvedPath);
+
+    return {
+      sessionId: record.request.runConfig.sessionId,
+      path: resolvedPath,
+      opened: openError.length === 0,
+      message: openError.length === 0 ? successMessage : openError
+    };
+  }
+
+  private writeSessionBundleArchive(record: SimulationSessionRecord): string {
+    const sessionDir = resolve(record.structuredLogger.sessionDir);
+    const exportsDir = record.structuredLogger.sessionLogger.exportsDir;
+    const archivePath = join(exportsDir, `${safeFileStem(record.request.runConfig.sessionId)}-bundle-archive.json`);
+    const files = this.listBundleFiles(sessionDir)
+      .filter((path) => resolve(path) !== resolve(archivePath))
+      .map((path) => {
+        const stats = statSync(path);
+
+        return {
+          path: relative(sessionDir, path),
+          sizeBytes: stats.size,
+          modifiedAt: stats.mtime.toISOString()
+        };
+      });
+
+    mkdirSync(exportsDir, { recursive: true });
+    writeFileSync(
+      archivePath,
+      `${JSON.stringify(
+        {
+          type: 'GameplaySimulator session bundle archive manifest',
+          sessionId: record.request.runConfig.sessionId,
+          createdAt: this.now(),
+          sessionDirectory: sessionDir,
+          fileCount: files.length,
+          files
+        },
+        null,
+        2
+      )}\n`,
+      'utf8'
+    );
+
+    return archivePath;
+  }
+
+  private listBundleFiles(path: string): string[] {
+    if (!existsSync(path)) {
+      return [];
+    }
+
+    return readdirSync(path).flatMap((name) => {
+      const child = join(path, name);
+      const stats = statSync(child);
+      return stats.isDirectory() ? this.listBundleFiles(child) : [child];
+    });
+  }
+
   async getStructuredLogs(sessionId: string): Promise<StructuredLogReadResult> {
     const record = this.requireSession(sessionId);
     this.writeStructuredReports(record);
 
     const logs: StructuredLogItem[] = [];
+    const bundleLogsPath = record.structuredLogger.sessionLogger.fullStructuredLogsPath;
+
+    if (existsSync(bundleLogsPath)) {
+      logs.push(
+        ...(await this.readStructuredLogFile(bundleLogsPath, {
+          source: 'session'
+        }))
+      );
+      logs.sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
+
+      return {
+        sessionId,
+        logs
+      };
+    }
+
     logs.push(
       ...(await this.readStructuredLogFile(record.structuredLogger.sessionLogPath, {
         source: 'session'
@@ -2126,7 +2523,7 @@ export class SimulationService {
     const request = GitHubIssueExportRequestSchema.parse(payload);
     const record = this.requireSession(request.sessionId);
     const preview = this.previewGitHubIssueExport(request);
-    const exportDirectory = join(record.structuredLogger.sessionDir, 'github-issues');
+    const exportDirectory = join(record.structuredLogger.sessionLogger.exportsDir, 'github-issues');
 
     mkdirSync(exportDirectory, { recursive: true });
 
@@ -2888,6 +3285,7 @@ export class SimulationService {
       launchPlans,
       botProfiles,
       adapter: botAdapter,
+      uiFlows: artifacts.gameProfile.uiFlows,
       now: this.now
     });
     const coverageTracker = new CoverageTracker(artifacts.gameProfile);
@@ -2963,6 +3361,10 @@ export class SimulationService {
       loggedRecoverySuccessIds: new Set(),
       loggedRecoveryFailedIds: new Set(),
       loggedEvidenceKeys: new Set(),
+      loggedFlowStartIds: new Set(),
+      loggedFlowStepActionIds: new Set(),
+      loggedFlowCompletionIds: new Set(),
+      loggedFlowAbandonedIds: new Set(),
       lastPeriodicScreenshotActionCountByBot: new Map(),
       videoPathsByBot: new Map(),
       evidenceCaptureService: new EvidenceCaptureService({
@@ -3004,13 +3406,26 @@ export class SimulationService {
 
     return {
       sessionDirectory: sessionDir,
+      metadataJson: record.structuredLogger.sessionLogger.metadataPath,
+      summaryJson: record.structuredLogger.sessionLogger.summaryJsonPath,
       summaryMarkdown: record.structuredLogger.summaryPath,
       htmlReport: record.structuredLogger.sessionLogger.htmlReportPath,
       sessionLog: record.structuredLogger.sessionLogPath,
+      importantEvents: record.structuredLogger.sessionLogger.importantEventsPath,
+      fullStructuredLogs: record.structuredLogger.sessionLogger.fullStructuredLogsPath,
+      issuesJson: record.structuredLogger.sessionLogger.issuesJsonPath,
+      issueTimeline: record.structuredLogger.sessionLogger.issueTimelinePath,
+      screenshotsDirectory: record.structuredLogger.sessionLogger.screenshotsDir,
+      reportsDirectory: record.structuredLogger.sessionLogger.reportsDir,
+      exportsDirectory: record.structuredLogger.sessionLogger.exportsDir,
+      replayDirectory: record.structuredLogger.sessionLogger.replayDir,
+      issueDirectory: join(sessionDir, 'issues'),
       config: record.structuredLogger.sessionLogger.configPath,
       viabilityReport: record.structuredLogger.sessionLogger.viabilityReportPath,
-      githubExportDirectory: existsSync(join(sessionDir, 'github-issues'))
-        ? join(sessionDir, 'github-issues')
+      githubExportDirectory: existsSync(join(record.structuredLogger.sessionLogger.exportsDir, 'github-issues'))
+        ? join(record.structuredLogger.sessionLogger.exportsDir, 'github-issues')
+        : existsSync(join(sessionDir, 'github-issues'))
+          ? join(sessionDir, 'github-issues')
         : undefined
     };
   }
@@ -3067,10 +3482,25 @@ export class SimulationService {
       current.status = 'running';
       current.botStatuses = current.botStatuses.map((bot) => ({
         ...bot,
-        status: bot.status === 'stopped' ? 'stopped' : 'running',
+        status:
+          bot.status === 'stopped'
+            ? 'stopped'
+            : current.startupFlow && bot.botId !== current.startupFlow.botId
+              ? 'queued'
+              : 'running',
         currentArea: bot.status === 'stopped' ? bot.currentArea : 'Start Area',
-        progressState: bot.status === 'stopped' ? bot.progressState : 'Running',
-        message: bot.status === 'stopped' ? bot.message : 'Mock bot is running.'
+        progressState:
+          bot.status === 'stopped'
+            ? bot.progressState
+            : current.startupFlow && bot.botId !== current.startupFlow.botId
+              ? 'Waiting for startup flow'
+              : 'Running',
+        message:
+          bot.status === 'stopped'
+            ? bot.message
+            : current.startupFlow && bot.botId !== current.startupFlow.botId
+              ? `Waiting for startup flow "${current.startupFlow.flowName}".`
+              : 'Mock bot is running.'
       }));
       current.instanceStatuses = current.instanceStatuses.map((instance) => ({
         ...instance,
@@ -3083,6 +3513,7 @@ export class SimulationService {
         this.logInstanceStart(current, instance);
       }
       this.writeStructuredReports(current);
+      this.startStartupFlowTimeout(current);
       current.botManager.startAll();
     }, 300);
 
@@ -3304,6 +3735,235 @@ export class SimulationService {
       clearTimeout(record.startupTimer);
       record.startupTimer = undefined;
     }
+
+    if (record?.startupFlowTimeoutTimer) {
+      clearTimeout(record.startupFlowTimeoutTimer);
+      record.startupFlowTimeoutTimer = undefined;
+    }
+  }
+
+  private startStartupFlowTimeout(record: SimulationSessionRecord): void {
+    const startupFlow = record.startupFlow;
+
+    if (!startupFlow || startupFlowTimeoutIsTerminal(startupFlow.status) || record.startupFlowTimeoutTimer) {
+      return;
+    }
+
+    const timestamp = this.now();
+    startupFlow.status = 'running';
+    startupFlow.startedAt = startupFlow.startedAt ?? timestamp;
+    startupFlow.message = `Startup flow "${startupFlow.flowName}" is preparing the game before normal bots run.`;
+    startupFlow.timeline.push({
+      eventType: 'startup_flow_started',
+      timestamp,
+      flowId: startupFlow.flowId,
+      flowName: startupFlow.flowName,
+      timeoutMs: startupFlow.timeoutMs
+    });
+
+    const timer = setTimeout(() => {
+      void this.handleStartupFlowTimeout(record.request.runConfig.sessionId);
+    }, startupFlow.timeoutMs);
+    timer.unref?.();
+    record.startupFlowTimeoutTimer = timer;
+  }
+
+  private async handleStartupFlowTimeout(sessionId: string): Promise<void> {
+    const record = this.sessions.get(sessionId);
+    const startupFlow = record?.startupFlow;
+
+    if (!record || !startupFlow || startupFlowTimeoutIsTerminal(startupFlow.status)) {
+      return;
+    }
+
+    await this.handleStartupFlowFailure(
+      record,
+      'timed_out',
+      `Startup flow "${startupFlow.flowName}" did not finish within ${Math.round(startupFlow.timeoutMs / 1000)} seconds.`
+    );
+  }
+
+  private async handleStartupFlowStatus(
+    record: SimulationSessionRecord,
+    status: RuntimeBotSnapshot,
+    memory: BotMemory
+  ): Promise<boolean> {
+    const startupFlow = record.startupFlow;
+
+    if (!startupFlow || status.botId !== startupFlow.botId) {
+      return false;
+    }
+
+    if (['starting', 'running', 'waiting'].includes(status.status)) {
+      startupFlow.status = 'running';
+      startupFlow.startedAt = startupFlow.startedAt ?? this.now();
+      startupFlow.message = status.message ?? `Startup flow "${startupFlow.flowName}" is running.`;
+      return false;
+    }
+
+    if (status.status === 'completed') {
+      startupFlow.status = 'succeeded';
+      startupFlow.completedAt = startupFlow.completedAt ?? this.now();
+      startupFlow.message = `Startup flow "${startupFlow.flowName}" completed. Normal bots may start.`;
+      startupFlow.timeline.push({
+        eventType: 'startup_flow_succeeded',
+        timestamp: startupFlow.completedAt,
+        flowId: startupFlow.flowId,
+        flowName: startupFlow.flowName,
+        lastActionId: status.lastActionId
+      });
+
+      if (record.startupFlowTimeoutTimer) {
+        clearTimeout(record.startupFlowTimeoutTimer);
+        record.startupFlowTimeoutTimer = undefined;
+      }
+
+      return false;
+    }
+
+    if (['blocked', 'failed', 'stopped'].includes(status.status)) {
+      await this.handleStartupFlowFailure(
+        record,
+        'failed',
+        status.message ?? memory.progressState ?? `Startup flow "${startupFlow.flowName}" failed before gameplay started.`,
+        status,
+        memory
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  private async handleStartupFlowFailure(
+    record: SimulationSessionRecord,
+    failureStatus: Extract<StartupFlowRuntimeStatus, 'failed' | 'timed_out'>,
+    message: string,
+    status?: RuntimeBotSnapshot,
+    memory?: BotMemory
+  ): Promise<void> {
+    const startupFlow = record.startupFlow;
+
+    if (!startupFlow || startupFlow.failureHandled) {
+      return;
+    }
+
+    const timestamp = this.now();
+    startupFlow.failureHandled = true;
+    startupFlow.status = failureStatus;
+    startupFlow.completedAt = timestamp;
+    startupFlow.message = message;
+    startupFlow.timeline.push({
+      eventType: failureStatus === 'timed_out' ? 'startup_flow_timed_out' : 'startup_flow_failed',
+      timestamp,
+      flowId: startupFlow.flowId,
+      flowName: startupFlow.flowName,
+      message,
+      lastActionId: status?.lastActionId,
+      progressState: memory?.progressState
+    });
+
+    if (record.startupFlowTimeoutTimer) {
+      clearTimeout(record.startupFlowTimeoutTimer);
+      record.startupFlowTimeoutTimer = undefined;
+    }
+
+    const issue = await this.createStartupFlowIssue(record, failureStatus, message, status, memory);
+    startupFlow.issueId = issue.issueId;
+    startupFlow.screenshotPath = issue.screenshotPath;
+
+    if (startupFlow.continueOnFailure) {
+      startupFlow.status = 'continued';
+      startupFlow.message = `${message} Continuing because Continue if startup flow fails is enabled.`;
+      startupFlow.timeline.push({
+        eventType: 'startup_flow_continued',
+        timestamp: this.now(),
+        flowId: startupFlow.flowId,
+        flowName: startupFlow.flowName,
+        issueId: issue.issueId
+      });
+      record.logs.push(this.createLog(record.request.runConfig.sessionId, 'warn', startupFlow.message));
+      record.botManager.stopBot(startupFlow.botId);
+      record.label = statusLabel(record);
+      return;
+    }
+
+    record.logs.push(this.createLog(record.request.runConfig.sessionId, 'error', `Startup flow failed: ${message}`));
+    this.clearSessionTimer(record.request.runConfig.sessionId);
+    record.botManager.stopAll();
+    record.status = 'failed';
+    record.stoppedAt = timestamp;
+    record.botStatuses = record.botStatuses.map((bot) => ({
+      ...bot,
+      status: bot.botId === startupFlow.botId ? 'failed' : 'stopped',
+      progressState: bot.botId === startupFlow.botId ? 'Startup flow failed' : 'Stopped because startup flow failed',
+      message: bot.botId === startupFlow.botId ? message : `Startup flow "${startupFlow.flowName}" failed before normal bots started.`
+    }));
+    await this.stopGameInstances(record, 'startup_flow_failed');
+    record.label = statusLabel(record);
+    this.logSessionStop(record, 'startup_flow_failed');
+    this.stopVideoEvidence(record);
+    this.writeStructuredReports(record);
+  }
+
+  private async createStartupFlowIssue(
+    record: SimulationSessionRecord,
+    failureStatus: Extract<StartupFlowRuntimeStatus, 'failed' | 'timed_out'>,
+    message: string,
+    status?: RuntimeBotSnapshot,
+    memory?: BotMemory
+  ): Promise<DetectedIssue> {
+    const startupFlow = record.startupFlow!;
+    const timestamp = this.now();
+    const issueId = `${record.request.runConfig.sessionId}-${startupFlow.flowId}-${failureStatus}`;
+    const issue: DetectedIssue = {
+      id: issueId,
+      issueId,
+      timestamp,
+      sessionId: record.request.runConfig.sessionId,
+      instanceId: status?.gameInstanceId,
+      gameInstanceId: status?.gameInstanceId,
+      botId: startupFlow.botId,
+      severity: startupFlow.continueOnFailure ? 'error' : 'critical',
+      category: 'ui',
+      title: failureStatus === 'timed_out' ? 'Startup flow timed out' : 'Startup flow failed',
+      description: message,
+      scene: memory?.lastState?.scene ?? 'Startup flow',
+      area: memory?.currentArea ?? 'Startup flow',
+      lastActions: memory?.recentActionTypes.slice(-10) ?? [],
+      stateSummary: memory?.lastState
+        ? JSON.stringify({
+            scene: memory.lastState.scene,
+            state: memory.lastState.state,
+            screenshotPath: memory.lastState.screenshotPath
+          }).slice(0, 2000)
+        : `Startup flow "${startupFlow.flowName}" could not reach gameplay.`,
+      expectedBehavior: 'The configured startup flow should move through menus and leave the game ready for normal bots.',
+      actualBehavior: message,
+      confidence: failureStatus === 'timed_out' ? 0.85 : 0.9,
+      screenshotPath: memory?.lastState?.screenshotPath,
+      rawEvidence: {
+        detectorName: 'StartupFlowRunner',
+        detectorRule: 'The pre-run startup flow did not complete before normal bots were allowed to start.',
+        startupFlow: {
+          flowId: startupFlow.flowId,
+          flowName: startupFlow.flowName,
+          status: failureStatus,
+          timeoutMs: startupFlow.timeoutMs,
+          continueOnFailure: startupFlow.continueOnFailure,
+          timeline: startupFlow.timeline
+        },
+        botStatus: status,
+        progressSummary: memory?.progressSummary
+      },
+      evidencePaths: [],
+      actionTimelineIds: memory?.lastAction ? [memory.lastAction.actionId] : [],
+      firstSeenAt: timestamp,
+      reproducible: true
+    };
+
+    await this.recordDetectedIssue(record, issue);
+    return record.issues.find((item) => item.issueId === issue.issueId) ?? issue;
   }
 
   private async shutdownSessionRecord(
@@ -3602,6 +4262,15 @@ export class SimulationService {
     raw: Record<string, unknown>,
     source: Pick<StructuredLogItem, 'source' | 'botId' | 'instanceId'>
   ): StructuredLogItem {
+    const bundledSource = typeof raw.bundleSource === 'string' ? raw.bundleSource : undefined;
+    const effectiveSource: StructuredLogItem['source'] =
+      bundledSource === 'session' ||
+      bundledSource === 'bot-actions' ||
+      bundledSource === 'bot-states' ||
+      bundledSource === 'bot-issues' ||
+      bundledSource === 'instance'
+        ? bundledSource
+        : source.source;
     const eventType = typeof raw.eventType === 'string' ? raw.eventType : undefined;
     const timestamp = typeof raw.timestamp === 'string' ? raw.timestamp : undefined;
     const botId =
@@ -3617,6 +4286,10 @@ export class SimulationService {
       this.valueAtPath(raw, ['snapshot', 'gameInstanceId']) ??
       this.valueAtPath(raw, ['issue', 'gameInstanceId']);
     const actionType = this.valueAtPath(raw, ['action', 'type']);
+    const actionExplanation =
+      this.valueAtPath(raw, ['payload', 'explanation']) ??
+      this.valueAtPath(raw, ['action', 'payload', 'explanation']);
+    const issuePayloadSummary = this.valueAtPath(raw, ['payload', 'summary']);
     const issueTitle = this.valueAtPath(raw, ['issue', 'title']);
     const scene = this.valueAtPath(raw, ['snapshot', 'scene']);
     const payloadSummary =
@@ -3626,12 +4299,15 @@ export class SimulationService {
 
     return {
       ...source,
+      source: effectiveSource,
       botId,
       instanceId,
       eventType,
       timestamp,
       summary:
+        issuePayloadSummary ??
         issueTitle ??
+        actionExplanation ??
         actionType ??
         scene ??
         payloadSummary ??
@@ -3957,14 +4633,20 @@ export class SimulationService {
 
     if (memory.lastAction && !record.loggedActionIds.has(memory.lastAction.actionId)) {
       record.loggedActionIds.add(memory.lastAction.actionId);
+      const actionInsight = actionInsightFromAction(memory.lastAction);
       const event = record.structuredLogger.logSession(
         'action_performed',
         {
           actionId: memory.lastAction.actionId,
           actionType: memory.lastAction.type,
           status: memory.lastResult?.status,
+          resultMessage: memory.lastResult?.message,
           durationMs: memory.lastResult?.durationMs,
-          recovery: memory.lastAction.payload.recovery === true
+          recovery: memory.lastAction.payload.recovery === true,
+          actionQuality: actionInsight?.quality,
+          explanation: actionInsight?.explanation,
+          nextLikelyAction: actionInsight?.nextLikelyAction,
+          plannerMetadata: plannerMetadataForLog(memory.lastAction)
         },
         {
           botId: status.botId,
@@ -3995,6 +4677,8 @@ export class SimulationService {
         });
       }
     }
+
+    this.logUIFlowArtifacts(record, status, memory);
 
     if (memory.stuckReason && ['waiting', 'blocked'].includes(status.status)) {
       await this.captureScreenshotEvidence(record, {
@@ -4074,35 +4758,260 @@ export class SimulationService {
     }
   }
 
-  private logDetectedIssue(record: SimulationSessionRecord, issue: DetectedIssue): void {
-    if (record.loggedIssueIds.has(issue.issueId)) {
+  private logUIFlowArtifacts(
+    record: SimulationSessionRecord,
+    status: RuntimeBotSnapshot,
+    memory: BotMemory
+  ): void {
+    const action = memory.lastAction;
+    const payload = recordPayload(action?.payload);
+
+    if (!action || payload?.planner !== 'ui-journey') {
       return;
     }
 
-    record.loggedIssueIds.add(issue.issueId);
-    const event = record.structuredLogger.logSession(
-      'issue_detected',
-      {
-        issueId: issue.issueId,
-        severity: issue.severity,
-        category: issue.category,
-        title: issue.title
-      },
-      {
-        botId: issue.botId,
-        gameInstanceId: issue.gameInstanceId,
-        timestamp: issue.firstSeenAt
+    const flowId = stringPayloadValue(payload, 'flowId') ?? 'unknown-flow';
+    const flowName = stringPayloadValue(payload, 'flowName') ?? flowId;
+    const flowKey = `${status.botId}:${flowId}`;
+    const flowStepCount = numberPayloadValue(payload, 'flowStepCount');
+    const stepIndex = numberPayloadValue(payload, 'stepIndex');
+    const stepId = stringPayloadValue(payload, 'stepId') ?? `step-${(stepIndex ?? 0) + 1}`;
+    const stepKey = `${flowKey}:${action.actionId}`;
+    const result = memory.lastResult;
+    const resultTimestamp = result?.completedAt ?? action.requestedAt;
+    const commonPayload = {
+      flowId,
+      flowName,
+      botId: status.botId,
+      profileId: status.profileId,
+      actionId: action.actionId,
+      actionType: action.type,
+      stepId,
+      stepIndex,
+      flowStepCount,
+      expectedScreen: stringPayloadValue(payload, 'expectedScreen'),
+      currentScreen: stringPayloadValue(payload, 'currentScreen'),
+      targetLabel: stringPayloadValue(payload, 'targetLabel'),
+      keyBinding: stringPayloadValue(payload, 'keyBinding'),
+      successCondition: stringPayloadValue(payload, 'successCondition'),
+      fallbackAction: stringPayloadValue(payload, 'fallbackAction'),
+      reason: stringPayloadValue(payload, 'reason')
+    };
+    const appendStartupTimeline = (eventType: string, eventPayload: Record<string, unknown>, timestamp: string | undefined) => {
+      if (record.startupFlow?.botId !== status.botId || record.startupFlow.flowId !== flowId) {
+        return;
       }
-    );
-    record.structuredLogger.logIssue(event, issue, record.loggedIssueIds.size, {
+
+      record.startupFlow.timeline.push({
+        eventType,
+        timestamp,
+        ...eventPayload
+      });
+    };
+
+    if (!record.loggedFlowStartIds.has(flowKey)) {
+      record.loggedFlowStartIds.add(flowKey);
+      appendStartupTimeline(
+        'flow_started',
+        {
+          flowId,
+          flowName,
+          startState: stringPayloadValue(payload, 'flowStartState'),
+          endState: stringPayloadValue(payload, 'flowEndState'),
+          flowStepCount
+        },
+        action.requestedAt
+      );
+      record.structuredLogger.logSession(
+        'flow_started',
+        {
+          flowId,
+          flowName,
+          botId: status.botId,
+          profileId: status.profileId,
+          startState: stringPayloadValue(payload, 'flowStartState'),
+          endState: stringPayloadValue(payload, 'flowEndState'),
+          flowStepCount
+        },
+        {
+          botId: status.botId,
+          gameInstanceId: status.gameInstanceId,
+          timestamp: action.requestedAt
+        }
+      );
+    }
+
+    if (!record.loggedFlowStepActionIds.has(stepKey)) {
+      record.loggedFlowStepActionIds.add(stepKey);
+      appendStartupTimeline('flow_step_started', commonPayload, action.requestedAt);
+      record.structuredLogger.logSession('flow_step_started', commonPayload, {
+        botId: status.botId,
+        gameInstanceId: status.gameInstanceId,
+        timestamp: action.requestedAt
+      });
+
+      if (result) {
+        appendStartupTimeline(
+          result.status === 'succeeded' ? 'flow_step_succeeded' : 'flow_step_failed',
+          {
+            ...commonPayload,
+            resultStatus: result.status,
+            resultMessage: result.message,
+            durationMs: result.durationMs
+          },
+          resultTimestamp
+        );
+        record.structuredLogger.logSession(
+          result.status === 'succeeded' ? 'flow_step_succeeded' : 'flow_step_failed',
+          {
+            ...commonPayload,
+            resultStatus: result.status,
+            resultMessage: result.message,
+            durationMs: result.durationMs
+          },
+          {
+            botId: status.botId,
+            gameInstanceId: status.gameInstanceId,
+            timestamp: resultTimestamp
+          }
+        );
+      }
+    }
+
+    if (
+      result?.status === 'succeeded' &&
+      stepIndex !== undefined &&
+      flowStepCount !== undefined &&
+      stepIndex + 1 >= flowStepCount &&
+      !record.loggedFlowCompletionIds.has(flowKey)
+    ) {
+      record.loggedFlowCompletionIds.add(flowKey);
+      appendStartupTimeline(
+        'flow_completed',
+        {
+          flowId,
+          flowName,
+          completedStepId: stepId,
+          completedActionId: action.actionId,
+          flowStepCount
+        },
+        resultTimestamp
+      );
+      record.structuredLogger.logSession(
+        'flow_completed',
+        {
+          flowId,
+          flowName,
+          botId: status.botId,
+          profileId: status.profileId,
+          completedStepId: stepId,
+          completedActionId: action.actionId,
+          flowStepCount
+        },
+        {
+          botId: status.botId,
+          gameInstanceId: status.gameInstanceId,
+          timestamp: resultTimestamp
+        }
+      );
+    }
+
+    if (
+      ['blocked', 'failed', 'stopped'].includes(status.status) &&
+      !record.loggedFlowCompletionIds.has(flowKey) &&
+      !record.loggedFlowAbandonedIds.has(flowKey)
+    ) {
+      record.loggedFlowAbandonedIds.add(flowKey);
+      appendStartupTimeline(
+        'flow_abandoned',
+        {
+          flowId,
+          flowName,
+          lastStepId: stepId,
+          lastActionId: action.actionId,
+          botStatus: status.status,
+          reason: status.message ?? memory.progressState
+        },
+        resultTimestamp
+      );
+      record.structuredLogger.logSession(
+        'flow_abandoned',
+        {
+          flowId,
+          flowName,
+          botId: status.botId,
+          profileId: status.profileId,
+          lastStepId: stepId,
+          lastActionId: action.actionId,
+          botStatus: status.status,
+          reason: status.message ?? memory.progressState
+        },
+        {
+          botId: status.botId,
+          gameInstanceId: status.gameInstanceId,
+          timestamp: resultTimestamp
+        }
+      );
+    }
+  }
+
+  private issueRepeatKey(issue: DetectedIssue): string {
+    return [
+      issue.category,
+      issue.severity,
+      issue.title,
+      issue.scene ?? issue.area ?? 'unknown-area',
+      issue.botId ?? 'session'
+    ].join('|').toLowerCase();
+  }
+
+  private issueEventContextForRecord(
+    record: SimulationSessionRecord,
+    issue: DetectedIssue,
+    isRepeated: boolean
+  ): IssueEventLoggerContext {
+    const botStatus = issue.botId
+      ? record.botStatuses.find((bot) => bot.botId === issue.botId)
+      : undefined;
+    const memory = issue.botId ? record.botManager.getMemory(issue.botId) : undefined;
+    const botProfile = botStatus
+      ? record.request.botProfiles.find((profile) => profile.profileId === botStatus.profileId)
+      : undefined;
+
+    return {
       gameName: record.request.gameProfile.gameName,
       gameEngine: record.request.gameProfile.engine.version
         ? `${record.request.gameProfile.engine.type} ${record.request.gameProfile.engine.version}`
         : record.request.gameProfile.engine.type,
       gameVersion: record.request.gameProfile.version,
       gameBuild: record.request.gameProfile.buildId,
-      adapterType: record.request.runConfig.adapterType
-    });
+      adapterType: record.request.runConfig.adapterType,
+      botProfile,
+      lastAction: memory?.lastAction ?? null,
+      previousState: memory?.previousState ?? null,
+      currentState: memory?.lastState ?? null,
+      recoveryAttempts: memory?.recoveryAttempts ?? [],
+      isRepeated
+    };
+  }
+
+  private logDetectedIssue(record: SimulationSessionRecord, issue: DetectedIssue, isRepeated: boolean): void {
+    if (record.loggedIssueIds.has(issue.issueId)) {
+      return;
+    }
+
+    record.loggedIssueIds.add(issue.issueId);
+    const issueContext = this.issueEventContextForRecord(record, issue, isRepeated);
+    const event = record.structuredLogger.logSession(
+      'issue_detected',
+      record.structuredLogger.issueEventLogger.buildPayload(issue, issueContext),
+      {
+        botId: issue.botId,
+        gameInstanceId: issue.gameInstanceId,
+        timestamp: issue.firstSeenAt
+      }
+    );
+    record.structuredLogger.logIssue(event, issue, record.loggedIssueIds.size, issueContext);
 
     if (issue.category === 'crash') {
       record.structuredLogger.logSession('crash', { issueId: issue.issueId, title: issue.title }, {
@@ -4142,11 +5051,25 @@ export class SimulationService {
       testedContent: coverage.testedContent,
       untestedContent: coverage.untestedContent,
       contentWithIssues: coverage.contentWithIssues,
-      contentByBotType: coverage.contentByBotType,
-      createdAt: record.createdAt,
-      startedAt: record.startedAt,
-      stoppedAt: record.stoppedAt
-    });
+	      contentByBotType: coverage.contentByBotType,
+	      createdAt: record.createdAt,
+	      startedAt: record.startedAt,
+	      stoppedAt: record.stoppedAt,
+	      startupFlow: record.startupFlow
+	        ? {
+	            flowId: record.startupFlow.flowId,
+	            flowName: record.startupFlow.flowName,
+	            status: record.startupFlow.status,
+	            message: record.startupFlow.message,
+	            startedAt: record.startupFlow.startedAt,
+	            completedAt: record.startupFlow.completedAt,
+	            timeoutMs: record.startupFlow.timeoutMs,
+	            issueId: record.startupFlow.issueId,
+	            screenshotPath: record.startupFlow.screenshotPath,
+	            timeline: record.startupFlow.timeline
+	          }
+	        : undefined
+	    });
     record.structuredLogger.writeBotReports(bots);
     this.metadataForRecord(record);
   }
@@ -4272,7 +5195,13 @@ export class SimulationService {
       status: status.status,
       gameInstanceId: status.gameInstanceId,
       currentGoalId: status.currentGoalId,
+      currentGoal: status.currentGoal,
       lastActionId: status.lastActionId,
+      currentAction: status.currentAction,
+      actionReason: status.actionReason,
+      actionQuality: status.actionQuality,
+      lastResult: status.lastResult,
+      nextLikelyAction: status.nextLikelyAction,
       currentArea: memory.currentArea ?? current.currentArea,
       progressState: memory.progressState ?? status.message ?? current.progressState,
       issueCount,
@@ -4298,14 +5227,20 @@ export class SimulationService {
     }
     record.label = statusLabel(record);
 
-    if (['blocked', 'failed'].includes(status.status)) {
+    const startupFlowHandled = await this.handleStartupFlowStatus(record, status, memory);
+
+    if (!startupFlowHandled && ['blocked', 'failed'].includes(status.status)) {
       await this.createSyntheticIssue(record, status, memory);
     }
 
-    await this.detectAutomaticIssues(record, status, memory);
+    if (!startupFlowHandled) {
+      await this.detectAutomaticIssues(record, status, memory);
+    }
     await this.logRuntimeArtifacts(record, status, memory);
     this.writeStructuredReports(record);
-    this.completeSessionIfNoActiveBots(record);
+    if (record.status !== 'failed') {
+      this.completeSessionIfNoActiveBots(record);
+    }
   }
 
   private async detectAutomaticIssues(
@@ -4341,6 +5276,26 @@ export class SimulationService {
     }
 
     const memory = issue.botId ? record.botManager.getMemory(issue.botId) : undefined;
+    const isRepeated = record.issues.some((existing) => this.issueRepeatKey(existing) === this.issueRepeatKey(issue));
+
+    if (memory) {
+      if (issue.lastActions.length === 0 && memory.recentActionTypes.length > 0) {
+        issue.lastActions = memory.recentActionTypes.slice(-10);
+      }
+
+      if (memory.lastAction && !issue.actionTimelineIds.includes(memory.lastAction.actionId)) {
+        issue.actionTimelineIds = [...issue.actionTimelineIds, memory.lastAction.actionId];
+      }
+
+      if (!issue.stateSummary && memory.lastState) {
+        issue.stateSummary = JSON.stringify({
+          snapshotId: memory.lastState.snapshotId,
+          scene: memory.lastState.scene,
+          state: memory.lastState.state
+        }).slice(0, 2000);
+      }
+    }
+
     const screenshotEvidence = await this.captureScreenshotEvidence(record, {
       botId: issue.botId,
       instanceId: issue.gameInstanceId,
@@ -4363,7 +5318,7 @@ export class SimulationService {
 
     record.issues.push(issue);
     record.coverageTracker.recordIssue(issue);
-    this.logDetectedIssue(record, issue);
+    this.logDetectedIssue(record, issue, isRepeated);
     return true;
   }
 

@@ -38,6 +38,7 @@ function requestedCount(pool: BotPoolConfig): number {
 export function LiveSessionPage() {
   const navigate = useConfigStore((state) => state.navigate);
   const gameProfiles = useConfigStore((state) => state.gameProfiles);
+  const botProfiles = useConfigStore((state) => state.botProfiles);
   const runConfigs = useConfigStore((state) => state.runConfigs);
   const lastValidatedRunConfig = useConfigStore((state) => state.lastValidatedRunConfig);
   const status = useSessionStore((state) => state.status);
@@ -90,6 +91,12 @@ export function LiveSessionPage() {
     });
   }, [activeConfig, botStatuses, issueCountByBot]);
   const selectedBot = botStatuses.find((bot) => bot.botId === selectedBotId) ?? botStatuses[0] ?? null;
+  const selectedBotProfile = botProfiles.find((profile) => profile.profileId === selectedBot?.profileId);
+  const selectedBotGoal =
+    selectedBot?.currentGoal ??
+    selectedBotProfile?.goals.find((goal) => goal.goalId === selectedBot?.currentGoalId)?.name ??
+    selectedBotProfile?.goals[0]?.name ??
+    'No active goal';
   const selectedPool = selectedPoolId ?? selectedBot?.profileId ?? botPools[0]?.profileId ?? null;
   const canStart = activeSessionId !== null && !['starting', 'running', 'paused'].includes(status);
   const canPause = activeSessionId !== null && status === 'running';
@@ -433,6 +440,50 @@ export function LiveSessionPage() {
           <p className="eyebrow">Individual Bots</p>
           <h2>Bot status</h2>
         </div>
+        <div className="bot-decision-grid" aria-label="Selected bot action explanation">
+            <div>
+              <FieldLabel
+                label="Current Bot Goal"
+                helpText="This is what the selected bot is trying to achieve. The simulator uses the bot profile to choose this goal. For example, a UI Tester may try to exercise menus. If the goal looks wrong, check the bot profile chosen for the session. Beginners should confirm the goal matches the kind of test they want."
+              />
+              <strong>{selectedBotGoal}</strong>
+            </div>
+            <div>
+              <FieldLabel
+                label="Current Action"
+                helpText="This is the action the selected bot most recently chose and is working on. The simulator sends it to the game adapter. For example, open-menu or move-forward. If it does nothing, check the action result and control mapping. Beginners should watch this value change during a run."
+              />
+              <strong>{selectedBot?.currentAction ?? selectedBot?.lastActionId ?? 'Waiting for first action'}</strong>
+            </div>
+            <div>
+              <FieldLabel
+                label="Action Reason"
+                helpText="This explains why the bot chose the current action. The simulator turns planner rules, coverage, and randomness into a short sentence. For example, an Explorer may choose move-forward because it is unvisited. If the reason seems wrong, inspect the bot profile and available actions. Beginners can use this to understand bot behavior."
+              />
+              <strong>{selectedBot?.actionReason ?? 'The bot has not explained an action yet.'}</strong>
+            </div>
+            <div>
+              <FieldLabel
+                label="Action Quality"
+                helpText="This labels the kind of decision the bot made. Planned follows profile rules, exploratory tries something new, recovery escapes a stuck state, repeated tries an action again, risky tests an edge case, random is chaos behavior, and startup-flow follows configured menus. If the label is unexpected, read the action reason. Beginners do not need to change anything here."
+              />
+              <strong className="action-quality-pill">{selectedBot?.actionQuality ?? 'not-known'}</strong>
+            </div>
+            <div>
+              <FieldLabel
+                label="Last Result"
+                helpText="This shows what happened after the selected bot's last action. It includes success, failure, skip, timeout, and any short message from the game adapter. For example, succeeded: menu opened. If it failed, check controls, adapter health, and logs. Beginners should investigate repeated failures before adding more bots."
+              />
+              <strong>{selectedBot?.lastResult ?? 'No result yet'}</strong>
+            </div>
+            <div>
+              <FieldLabel
+                label="Next Likely Action"
+                helpText="This is the action the planner currently thinks may be a good next choice. It is only a helpful guess because game state can change after every action. For example, close-menu may follow open-menu. If it is blank, the planner does not know yet. Beginners can use it to spot surprising plans early."
+              />
+              <strong>{selectedBot?.nextLikelyAction ?? 'Not known yet'}</strong>
+            </div>
+        </div>
         <div className="allocation-table">
           <div className="bot-status-row bot-status-row--head">
             <span>
@@ -478,7 +529,10 @@ export function LiveSessionPage() {
                 </span>
                 <span>{bot.status}</span>
                 <span>{bot.currentArea}</span>
-                <span>{bot.lastActionId ?? 'None'}</span>
+                <span>
+                  {bot.currentAction ?? bot.lastActionId ?? 'None'}
+                  {bot.actionQuality ? <small>{bot.actionQuality}</small> : null}
+                </span>
                 <span>{issueCountByBot.get(bot.botId) ?? bot.issueCount}</span>
                 <span>{bot.progressState}</span>
               </button>

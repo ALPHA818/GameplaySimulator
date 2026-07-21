@@ -47,11 +47,27 @@ export const PlayerPositionSchema = z.object({
   rotation: z.number().optional()
 });
 
+export const VisibleUIControlSchema = z.object({
+  label: z.string().min(1),
+  selector: z.string().min(1).optional(),
+  role: z.string().min(1).optional(),
+  disabled: z.boolean().default(false),
+  x: z.number().optional(),
+  y: z.number().optional()
+});
+
 export const UIStateSchema = z.object({
   screenId: z.string().min(1).optional(),
+  currentScreen: z.string().min(1).optional(),
   focusedElementId: z.string().min(1).optional(),
+  focusedElement: z.string().min(1).optional(),
   openMenus: z.array(z.string().min(1)).default([]),
+  visibleButtons: z.array(VisibleUIControlSchema).default([]),
   modalStack: z.array(z.string().min(1)).default([]),
+  canStartGame: z.boolean().default(false),
+  isInGameplay: z.boolean().default(false),
+  isPaused: z.boolean().default(false),
+  isLoading: z.boolean().default(false),
   metadata: z.record(z.string(), z.unknown()).default({})
 });
 

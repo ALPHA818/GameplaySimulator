@@ -28,10 +28,12 @@ interface SessionState {
   logs: LogEntry[];
   coverage: ContentCoverageSummary | null;
   reviewSessionId: string | null;
+  reviewIssueId: string | null;
   reviewedIssueIds: string[];
   falsePositiveIssueIds: string[];
   setSessionPreview: (label: string) => void;
   setReviewSessionId: (sessionId: string | null) => void;
+  setReviewIssueId: (issueId: string | null) => void;
   applySessionSnapshot: (snapshot: SimulationSessionStatusSnapshot) => void;
   applyRuntimeDetails: (details: {
     botStatuses?: SimulationBotStatus[];
@@ -55,10 +57,12 @@ export const useSessionStore = create<SessionState>((set) => ({
   logs: [],
   coverage: null,
   reviewSessionId: null,
+  reviewIssueId: null,
   reviewedIssueIds: [],
   falsePositiveIssueIds: [],
   setSessionPreview: (statusLabel) => set({ statusLabel }),
   setReviewSessionId: (reviewSessionId) => set({ reviewSessionId }),
+  setReviewIssueId: (reviewIssueId) => set({ reviewIssueId }),
   applySessionSnapshot: (snapshot) =>
     set({
       status: snapshot.status,

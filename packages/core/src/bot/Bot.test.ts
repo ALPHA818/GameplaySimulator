@@ -202,7 +202,13 @@ describe('Bot', () => {
     expect(bot.memory.currentArea).toBe('scene-2');
     expect(bot.status).toBe('completed');
     expect(statuses.at(-1)?.status).toBe('completed');
+    expect(statuses.at(-1)?.currentGoal).toBe('Coverage');
+    expect(statuses.at(-1)?.currentAction).toBe('move-forward');
+    expect(statuses.at(-1)?.actionReason).toContain('Explorer Bot chose move-forward');
+    expect(statuses.at(-1)?.actionQuality).toBe('repeated');
+    expect(statuses.at(-1)?.lastResult).toBe('succeeded: ok');
     expect(logs.some((log) => log.message.includes('State read'))).toBe(true);
+    expect(logs.some((log) => log.message.includes('Explorer Bot chose move-forward'))).toBe(true);
     expect(logs.some((log) => log.message.includes('Action move-forward succeeded'))).toBe(true);
   });
 

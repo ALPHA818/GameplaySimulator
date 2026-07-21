@@ -1,4 +1,17 @@
-import { useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type InputHTMLAttributes,
+  type ReactNode,
+  type SelectHTMLAttributes,
+  type TextareaHTMLAttributes
+} from 'react';
+import { createPortal } from 'react-dom';
 
 type FieldHelpText = string;
 
@@ -33,9 +46,47 @@ type ToggleProps = InputHTMLAttributes<HTMLInputElement> & {
   helpText?: FieldHelpText;
 };
 
+type TooltipPlacement = 'bottom' | 'top' | 'right' | 'left';
+
+type TooltipRect = Pick<DOMRect, 'bottom' | 'height' | 'left' | 'right' | 'top' | 'width'>;
+
+type TooltipSize = {
+  width: number;
+  height: number;
+};
+
+type TooltipViewport = {
+  width: number;
+  height: number;
+  scrollX: number;
+  scrollY: number;
+};
+
+export type TooltipPosition = {
+  left: number;
+  top: number;
+  maxWidth: number;
+  maxHeight: number;
+  placement: TooltipPlacement;
+};
+
+const TOOLTIP_GAP = 8;
+const TOOLTIP_MARGIN = 12;
+const TOOLTIP_DEFAULT_WIDTH = 320;
+const TOOLTIP_DEFAULT_HEIGHT = 140;
+const TOOLTIP_MAX_WIDTH = 360;
+const TOOLTIP_MAX_HEIGHT_RATIO = 0.45;
+const TOOLTIP_LAYER_Z_INDEX = 2_147_483_000;
+
 const fieldHelpText: Record<string, string> = {
   'Action Delay Ms':
     'This is the wait time between bot actions, measured in milliseconds. The simulator uses it so bots do not press controls too fast. For example, 250 means a quarter of a second. If this is too low, a game may miss inputs or act strangely. Beginners should use 250.',
+  'Action Decision':
+    'This explains why a bot chose one action. The simulator uses profile rules, game state, coverage, and seeded randomness to make the explanation. For example, an Explorer may move forward because the action is unvisited. If the explanation looks wrong, check the bot profile and available actions. Beginners should read this before the raw JSON.',
+  'Action Quality':
+    'This labels the kind of choice the bot made. Planned follows normal rules, exploratory tries something new, recovery escapes a stuck state, repeated retries an action, risky tests an edge case, random is chaos behavior, and startup-flow follows menu setup. If the label surprises you, read the action reason. Beginners do not need to change it.',
+  'Action Reason':
+    'This is the plain-language reason a bot chose its current action. The simulator creates it from planner rules and game context. For example, a UI Tester may open a menu because it matches UI rules. If it seems wrong, check the selected bot profile. Beginners can use it to understand what the bot is doing.',
   'Action Timeline':
     'This saves the list of actions each bot tried. The simulator uses it to show what happened before an issue. For example, move, jump, then interact. If this is off, reports have fewer steps. Beginners should leave it on.',
   'Action Endpoint':
@@ -66,12 +117,20 @@ const fieldHelpText: Record<string, string> = {
     'This filters issues by the kind of problem. It is used to focus on one problem type. For example, choose crash or quest. If you pick the wrong category, some issues will be hidden. Beginners can leave this on All categories.',
   'CPU Percent':
     'This is the highest CPU use you want the simulator to aim for. CPU is your computer brain doing work. For example, 80 means leave some room for the system. If this is too high, the computer may slow down. Beginners should use 80.',
+  'Current Action':
+    'This is the action the bot most recently chose and is working on. The simulator sends it through the selected game adapter. For example, open-menu or move-forward. If it does nothing, check the last result and control mapping. Beginners should watch this change during a run.',
+  'Current Bot Goal':
+    'This is what the selected bot is trying to achieve. The simulator gets it from the bot profile. For example, a UI Tester may try to exercise menus. If it does not match your test, choose a different bot profile. Beginners should confirm the goal before a long run.',
   'Desired':
     'This is the bot count you want most. The simulator tries to run this many bots if it can. For example, desired 8 means try to run 8 bots. If it is too high, auto scaling may recommend fewer bots. Beginners should start with 2 or 3.',
   'Direct Actions':
     'This says the adapter can send game actions directly, not just keyboard or mouse input. The simulator uses it for more exact testing. For example, a game test API may accept jump or open_inventory. If this is wrong, actions may fail. Beginners should turn this on only for instrumented builds.',
   'Direct State Read':
     'This says the simulator can read real game state, like scene, quest, and player data. It is used for smarter bots and better issue reports. For example, the game can tell the simulator the player is in Level 1. If this is wrong, reports may be confusing. Beginners should turn this on only when the game exposes state.',
+  'DOM Scan Mode':
+    'This controls whether the browser adapter reads visible page parts such as buttons, headings, menus, dialogs, text, and a game canvas. The simulator uses these clues when your game does not provide a UI hook. For example, Fallback can notice a Play Game button on the main menu. Always also merges DOM clues with hook data, while Off reads no DOM clues. A wrong choice can hide useful menu clues or add a little extra work each bot step. Beginners should use Fallback when UI hooks are missing.',
+  'DOM UI Clues':
+    'This shows when the browser adapter reads visible page parts as clues. The simulator can use buttons, headings, dialogs, text, and canvas presence to tell menus from gameplay. For example, fallback scans only when a UI hook gives no useful details. If this is off for an uninstrumented game, menu bots may understand less. Beginners should use fallback.',
   'Disk usage warning':
     'This warns you when screenshot or video settings may create many files. The simulator uses it to help protect your disk space. For example, taking a screenshot every 2 actions with many bots can make hundreds of images. If you ignore it, the run may use more storage than expected. Beginners should use screenshots every 20 or 50 actions.',
   'Control Mappings':
@@ -84,6 +143,12 @@ const fieldHelpText: Record<string, string> = {
     'This records serious page errors from the browser. The simulator uses them to detect broken scripts or crashes. For example, an uncaught JavaScript exception can be captured. If this is missing, browser bugs may be harder to understand. Beginners should leave this on.',
   'Compare Sessions':
     'This compares two saved test runs. The simulator uses it to find new issues, fixed issues, repeated issues, coverage changes, and performance changes. For example, compare build 1.0.1 with build 1.0.2. If the sessions are chosen backwards, the report may be confusing. Beginners should pick the older run first and the newer run second.',
+  'Cleanup Options':
+    'These settings remove or preserve files inside one saved run bundle. The simulator uses them to save disk space after many tests. For example, you can delete raw state logs but keep summaries and screenshots. If you delete too much, deep debugging may be harder. Beginners should keep screenshots and summaries on.',
+  'Cleanup Session':
+    'This is the saved run you want to clean up. The simulator changes files only inside this session bundle. For example, choose yesterday’s stress test before deleting noisy state logs. If you choose the wrong session, you may clean the wrong run. Beginners should archive first.',
+  'Delete old raw state logs':
+    'This deletes large bot state snapshot files from a saved run. The simulator keeps summaries and important events so the run is still readable. For example, use this after a long stress test with many state snapshots. If you delete them, raw state debugging is harder. Beginners should use it only after reading the report.',
   'Coverage Percentage':
     'This shows how much known game content was tested in a session. The simulator uses your game profile and observed content to calculate it. For example, 40% means four out of ten known items were reached. If the profile content list is incomplete, this number may be misleading. Beginners should use it as a guide, not a perfect score.',
   'Desktop Input Driver':
@@ -180,6 +245,8 @@ const fieldHelpText: Record<string, string> = {
     'This is the most copies of the game the simulator may open. It is used when bots need separate game windows. For example, 2 means at most two game copies. If it is too high, the PC may slow down or saves may conflict. Beginners should use 1 or 2.',
   'Max Runtime Minutes':
     'This is how long the session may run before it stops. The simulator uses it as a time limit. For example, 30 means stop after 30 minutes. If it is too short, bots may not reach much content. Beginners can use 15 or 30.',
+  'Next Likely Action':
+    'This is the action the planner currently thinks may be a good next choice. It is only a guess because game state can change after every action. For example, close-menu may follow open-menu. If it is missing, the planner does not know yet. Beginners can use it to spot surprising plans.',
   'Min':
     'This is the smallest number of bots this pool should try to run. The simulator uses it to protect important bot types. For example, min 1 means run at least one explorer if possible. If it is too high, the session may not fit your PC. Beginners should use 0 or 1.',
   'Minimum Confidence':
@@ -190,6 +257,8 @@ const fieldHelpText: Record<string, string> = {
     'This lists setup items that still need attention. The simulator uses it to explain what is missing before a safe test can start. For example, it may ask for a game URL or an executable path. If you ignore it, launch or bot control may fail. Beginners should clear this list before running bots.',
   'Last action':
     'This is the most recent action a bot tried. The simulator uses it to explain what happened right before a status or issue. For example, jump or open-menu. If it looks wrong, the bot may be following the wrong plan. Beginners can use it to understand what the bot is doing.',
+  'Last Result':
+    'This shows what happened after the bot action. It can say succeeded, failed, skipped, or timed out, followed by a short message. For example, succeeded: menu opened. If actions keep failing, check adapter health and controls. Beginners should fix repeated failures before adding bots.',
   'Known tested':
     'This shows how much known content was tested. The simulator compares your game profile content list with what bots reached. For example, 5/10 means five known items were tested. If the list is wrong, this number may mislead you. Beginners should add important scenes and quests first.',
   Message:
@@ -238,6 +307,16 @@ const fieldHelpText: Record<string, string> = {
     'This opens the readable report for a session. The simulator uses reports to show results without raw log files. For example, a report can summarize issues, bots, and coverage. If the wrong report is opened, you may review the wrong session. Beginners should open the newest finished session first.',
   'Report Actions':
     'These are actions you can take for a saved session. The simulator uses them to open reports, inspect issues, view logs, compare runs, or export issue markdown. For example, choose View Issues to review bugs from an old run. If you pick the wrong row, you may open the wrong session. Beginners should start with Open Report.',
+  'Archive session bundle':
+    'This saves a bundle archive manifest before cleanup. The simulator records the files that were in the run so you can see what existed later. For example, archive before deleting raw state logs. If you skip this, cleanup has less history. Beginners should turn this on before cleaning old runs.',
+  'Full Logs':
+    'This shows every structured log saved for the selected run. The simulator uses it when you need the complete timeline. For example, it includes session logs, bot actions, bot states, issues, and instance logs. If it feels too noisy, use Important Events. Beginners should start with Important Events.',
+  'Important Events':
+    'This shows the most useful saved events from a run. The simulator separates these from noisy state logs so issues and warnings are easier to find. For example, crashes, recovery attempts, adapter launches, and flow failures appear here. If something is missing, open Full Logs. Beginners should use this first.',
+  'Keep screenshots':
+    'This keeps screenshot evidence when cleaning a run bundle. The simulator uses screenshots to prove what happened during issues. For example, keep them for crashes, stuck menus, or visual bugs. If you turn this off, reports may lose useful proof. Beginners should leave it on.',
+  'Keep summaries':
+    'This keeps readable summary files when cleaning a run bundle. The simulator uses summaries so you can understand a run without reading raw JSON. For example, session-summary.md explains bots, issues, and coverage. If you turn this off, the run is harder to inspect. Beginners should leave it on.',
   'Reload Sessions':
     'This makes the app scan the runs folder again. The simulator uses it to find reports created before this app window opened. For example, reload after restarting the app or copying in old runs. If a run folder is broken, it may not appear. Beginners can press this whenever a session is missing.',
   'Recommended bots':
@@ -306,6 +385,8 @@ const fieldHelpText: Record<string, string> = {
     'This shows whether a saved session is created, running, stopped, or failed. The simulator uses it to explain what happened to that run. For example, stopped means the run ended normally, and failed means setup or runtime had a serious problem. If this is unexpected, open logs. Beginners should review stopped or failed sessions first.',
   'Session ID':
     'This is the name for this test run. The simulator uses it for the run folder and reports. For example, session-smoke-test. If it is empty or reused, reports may be confusing. Beginners can keep the suggested name.',
+  'Session Label':
+    'This is a short tag that explains what kind of test this run is. The simulator shows it in Logs and Reports so many runs are easier to sort. For example, use Smoke Test for a quick check or Regression for comparing builds. If it is wrong, the run may be harder to find later. Beginners should choose Smoke Test for a first run.',
   'Setup Wizard':
     'This chooses the guided setup flow for your game. The simulator uses it to show only the fields that matter for that kind of game. For example, choose Browser Game Wizard for a web game URL. If this is wrong, you may see confusing fields or miss required ones. Beginners should choose the closest match to how they normally open the game.',
   Severity:
@@ -314,10 +395,24 @@ const fieldHelpText: Record<string, string> = {
     'This chooses how this bot pool gets its final count. Fixed uses the desired number. Auto lets the simulator adjust based on PC resources. If this is wrong, you may run too many or too few bots. Beginners should choose Auto.',
   Source:
     'This filters logs by where they came from. The simulator uses it to show session, bot, or instance logs. For example, choose Bot actions to see only bot actions. If this is wrong, some logs are hidden. Beginners can leave this on All sources.',
+  'Raw Files':
+    'This view helps inspect the original saved JSON rows from the run bundle. The simulator keeps it for advanced debugging when summaries are not enough. For example, use it to check a full payload. If it feels confusing, go back to Important Events. Beginners usually do not need Raw Files.',
+  'Raw File':
+    'This is the saved file that the selected log came from. The simulator records it so you can find the original artifact inside the run folder. For example, it may be a bot actions file or an instance log. If it says not recorded, the log came from an older file format. Beginners usually do not need to open it directly.',
   'State Snapshots':
     'This saves small records of what the game state looked like. The simulator uses them to explain issues. For example, a snapshot may say the bot was in a menu. If this is off, reports have less context. Beginners should leave it on.',
   'State Preview':
     'This shows a small sample of game state from the profile test. The simulator uses state to help bots understand scenes, UI, quests, inventory, and performance. For example, it may show the current scene or page title. If it is empty, the adapter may only have weak awareness. Beginners should use instrumentation for richer state.',
+  'Startup Flow':
+    'This chooses a menu setup flow to run before normal bots start. The simulator uses it to get the game into a playable state first. For example, choose Create World to go from the main menu to a loaded world. If this is wrong, bots may start in the wrong menu or fail setup. Beginners should choose No startup flow unless the game needs menu setup.',
+  'Startup timeout':
+    'This is how long the simulator waits for the startup flow, in seconds. It uses this limit so a stuck menu setup does not run forever. For example, 60 means wait up to one minute. If it is too short, slow loading may fail. Beginners should use 60.',
+  'Continue if startup flow fails':
+    'This lets normal bots start even if the setup flow fails. The simulator uses it when you want to inspect what happens after a bad setup. For example, turn it on during experiments. If it is off, the session stops when setup fails. Beginners should leave it off.',
+  'Test Startup Flow':
+    'This checks whether the selected startup flow is ready to use. The simulator checks the saved flow steps before starting a real session. For example, it confirms that Create World has steps. If this fails, edit the game profile UI flow. Beginners should run this before starting bots.',
+  'Startup Flow Test Result':
+    'This shows the result of checking the startup flow setup. The simulator uses it to tell you if the flow has steps and a timeout. For example, it may say the flow has six steps. If it reports a problem, fix the flow before starting. Beginners should look for a ready message.',
   Status:
     'This shows the current state of a bot or game instance. The simulator uses it to decide what can happen next. For example, running means active, stopped means finished, and failed means something went wrong. If the status is unhealthy, the run may need attention. Beginners should look for running during a test and stopped after it ends.',
   'Supports Direct Actions':
@@ -356,6 +451,12 @@ const fieldHelpText: Record<string, string> = {
     'This is how the simulator talks to an instrumented game. The instrumented adapter uses it to choose local HTTP, WebSocket, file bridge, or plugin bridge. For example, local HTTP works with http://127.0.0.1:4555. If this is wrong, the simulator may not connect. Beginners should choose Local HTTP.',
   'Total bots':
     'This is the full number of bots in the session. The simulator uses it to summarize how many testers are active or planned. For example, 8 total bots may include explorer and combat bots. If this is wrong, check the bot pools. Beginners should keep this modest at first.',
+  'UI Flow JSON':
+    'This describes a menu journey the UI Journey Bot should follow. The simulator uses it for multi-step flows like Play Game, Create Game, Game Settings, and Start World. For example, one step can press Enter on Play Game. If the JSON is wrong, the bot cannot follow the flow. Beginners should start with the sample flow and edit the labels and keys.',
+  'Flow Test Result':
+    'This shows whether the configured UI flow looks usable. The simulator checks the flow shape before bots run it. For example, it can confirm that the first step has an action and key. If this says failed, fix the flow before starting a session. Beginners should test the full flow after editing it.',
+  'UI Journey Bot':
+    'This bot follows the UI flows saved in the game profile. The simulator uses it to get through layered menus before normal bots explore gameplay. For example, it can click Play Game, Create Game, then Start World. If no flow is configured, it behaves like a normal rule-based bot. Beginners should add one UI Journey Bot when the game starts in menus.',
   Untested:
     'This shows known content that bots have not reached yet. The simulator uses it to help plan future tests. For example, three untested side quests means bots have not covered them. If important content is here, add better bot pools or more time. Beginners should use it as a checklist.',
   URL:
@@ -469,30 +570,293 @@ function helpTextForLabel(label: string, customHelpText?: FieldHelpText): FieldH
   );
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function measureTooltipSize(rect: TooltipSize, viewport: TooltipViewport): TooltipSize {
+  const maxWidth = Math.min(TOOLTIP_MAX_WIDTH, Math.max(160, viewport.width - TOOLTIP_MARGIN * 2));
+  const maxHeight = Math.max(96, Math.floor(viewport.height * TOOLTIP_MAX_HEIGHT_RATIO));
+
+  return {
+    width: Math.min(rect.width || TOOLTIP_DEFAULT_WIDTH, maxWidth),
+    height: Math.min(rect.height || TOOLTIP_DEFAULT_HEIGHT, maxHeight)
+  };
+}
+
+function placementCoordinates(
+  placement: TooltipPlacement,
+  anchorRect: TooltipRect,
+  tooltipSize: TooltipSize
+): Pick<TooltipPosition, 'left' | 'top'> {
+  const anchorCenterX = anchorRect.left + anchorRect.width / 2;
+  const anchorCenterY = anchorRect.top + anchorRect.height / 2;
+
+  switch (placement) {
+    case 'top':
+      return {
+        left: anchorCenterX - tooltipSize.width / 2,
+        top: anchorRect.top - tooltipSize.height - TOOLTIP_GAP
+      };
+    case 'right':
+      return {
+        left: anchorRect.right + TOOLTIP_GAP,
+        top: anchorCenterY - tooltipSize.height / 2
+      };
+    case 'left':
+      return {
+        left: anchorRect.left - tooltipSize.width - TOOLTIP_GAP,
+        top: anchorCenterY - tooltipSize.height / 2
+      };
+    case 'bottom':
+    default:
+      return {
+        left: anchorCenterX - tooltipSize.width / 2,
+        top: anchorRect.bottom + TOOLTIP_GAP
+      };
+  }
+}
+
+function fallbackPlacement(
+  preferredPlacement: TooltipPlacement,
+  anchorRect: TooltipRect,
+  tooltipSize: TooltipSize,
+  viewport: TooltipViewport
+): TooltipPlacement {
+  const bottomFits = anchorRect.bottom + TOOLTIP_GAP + tooltipSize.height <= viewport.height - TOOLTIP_MARGIN;
+  const topFits = anchorRect.top - TOOLTIP_GAP - tooltipSize.height >= TOOLTIP_MARGIN;
+  const rightFits = anchorRect.right + TOOLTIP_GAP + tooltipSize.width <= viewport.width - TOOLTIP_MARGIN;
+  const leftFits = anchorRect.left - TOOLTIP_GAP - tooltipSize.width >= TOOLTIP_MARGIN;
+
+  if (preferredPlacement === 'bottom') {
+    return bottomFits ? 'bottom' : 'top';
+  }
+
+  if (preferredPlacement === 'top') {
+    return topFits ? 'top' : 'bottom';
+  }
+
+  if (preferredPlacement === 'right') {
+    return rightFits ? 'right' : 'left';
+  }
+
+  return leftFits ? 'left' : 'right';
+}
+
+export function calculateViewportSafeTooltipPosition(
+  anchorRect: TooltipRect,
+  tooltipRect: TooltipSize,
+  viewport: TooltipViewport,
+  preferredPlacement: TooltipPlacement = 'bottom'
+): TooltipPosition {
+  const maxWidth = Math.min(TOOLTIP_MAX_WIDTH, Math.max(160, viewport.width - TOOLTIP_MARGIN * 2));
+  const maxHeight = Math.max(96, Math.floor(viewport.height * TOOLTIP_MAX_HEIGHT_RATIO));
+  const tooltipSize = measureTooltipSize(tooltipRect, viewport);
+  const placement = fallbackPlacement(preferredPlacement, anchorRect, tooltipSize, viewport);
+  const coordinates = placementCoordinates(placement, anchorRect, tooltipSize);
+  const left = clamp(coordinates.left, TOOLTIP_MARGIN, viewport.width - tooltipSize.width - TOOLTIP_MARGIN);
+  const top = clamp(coordinates.top, TOOLTIP_MARGIN, viewport.height - tooltipSize.height - TOOLTIP_MARGIN);
+
+  return {
+    left: Math.round(left + viewport.scrollX),
+    top: Math.round(top + viewport.scrollY),
+    maxWidth,
+    maxHeight,
+    placement
+  };
+}
+
+function getTooltipRoot(): HTMLElement | null {
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  const existingRoot = document.getElementById('tooltip-root');
+
+  if (existingRoot) {
+    return existingRoot;
+  }
+
+  return document.body;
+}
+
+function viewportFromWindow(): TooltipViewport {
+  return {
+    width: window.innerWidth || document.documentElement.clientWidth || 1024,
+    height: window.innerHeight || document.documentElement.clientHeight || 768,
+    scrollX: window.scrollX || window.pageXOffset || 0,
+    scrollY: window.scrollY || window.pageYOffset || 0
+  };
+}
+
+function TooltipLayer({
+  anchorElement,
+  helpText,
+  label,
+  onRequestClose,
+  onTooltipMouseEnter,
+  onTooltipMouseLeave,
+  tooltipId
+}: {
+  anchorElement: HTMLElement;
+  helpText: FieldHelpText;
+  label: string;
+  onRequestClose: () => void;
+  onTooltipMouseEnter: () => void;
+  onTooltipMouseLeave: () => void;
+  tooltipId: string;
+}) {
+  const tooltipRef = useRef<HTMLSpanElement>(null);
+  const [position, setPosition] = useState<TooltipPosition | null>(null);
+
+  const updatePosition = useCallback(() => {
+    const tooltipElement = tooltipRef.current;
+
+    if (!tooltipElement) {
+      return;
+    }
+
+    const nextPosition = calculateViewportSafeTooltipPosition(
+      anchorElement.getBoundingClientRect(),
+      tooltipElement.getBoundingClientRect(),
+      viewportFromWindow(),
+      'bottom'
+    );
+
+    setPosition(nextPosition);
+  }, [anchorElement]);
+
+  useLayoutEffect(() => {
+    updatePosition();
+  }, [helpText, updatePosition]);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onRequestClose();
+      }
+    };
+
+    const closeOnViewportChange = () => {
+      onRequestClose();
+    };
+
+    window.addEventListener('keydown', closeOnEscape);
+    window.addEventListener('resize', closeOnViewportChange);
+    window.addEventListener('scroll', closeOnViewportChange, true);
+
+    return () => {
+      window.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('resize', closeOnViewportChange);
+      window.removeEventListener('scroll', closeOnViewportChange, true);
+    };
+  }, [onRequestClose]);
+
+  const tooltipRoot = getTooltipRoot();
+
+  if (!tooltipRoot) {
+    return null;
+  }
+
+  const style: CSSProperties = {
+    left: position ? `${position.left}px` : 0,
+    maxHeight: position ? `${position.maxHeight}px` : '45vh',
+    maxWidth: position ? `${position.maxWidth}px` : `${TOOLTIP_MAX_WIDTH}px`,
+    top: position ? `${position.top}px` : 0,
+    visibility: position ? 'visible' : 'hidden',
+    zIndex: TOOLTIP_LAYER_Z_INDEX
+  };
+
+  return createPortal(
+    <span
+      ref={tooltipRef}
+      className="field-help__tooltip"
+      data-placement={position?.placement ?? 'bottom'}
+      id={tooltipId}
+      onMouseEnter={onTooltipMouseEnter}
+      onMouseLeave={onTooltipMouseLeave}
+      role="tooltip"
+      style={style}
+    >
+      {helpText}
+      <span className="sr-only"> Help for {label}</span>
+    </span>,
+    tooltipRoot
+  );
+}
+
 export function FieldHelp({ label, helpText }: { label: string; helpText: FieldHelpText }) {
   const tooltipId = useId();
+  const helpRef = useRef<HTMLSpanElement>(null);
+  const closeTimerRef = useRef<number | null>(null);
+  const [isOpen, setIsOpen] = useState(false);
+
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+
+  const openTooltip = useCallback(() => {
+    clearCloseTimer();
+    setIsOpen(true);
+  }, [clearCloseTimer]);
+
+  const closeTooltip = useCallback(() => {
+    clearCloseTimer();
+    setIsOpen(false);
+  }, [clearCloseTimer]);
+
+  const scheduleCloseTooltip = useCallback(() => {
+    clearCloseTimer();
+    closeTimerRef.current = window.setTimeout(() => {
+      setIsOpen(false);
+      closeTimerRef.current = null;
+    }, 80);
+  }, [clearCloseTimer]);
+
+  useEffect(() => clearCloseTimer, [clearCloseTimer]);
 
   return (
     <span
+      ref={helpRef}
       className="field-help"
       tabIndex={0}
       aria-label={`Help for ${label}`}
-      aria-describedby={tooltipId}
+      aria-describedby={isOpen ? tooltipId : undefined}
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
+      }}
+      onFocus={openTooltip}
+      onBlur={closeTooltip}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') {
+          closeTooltip();
+        }
       }}
       onMouseDown={(event) => {
         event.preventDefault();
         event.stopPropagation();
       }}
+      onMouseEnter={openTooltip}
+      onMouseLeave={scheduleCloseTooltip}
     >
       <span className="field-help__mark" aria-hidden="true">
         ?
       </span>
-      <span className="field-help__tooltip" id={tooltipId} role="tooltip">
-        {helpText}
-      </span>
+      {isOpen && helpRef.current ? (
+        <TooltipLayer
+          anchorElement={helpRef.current}
+          helpText={helpText}
+          label={label}
+          onRequestClose={closeTooltip}
+          onTooltipMouseEnter={clearCloseTimer}
+          onTooltipMouseLeave={closeTooltip}
+          tooltipId={tooltipId}
+        />
+      ) : null}
     </span>
   );
 }

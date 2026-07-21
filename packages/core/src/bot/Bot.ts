@@ -5,7 +5,8 @@ import type {
   DetectedIssue,
   GameAction,
   GameStateSnapshot,
-  RuntimeBotSnapshot
+  RuntimeBotSnapshot,
+  UIFlow
 } from '../types';
 import type { LogEntry, LogLevel } from '../logging/LogEntry';
 import {
@@ -13,6 +14,8 @@ import {
   type AvailableGameActionLike,
   type CoverageData
 } from './ActionPlanner';
+import { actionInsightFromAction, actionResultSummary } from './ActionExplanation';
+import { currentUIScreen } from './UIJourneyPlanner';
 import { ProgressTracker, type ProgressTrackerOptions, type ProgressSummary } from './ProgressTracker';
 import { RecoveryManager, type RecoveryAttemptRecord } from './RecoveryManager';
 
@@ -58,6 +61,7 @@ export interface BotOptions {
   seed?: number;
   getCoverageData?: () => CoverageData;
   getRecentIssues?: () => DetectedIssue[];
+  uiFlows?: UIFlow[];
   getInstanceHeartbeat?: (instanceId: string) => string | undefined;
   getProcessResponsive?: (instanceId: string) => boolean | undefined;
   progressTracker?: ProgressTracker;
@@ -83,6 +87,23 @@ function sceneFromState(state: GameStateSnapshot | null): string | undefined {
 
   const scene = state?.state.scene ?? state?.state.currentArea ?? state?.state.area;
   return typeof scene === 'string' ? scene : undefined;
+}
+
+function normalize(value: string | undefined): string {
+  return value?.trim().toLowerCase().replace(/[\s_]+/g, '-') ?? '';
+}
+
+function isUIJourneyProfile(profile: BotProfile): boolean {
+  const text = normalize([profile.profileId, profile.botType, profile.playstyle].filter(Boolean).join(' '));
+  return text.includes('ui-journey') || text.includes('journey');
+}
+
+function isUIJourneyAction(action: GameAction | null): boolean {
+  return action?.payload.planner === 'ui-journey';
+}
+
+function numberPayloadValue(payload: Record<string, unknown>, key: string): number | undefined {
+  return typeof payload[key] === 'number' && Number.isFinite(payload[key]) ? payload[key] : undefined;
 }
 
 export class Bot {
@@ -111,6 +132,7 @@ export class Bot {
   private readonly seed?: number;
   private readonly getCoverageData?: () => CoverageData;
   private readonly getRecentIssues?: () => DetectedIssue[];
+  private readonly uiFlows?: UIFlow[];
   private readonly getInstanceHeartbeat?: (instanceId: string) => string | undefined;
   private readonly getProcessResponsive?: (instanceId: string) => boolean | undefined;
   private readonly progressTracker: ProgressTracker;
@@ -136,6 +158,7 @@ export class Bot {
     this.seed = options.seed;
     this.getCoverageData = options.getCoverageData;
     this.getRecentIssues = options.getRecentIssues;
+    this.uiFlows = options.uiFlows;
     this.getInstanceHeartbeat = options.getInstanceHeartbeat;
     this.getProcessResponsive = options.getProcessResponsive;
     this.progressTracker = options.progressTracker ?? new ProgressTracker(options.progressTrackerOptions);
@@ -188,13 +211,21 @@ export class Bot {
   }
 
   getStatusSnapshot(): RuntimeBotSnapshot {
+    const actionInsight = actionInsightFromAction(this.memory.lastAction);
+
     return {
       botId: this.botId,
       profileId: this.profile.profileId,
       status: this.status,
       gameInstanceId: this.assignedInstanceId,
       currentGoalId: this.profile.goals[0]?.goalId,
+      currentGoal: this.profile.goals[0]?.name,
       lastActionId: this.memory.lastAction?.actionId,
+      currentAction: this.memory.lastAction?.type,
+      actionReason: actionInsight?.explanation,
+      actionQuality: actionInsight?.quality,
+      lastResult: actionResultSummary(this.memory.lastResult),
+      nextLikelyAction: actionInsight?.nextLikelyAction,
       message: this.memory.progressState
     };
   }
@@ -221,6 +252,16 @@ export class Bot {
 
         const state = await this.readAndRecordState();
 
+        if (this.shouldRunConfiguredUiJourney() && this.uiFlows?.[0]?.endState) {
+          const currentScreen = currentUIScreen(state);
+
+          if (normalize(currentScreen) === normalize(this.uiFlows[0].endState)) {
+            await this.setStatus('completed', `UI flow reached ${this.uiFlows[0].endState}.`);
+            await this.log('info', `UI journey flow "${this.uiFlows[0].name}" already reached its end state.`);
+            return;
+          }
+        }
+
         const availableActions = await this.adapter.getAvailableActions(this.assignedInstanceId, this.botId);
         this.progressTracker.recordAvailableActions(availableActions.length, this.now());
         this.updateProgressSummary();
@@ -234,7 +275,7 @@ export class Bot {
           continue;
         }
 
-        if (availableActions.length === 0) {
+        if (availableActions.length === 0 && !this.shouldRunConfiguredUiJourney()) {
           await this.setStatus('waiting', 'No available actions; retrying.');
           await this.log('warn', 'No available actions were reported; retrying before declaring the bot stuck.');
           await this.sleep(Math.max(50, this.actionDelayMs));
@@ -253,7 +294,8 @@ export class Bot {
           seed: this.seed,
           memory: this.memory,
           coverageData: this.getCoverageData?.(),
-          recentIssues: this.getRecentIssues?.()
+          recentIssues: this.getRecentIssues?.(),
+          uiFlows: this.uiFlows
         });
 
         if (!action) {
@@ -265,7 +307,11 @@ export class Bot {
         this.memory.lastAction = action;
         this.progressTracker.recordAction(action, action.requestedAt);
         this.updateProgressSummary();
-        await this.log('info', `Performing action ${action.type}.`);
+        const actionInsight = actionInsightFromAction(action);
+        await this.log(
+          'info',
+          `${actionInsight?.explanation ?? `Performing action ${action.type}.`} Quality: ${actionInsight?.quality ?? 'planned'}.`
+        );
 
         const result = await this.adapter.performAction(this.assignedInstanceId, this.botId, action);
         this.memory.lastResult = result;
@@ -274,8 +320,17 @@ export class Bot {
         this.progressTracker.recordActionResult(result, result.completedAt ?? this.now());
         this.updateProgressSummary();
         this.memory.progressState = `${action.type}: ${result.status}`;
-        await this.log(result.status === 'failed' ? 'warn' : 'info', `Action ${action.type} ${result.status}.`);
+        await this.log(
+          result.status === 'failed' ? 'warn' : 'info',
+          `Action ${action.type} ${actionResultSummary(result) ?? result.status}.`
+        );
         await this.emitStatus();
+
+        if (this.shouldCompleteUiJourney(action, result)) {
+          await this.setStatus('completed', `UI flow completed after ${this.memory.actionCount} action(s).`);
+          await this.log('info', `UI journey completed after action ${action.type}.`);
+          return;
+        }
 
         const postActionStuckState = await this.handleStuck(availableActions);
         if (postActionStuckState === 'failed') {
@@ -387,7 +442,8 @@ export class Bot {
         this.memory.lastRecoveryAction = action;
         this.progressTracker.recordAction(action, action.requestedAt);
         this.updateProgressSummary();
-        await this.log('info', `Performing recovery action ${action.type}.`);
+        const actionInsight = actionInsightFromAction(action);
+        await this.log('info', `${actionInsight?.explanation ?? `Performing recovery action ${action.type}.`} Quality: recovery.`);
 
         const result = await this.adapter.performAction(this.assignedInstanceId, this.botId, action);
         this.recoveryManager.recordActionResult(attempt.attemptId, result);
@@ -397,7 +453,10 @@ export class Bot {
         this.progressTracker.recordActionResult(result, result.completedAt ?? this.now());
         this.updateProgressSummary();
         this.memory.progressState = `Recovery ${action.type}: ${result.status}`;
-        await this.log(result.status === 'failed' ? 'warn' : 'info', `Recovery action ${action.type} ${result.status}.`);
+        await this.log(
+          result.status === 'failed' ? 'warn' : 'info',
+          `Recovery action ${action.type} ${actionResultSummary(result) ?? result.status}.`
+        );
         await this.emitStatus();
 
         if (result.status === 'failed' || result.status === 'timed_out') {
@@ -453,5 +512,20 @@ export class Bot {
       timestamp: this.now(),
       source: `bot:${this.botId}`
     });
+  }
+
+  private shouldRunConfiguredUiJourney(): boolean {
+    return isUIJourneyProfile(this.profile) && Boolean(this.uiFlows?.some((flow) => flow.steps.length > 0));
+  }
+
+  private shouldCompleteUiJourney(action: GameAction, result: ActionResult): boolean {
+    if (!isUIJourneyAction(action) || result.status !== 'succeeded') {
+      return false;
+    }
+
+    const stepIndex = numberPayloadValue(action.payload, 'stepIndex');
+    const stepCount = numberPayloadValue(action.payload, 'flowStepCount');
+
+    return stepIndex !== undefined && stepCount !== undefined && stepIndex + 1 >= stepCount;
   }
 }

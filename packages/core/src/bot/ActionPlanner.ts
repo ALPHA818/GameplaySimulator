@@ -1,4 +1,6 @@
-import type { BotProfile, DetectedIssue, GameAction, GameStateSnapshot } from '../types';
+import type { ActionQuality, BotProfile, DetectedIssue, GameAction, GameStateSnapshot, UIFlow } from '../types';
+import { buildPlannerExplanation } from './ActionExplanation';
+import { UIJourneyPlanner } from './UIJourneyPlanner';
 
 export interface AvailableGameActionLike {
   actionType: string;
@@ -36,6 +38,7 @@ export interface ActionPlannerInput {
   memory?: ActionPlannerMemory;
   coverageData?: CoverageData;
   recentIssues?: DetectedIssue[];
+  uiFlows?: UIFlow[];
 }
 
 interface RuleSet {
@@ -61,6 +64,7 @@ interface ScoredAction {
   score: number;
   random: number;
   reason: string;
+  repetitionCount: number;
 }
 
 const defaultRuleSet: RuleSet = {
@@ -223,6 +227,7 @@ function profileKey(profile: BotProfile): string {
   if (text.includes('explorer')) return 'explorer';
   if (text.includes('speedrunner')) return 'speedrunner';
   if (text.includes('chaos')) return 'chaos';
+  if (text.includes('ui-journey') || text.includes('journey')) return 'ui-journey';
   if (text.includes('ui')) return 'ui';
   if (text.includes('economy')) return 'economy';
   if (text.includes('combat')) return 'combat';
@@ -335,8 +340,35 @@ function scoreAction(input: ActionPlannerInput, action: AvailableGameActionLike,
     action,
     score,
     random,
-    reason: reasons.join(', ') || 'weighted score'
+    reason: reasons.join(', ') || 'weighted score',
+    repetitionCount
   };
+}
+
+function actionQuality(selected: ScoredAction, key: string): ActionQuality {
+  const text = actionText(selected.action);
+
+  if (key === 'chaos') {
+    return 'random';
+  }
+
+  if (selected.repetitionCount > 0) {
+    return 'repeated';
+  }
+
+  if (
+    key === 'sequence' ||
+    key === 'boundary' ||
+    containsAny(text, ['locked', 'out-of-order', 'sequence-break', 'clip', 'map-exit'])
+  ) {
+    return 'risky';
+  }
+
+  if (selected.reason.includes('unvisited action')) {
+    return 'exploratory';
+  }
+
+  return 'planned';
 }
 
 function chooseScored(scored: ScoredAction[], seed: number, actionIndex: number, key: string): ScoredAction {
@@ -358,15 +390,49 @@ function chooseScored(scored: ScoredAction[], seed: number, actionIndex: number,
 }
 
 export class ActionPlanner {
+  private readonly uiJourneyPlanner = new UIJourneyPlanner();
+
   chooseAction(input: ActionPlannerInput): GameAction | null {
+    const seed = input.seed ?? hashString(`${input.sessionId}:${input.botId}`);
+    const key = profileKey(input.profile);
+
+    if (key === 'ui-journey' && input.uiFlows && input.uiFlows.length > 0) {
+      const flow = input.uiFlows[0];
+      const journeyAction = this.uiJourneyPlanner.chooseAction({
+        sessionId: input.sessionId,
+        gameInstanceId: input.gameInstanceId,
+        botId: input.botId,
+        flow,
+        state: input.state,
+        availableActions: input.availableActions,
+        actionIndex: input.actionIndex,
+        now: input.now,
+        seed,
+        memory: input.memory
+      });
+
+      if (journeyAction) {
+        return journeyAction;
+      }
+    }
+
     if (input.availableActions.length === 0) {
       return null;
     }
 
-    const seed = input.seed ?? hashString(`${input.sessionId}:${input.botId}`);
     const scored = input.availableActions.map((action, index) => scoreAction(input, action, index));
-    const key = profileKey(input.profile);
     const selected = chooseScored(scored, seed, input.actionIndex, key);
+    const quality = actionQuality(selected, key);
+    const explanation = buildPlannerExplanation({
+      profile: input.profile,
+      actionType: selected.action.actionType,
+      profileKey: key,
+      plannerReason: selected.reason,
+      quality
+    });
+    const nextLikelyAction = [...scored]
+      .sort((a, b) => b.score - a.score || a.action.actionType.localeCompare(b.action.actionType))
+      .find((candidate) => candidate !== selected)?.action.actionType;
 
     return {
       actionId: `${input.botId}-action-${String(input.actionIndex + 1).padStart(4, '0')}`,
@@ -382,7 +448,11 @@ export class ActionPlanner {
         random: selected.random,
         reason: selected.reason,
         profileKey: key,
-        seed
+        seed,
+        quality,
+        explanation,
+        nextLikelyAction,
+        adapterPayload: selected.action.payloadSchema
       },
       requestedAt: input.now
     };

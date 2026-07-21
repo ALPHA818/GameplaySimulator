@@ -1,14 +1,23 @@
 import type {
   BotLaunchPlan,
+  BotProfile,
   BotPoolConfig,
+  GameProfile,
   RunMode,
   RuntimeViabilityReport,
+  SessionLabel,
   SimulationRunConfig
 } from '@core/types';
 import { SimulationRunConfigSchema } from '@core/types';
 import { resolveBotPools } from '@core/bot/BotPoolResolver';
+import {
+  firstTestTemplates,
+  isFirstTestTemplateCompatible,
+  recommendedFirstTestTemplate
+} from '@core/config/firstTestTemplates';
+import type { FirstTestTemplate, FirstTestTemplateId } from '@core/config/firstTestTemplates';
 import { planGameInstances } from '@core/sessions/GameInstanceManager';
-import { Pause, Play, Plus, RotateCw, Square, Trash2 } from 'lucide-react';
+import { Pause, Play, Plus, RotateCw, ShieldCheck, Square, Trash2 } from 'lucide-react';
 import type { FormEvent } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import { FieldLabel, SelectInput, TextInput, ToggleInput } from '../components/FormFields';
@@ -19,6 +28,7 @@ import { optionalText, zodFieldErrors } from '../utils/forms';
 
 interface RunFormState {
   sessionId: string;
+  sessionLabel: SessionLabel;
   gameProfileId: string;
   runMode: RunMode;
   runUntilStopped: boolean;
@@ -27,6 +37,9 @@ interface RunFormState {
   saveScreenshots: boolean;
   saveVideo: boolean;
   screenshotEveryNActions: string;
+  startupFlowId: string;
+  continueOnStartupFlowFailure: boolean;
+  startupFlowTimeoutSeconds: string;
   saveActionTimeline: boolean;
   saveStateSnapshots: boolean;
   botPools: BotPoolConfig[];
@@ -48,6 +61,121 @@ const runModes: Array<{ value: RunMode; label: string }> = [
   { value: 'hybrid', label: 'Hybrid' }
 ];
 
+const sessionLabels: SessionLabel[] = ['Smoke Test', 'Regression', 'UI Flow', 'Stress Test', 'Custom'];
+
+function botPoolForTemplate(template: FirstTestTemplate, botProfiles: BotProfile[]): BotPoolConfig | null {
+  const profile = botProfiles.find((item) => item.profileId === template.botProfileId);
+
+  if (!profile) {
+    return null;
+  }
+
+  return {
+    profileId: profile.profileId,
+    enabled: true,
+    minCount: 1,
+    desiredCount: 1,
+    maxCount: 1,
+    scalingMode: 'fixed',
+    priority: 100,
+    resourceWeight: template.resourceWeight,
+    notes: `Applied by ${template.name}.`
+  };
+}
+
+function applyTemplateToForm(
+  current: RunFormState,
+  template: FirstTestTemplate,
+  gameProfile: GameProfile,
+  botProfiles: BotProfile[]
+): RunFormState | null {
+  const botPool = botPoolForTemplate(template, botProfiles);
+
+  if (!botPool) {
+    return null;
+  }
+
+  const screenshotsEnabled =
+    template.saveScreenshots === 'on' || gameProfile.adapter.supportsScreenshots;
+  const startupFlowId = template.recommendStartupFlow ? (gameProfile.uiFlows[0]?.flowId ?? '') : '';
+
+  return {
+    ...current,
+    sessionLabel: 'Smoke Test',
+    gameProfileId: gameProfile.gameId,
+    runMode: 'sequential',
+    runUntilStopped: false,
+    maxRuntimeMinutes: '15',
+    stopOnCriticalIssue: true,
+    saveScreenshots: screenshotsEnabled,
+    saveVideo: false,
+    screenshotEveryNActions: screenshotsEnabled ? String(template.actionCount) : '',
+    startupFlowId,
+    continueOnStartupFlowFailure: false,
+    startupFlowTimeoutSeconds: '60',
+    saveActionTimeline: true,
+    saveStateSnapshots: template.saveStateSnapshots,
+    botPools: [botPool],
+    globalBotLimit: 1,
+    perGameInstanceBotLimit: 1,
+    actionDelayMs: template.actionDelayMs,
+    maxActionsPerBot: String(template.actionCount),
+    maxCpuPercent: 70,
+    maxRamPercent: 70,
+    maxGpuPercent: '75',
+    reserveRamMb: 2048,
+    maxGameInstances: 1,
+    allowAutoScaling: false
+  };
+}
+
+function initialRunFormState(gameProfile: GameProfile | undefined, botProfiles: BotProfile[]): RunFormState {
+  const base: RunFormState = {
+    sessionId: `session-${Date.now()}`,
+    sessionLabel: 'Smoke Test',
+    gameProfileId: gameProfile?.gameId ?? '',
+    runMode: 'sequential',
+    runUntilStopped: false,
+    maxRuntimeMinutes: '15',
+    stopOnCriticalIssue: true,
+    saveScreenshots: gameProfile?.adapter.supportsScreenshots ?? true,
+    saveVideo: false,
+    screenshotEveryNActions: '20',
+    startupFlowId: '',
+    continueOnStartupFlowFailure: false,
+    startupFlowTimeoutSeconds: '60',
+    saveActionTimeline: true,
+    saveStateSnapshots: false,
+    botPools: [],
+    globalBotLimit: 1,
+    perGameInstanceBotLimit: 1,
+    actionDelayMs: 650,
+    maxActionsPerBot: '20',
+    maxCpuPercent: 70,
+    maxRamPercent: 70,
+    maxGpuPercent: '75',
+    reserveRamMb: 2048,
+    maxGameInstances: 1,
+    allowAutoScaling: false
+  };
+  const template = gameProfile ? recommendedFirstTestTemplate(gameProfile) : undefined;
+
+  if (!gameProfile || !template) {
+    return {
+      ...base,
+      botPools: createDefaultBotPools(botProfiles).slice(0, 1).map((pool) => ({
+        ...pool,
+        minCount: 1,
+        desiredCount: 1,
+        maxCount: 1,
+        scalingMode: 'fixed'
+      }))
+    };
+  }
+
+  return applyTemplateToForm(base, template, gameProfile, botProfiles) ?? base;
+}
+
 function numericInput(value: string): number {
   return value === '' ? 0 : Number(value);
 }
@@ -55,6 +183,7 @@ function numericInput(value: string): number {
 function buildRunConfig(form: RunFormState, adapterType: SimulationRunConfig['adapterType']): SimulationRunConfig {
   return {
     sessionId: form.sessionId.trim(),
+    sessionLabel: form.sessionLabel,
     gameProfilePath: `memory://game-profiles/${form.gameProfileId}`,
     adapterType,
     runMode: form.runMode,
@@ -67,6 +196,11 @@ function buildRunConfig(form: RunFormState, adapterType: SimulationRunConfig['ad
     saveVideo: form.saveVideo,
     screenshotEveryNActions: optionalText(form.screenshotEveryNActions)
       ? Number(form.screenshotEveryNActions)
+      : undefined,
+    startupFlowId: optionalText(form.startupFlowId),
+    continueOnStartupFlowFailure: form.continueOnStartupFlowFailure,
+    startupFlowTimeoutMs: optionalText(form.startupFlowTimeoutSeconds)
+      ? Math.max(1, Number(form.startupFlowTimeoutSeconds)) * 1000
       : undefined,
     saveActionTimeline: form.saveActionTimeline,
     saveStateSnapshots: form.saveStateSnapshots,
@@ -131,30 +265,15 @@ export function NewSessionPage() {
   const runtimeLogs = useSessionStore((state) => state.logs);
   const applySessionSnapshot = useSessionStore((state) => state.applySessionSnapshot);
   const applyRuntimeDetails = useSessionStore((state) => state.applyRuntimeDetails);
-  const [form, setForm] = useState<RunFormState>(() => ({
-    sessionId: `session-${Date.now()}`,
-    gameProfileId: gameProfiles[0]?.gameId ?? '',
-    runMode: 'parallel',
-    runUntilStopped: false,
-    maxRuntimeMinutes: '15',
-    stopOnCriticalIssue: true,
-    saveScreenshots: true,
-    saveVideo: false,
-    screenshotEveryNActions: '25',
-    saveActionTimeline: true,
-    saveStateSnapshots: true,
-    botPools: createDefaultBotPools(botProfiles),
-    globalBotLimit: 16,
-    perGameInstanceBotLimit: 4,
-    actionDelayMs: 250,
-    maxActionsPerBot: '500',
-    maxCpuPercent: 80,
-    maxRamPercent: 75,
-    maxGpuPercent: '80',
-    reserveRamMb: 2048,
-    maxGameInstances: 4,
-    allowAutoScaling: true
-  }));
+  const initialGameProfile = gameProfiles[0];
+  const initialTemplate = initialGameProfile ? recommendedFirstTestTemplate(initialGameProfile) : undefined;
+  const [form, setForm] = useState<RunFormState>(() => initialRunFormState(initialGameProfile, botProfiles));
+  const [selectedTemplateId, setSelectedTemplateId] = useState<FirstTestTemplateId>(
+    initialTemplate?.id ?? 'browser-smoke-test'
+  );
+  const [templateApplyMessage, setTemplateApplyMessage] = useState<string | null>(
+    initialTemplate ? `${initialTemplate.name} safe settings are ready.` : null
+  );
   const [errors, setErrors] = useState<FieldErrors>({});
   const [validatedConfig, setValidatedConfig] = useState<SimulationRunConfig | null>(null);
   const [viabilityReport, setViabilityReport] = useState<RuntimeViabilityReport | null>(null);
@@ -163,6 +282,7 @@ export function NewSessionPage() {
   const [adapterValidationWarnings, setAdapterValidationWarnings] = useState<string[]>([]);
   const [runAnyway, setRunAnyway] = useState(false);
   const [addPoolProfileId, setAddPoolProfileId] = useState('');
+  const [startupFlowTestResult, setStartupFlowTestResult] = useState<string | null>(null);
   const selectedProfile = gameProfiles.find((profile) => profile.gameId === form.gameProfileId);
   const adapterType = selectedProfile?.adapter.type ?? 'custom';
   const videoSupported = selectedProfile?.adapter.supportsVideo ?? false;
@@ -174,6 +294,13 @@ export function NewSessionPage() {
     (profile) => !form.botPools.some((pool) => pool.profileId === profile.profileId)
   );
   const profileIdToAdd = addPoolProfileId || availableBotProfiles[0]?.profileId || '';
+  const startupFlowOptions = selectedProfile?.uiFlows ?? [];
+  const selectedStartupFlow = startupFlowOptions.find((flow) => flow.flowId === form.startupFlowId);
+  const selectedTemplate =
+    firstTestTemplates.find((template) => template.id === selectedTemplateId) ?? firstTestTemplates[0];
+  const templateCompatible = selectedProfile
+    ? isFirstTestTemplateCompatible(selectedTemplate, selectedProfile)
+    : false;
 
   const preview = useMemo(
     () =>
@@ -284,6 +411,9 @@ export function NewSessionPage() {
 
   function update<K extends keyof RunFormState>(key: K, value: RunFormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
+    if (key === 'startupFlowId' || key === 'startupFlowTimeoutSeconds' || key === 'continueOnStartupFlowFailure') {
+      setStartupFlowTestResult(null);
+    }
   }
 
   function updatePool(index: number, patch: Partial<BotPoolConfig>) {
@@ -326,8 +456,73 @@ export function NewSessionPage() {
     }));
   }
 
+  function applySelectedTemplate() {
+    if (!selectedProfile) {
+      setTemplateApplyMessage('Choose a game profile before applying a first-test template.');
+      return;
+    }
+
+    if (!templateCompatible) {
+      const recommended = recommendedFirstTestTemplate(selectedProfile);
+      setTemplateApplyMessage(
+        recommended
+          ? `${selectedTemplate.name} does not match this profile. Choose ${recommended.name}.`
+          : `${selectedTemplate.name} does not match this game profile.`
+      );
+      return;
+    }
+
+    const nextForm = applyTemplateToForm(form, selectedTemplate, selectedProfile, botProfiles);
+
+    if (!nextForm) {
+      setTemplateApplyMessage(`The ${selectedTemplate.botProfileId} profile is missing, so this template cannot be applied.`);
+      return;
+    }
+
+    setForm(nextForm);
+    setErrors({});
+    setValidatedConfig(null);
+    setRunAnyway(false);
+    setStartupFlowTestResult(null);
+    setTemplateApplyMessage(
+      `${selectedTemplate.name} applied: one bot, ${selectedTemplate.actionCount} actions, one game instance, and video off.`
+    );
+  }
+
   function poolError(index: number, field: keyof BotPoolConfig): string | undefined {
     return errors[`botPools.${index}.${field}`];
+  }
+
+  function testStartupFlow() {
+    if (!selectedProfile) {
+      setStartupFlowTestResult('Choose a game profile before testing a startup flow.');
+      return;
+    }
+
+    if (!form.startupFlowId) {
+      setStartupFlowTestResult('No startup flow is selected. Normal bots will start after the game instances launch.');
+      return;
+    }
+
+    const flow = selectedProfile.uiFlows.find((item) => item.flowId === form.startupFlowId);
+
+    if (!flow) {
+      setStartupFlowTestResult('The selected startup flow no longer exists on this game profile.');
+      return;
+    }
+
+    if (flow.steps.length === 0) {
+      setStartupFlowTestResult(`Startup flow "${flow.name}" has no steps. Add steps in the game profile before using it.`);
+      return;
+    }
+
+    const timeoutSeconds = optionalText(form.startupFlowTimeoutSeconds)
+      ? Math.max(1, Number(form.startupFlowTimeoutSeconds))
+      : 60;
+
+    setStartupFlowTestResult(
+      `Startup flow "${flow.name}" is ready. It will run ${flow.steps.length} step${flow.steps.length === 1 ? '' : 's'} before normal bots start, with a ${timeoutSeconds} second timeout.`
+    );
   }
 
   async function refreshRuntimeDetails(sessionId: string) {
@@ -519,6 +714,121 @@ export function NewSessionPage() {
       <form id="new-session-form" className="form-grid" onSubmit={onSubmit}>
         {errors.form ? <div className="form-error">{errors.form}</div> : null}
 
+        <section className="form-section form-section--template">
+          <div className="section-header-row">
+            <div>
+              <p className="eyebrow">Safe Starting Point</p>
+              <h2>First Test Template</h2>
+            </div>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={!templateCompatible}
+              onClick={applySelectedTemplate}
+            >
+              <ShieldCheck size={18} aria-hidden="true" />
+              <span>Apply Template</span>
+            </button>
+          </div>
+
+          <div className="field-grid">
+            <SelectInput
+              id="first-test-template"
+              label="First Test Template"
+              helpText="This is a ready-made set of safe settings for one short test. The simulator uses it to choose one bot, 20 actions, a slow action delay, and one game instance. For example, choose Browser Smoke Test for a browser game. If it does not match the game profile, it cannot be applied. Beginners should use the template marked as matching their profile."
+              value={selectedTemplateId}
+              onChange={(event) => {
+                setSelectedTemplateId(event.target.value as FirstTestTemplateId);
+                setTemplateApplyMessage(null);
+              }}
+            >
+              {firstTestTemplates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.name}
+                </option>
+              ))}
+            </SelectInput>
+            <div className="template-compatibility">
+              <FieldLabel
+                label="Template Compatibility"
+                helpText="This tells you whether the template matches the selected game profile. The simulator checks the game engine, adapter, and instrumentation endpoint. For example, a Unity profile with an endpoint matches Unity Instrumented Smoke Test. If it does not match, applying it could use the wrong kind of setup, so the app blocks it. Beginners should choose the matching template."
+              />
+              <span className={`status-pill ${templateCompatible ? '' : 'status-pill--warning'}`}>
+                {templateCompatible ? 'Matches selected profile' : 'Does not match selected profile'}
+              </span>
+            </div>
+          </div>
+
+          <div className="template-guidance">
+            <div>
+              <FieldLabel
+                label="What This Template Does"
+                helpText="This explains the small test the template will create. It helps you know which bot and evidence will be used. For example, a browser smoke test checks a few UI actions. If this is not the test you need, choose another template. Beginners should start with the simplest matching smoke test."
+              />
+              <p>{selectedTemplate.whatItDoes}</p>
+            </div>
+            <div>
+              <FieldLabel
+                label="When To Use It"
+                helpText="This explains when the template is a good choice. It helps you pick the setup that matches your game profile. For example, an instrumented template needs a working local endpoint. If you use it at the wrong time, the session may not start. Beginners should finish the named profile check first."
+              />
+              <p>{selectedTemplate.whenToUse}</p>
+            </div>
+            <div>
+              <FieldLabel
+                label="What It Cannot Test"
+                helpText="This explains the important limits of the short test. It helps you avoid treating one small run as proof that the whole game works. For example, 20 menu actions cannot test every level. If you ignore these limits, you may miss bugs. Beginners should use the result as a setup check."
+              />
+              <p>{selectedTemplate.limitations}</p>
+            </div>
+            <div>
+              <FieldLabel
+                label="Expected First Result"
+                helpText="This describes what a normal first result should look like. It helps you tell a working setup from a setup problem. For example, the game opens, one bot acts, and a report is saved. If the result is different, check profile tests and logs before adding bots. Beginners should aim for this result first."
+              />
+              <p>{selectedTemplate.expectedResult}</p>
+            </div>
+            <div>
+              <FieldLabel
+                label="Beginner Recommendation"
+                helpText="This is the safest next step for someone new to the simulator. It explains what to check before making the run larger. For example, test one desktop control first. If you skip it, bots may fail for a simple setup reason. Beginners should follow this advice for the first run."
+              />
+              <p>{selectedTemplate.beginnerRecommendation}</p>
+            </div>
+            <div>
+              <FieldLabel
+                label="Before Starting"
+                helpText="These are quick checks to complete before the bot starts. The simulator lists them because a profile can look complete while launch, controls, or endpoints still fail. For example, test one control before a desktop run. If a check fails, fix it before starting. Beginners should complete every item."
+              />
+              <ul>
+                {selectedTemplate.beforeStarting.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+
+          <div className="template-safety-strip">
+            <FieldLabel
+              label="Template Safety Limits"
+              helpText="These are hard small-run settings applied by the template. They prevent an accidental large first test. Every template uses one bot, one game instance, no video, and no more than 20 actions. If you change them later, the run can use more computer power. Beginners should keep these limits for the first report."
+            />
+            <span>
+              1 bot · 1 game instance · {selectedTemplate.actionCount} actions · {selectedTemplate.actionDelayMs} ms delay · video off
+            </span>
+          </div>
+
+          {templateApplyMessage ? (
+            <div className={`inline-notice ${templateCompatible ? 'inline-notice--ready' : 'inline-notice--loading'}`}>
+              <FieldLabel
+                label="Template Result"
+                helpText="This confirms whether the template was applied. It helps you know if the visible session settings now use the safe values. For example, it may say one bot and 20 actions were applied. If it says the profile does not match, choose the recommended template. Beginners should read this before starting."
+              />
+              <span>{templateApplyMessage}</span>
+            </div>
+          ) : null}
+        </section>
+
         <section className="form-section">
           <h2>Run</h2>
           <div className="field-grid">
@@ -530,11 +840,49 @@ export function NewSessionPage() {
               onChange={(event) => update('sessionId', event.target.value)}
             />
             <SelectInput
+              label="Session Label"
+              name="sessionLabel"
+              value={form.sessionLabel}
+              onChange={(event) => update('sessionLabel', event.target.value as SessionLabel)}
+            >
+              {sessionLabels.map((label) => (
+                <option key={label} value={label}>
+                  {label}
+                </option>
+              ))}
+            </SelectInput>
+            <SelectInput
               label="Game Profile"
               name="gameProfileId"
               value={form.gameProfileId}
               error={errors.gameProfilePath}
-              onChange={(event) => update('gameProfileId', event.target.value)}
+              onChange={(event) => {
+                const nextProfile = gameProfiles.find((profile) => profile.gameId === event.target.value);
+                const nextTemplate = nextProfile ? recommendedFirstTestTemplate(nextProfile) : undefined;
+
+                setForm((current) => {
+                  if (nextProfile && nextTemplate) {
+                    return applyTemplateToForm(current, nextTemplate, nextProfile, botProfiles) ?? {
+                      ...current,
+                      gameProfileId: event.target.value,
+                      startupFlowId: ''
+                    };
+                  }
+
+                  return {
+                    ...current,
+                    gameProfileId: event.target.value,
+                    startupFlowId: ''
+                  };
+                });
+                if (nextTemplate) {
+                  setSelectedTemplateId(nextTemplate.id);
+                  setTemplateApplyMessage(`${nextTemplate.name} safe settings are ready.`);
+                } else {
+                  setTemplateApplyMessage('No first-test template exactly matches this profile. Review the adapter setup.');
+                }
+                setStartupFlowTestResult(null);
+              }}
             >
               {gameProfiles.map((profile) => (
                 <option key={profile.gameId} value={profile.gameId}>
@@ -587,6 +935,30 @@ export function NewSessionPage() {
               value={form.screenshotEveryNActions}
               onChange={(event) => update('screenshotEveryNActions', event.target.value)}
             />
+            <SelectInput
+              label="Startup Flow"
+              name="startupFlowId"
+              value={form.startupFlowId}
+              disabled={startupFlowOptions.length === 0}
+              onChange={(event) => update('startupFlowId', event.target.value)}
+            >
+              <option value="">
+                {startupFlowOptions.length === 0 ? 'No UI flows configured' : 'No startup flow'}
+              </option>
+              {startupFlowOptions.map((flow) => (
+                <option key={flow.flowId} value={flow.flowId}>
+                  {flow.name}
+                </option>
+              ))}
+            </SelectInput>
+            <TextInput
+              label="Startup timeout"
+              name="startupFlowTimeoutSeconds"
+              type="number"
+              min={1}
+              value={form.startupFlowTimeoutSeconds}
+              onChange={(event) => update('startupFlowTimeoutSeconds', event.target.value)}
+            />
           </div>
           <div className="toggle-grid">
             <ToggleInput
@@ -621,7 +993,38 @@ export function NewSessionPage() {
               checked={form.saveStateSnapshots}
               onChange={(event) => update('saveStateSnapshots', event.target.checked)}
             />
+            <ToggleInput
+              label="Continue if startup flow fails"
+              checked={form.continueOnStartupFlowFailure}
+              disabled={!form.startupFlowId}
+              onChange={(event) => update('continueOnStartupFlowFailure', event.target.checked)}
+            />
           </div>
+          <div className="wizard-test-card">
+            <div>
+              <FieldLabel label="Test Startup Flow" />
+              <p className="form-hint">
+                {selectedStartupFlow
+                  ? `Checks "${selectedStartupFlow.name}" before the real session uses it.`
+                  : 'Choose a startup flow from this game profile before testing it.'}
+              </p>
+            </div>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={startupFlowOptions.length === 0}
+              onClick={testStartupFlow}
+            >
+              <Play size={18} aria-hidden="true" />
+              <span>Test Startup Flow</span>
+            </button>
+          </div>
+          {startupFlowTestResult ? (
+            <div className="inline-notice inline-notice--ready">
+              <FieldLabel label="Startup Flow Test Result" />
+              <span>{startupFlowTestResult}</span>
+            </div>
+          ) : null}
           {diskUsageWarning ? (
             <div className="inline-notice inline-notice--loading">
               <FieldLabel label="Disk usage warning" />

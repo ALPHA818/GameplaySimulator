@@ -5,10 +5,12 @@ import { defaultAdvancedIntelligenceConfig } from '@core/config/advancedIntellig
 import { beforeEach, describe, expect, it } from 'vitest';
 import { IssuesPage } from './IssuesPage';
 import { LiveSessionPage } from './LiveSessionPage';
+import { LogsPage } from './LogsPage';
 import { NewSessionPage } from './NewSessionPage';
 import { ReportsPage } from './ReportsPage';
 import { SettingsPage } from './SettingsPage';
-import { GameProfileEditorPage } from './GameProfileEditorPage';
+import { BrowserGameWizardPanel, GameProfileEditorPage } from './GameProfileEditorPage';
+import { HelpFirstTestPage } from './HelpFirstTestPage';
 import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
 
@@ -125,6 +127,13 @@ describe('renderer workflow smoke tests', () => {
           playstyle: 'exploration',
           status: 'running',
           gameInstanceId: 'instance-ui-001',
+          currentGoalId: 'coverage',
+          currentGoal: 'Explore the map',
+          currentAction: 'move-forward',
+          actionReason: 'Explorer Bot chose move-forward because it was an unvisited action.',
+          actionQuality: 'exploratory',
+          lastResult: 'succeeded: moved forward',
+          nextLikelyAction: 'inspect-area',
           currentArea: 'Start Area',
           progressState: 'Exploring',
           issueCount: 1,
@@ -145,6 +154,10 @@ describe('renderer workflow smoke tests', () => {
 
     expect(html).toContain('New Session');
     expect(html).toContain('Start Session');
+    expect(html).toContain('First Test Template');
+    expect(html).toContain('Browser Smoke Test');
+    expect(html).toContain('Template Safety Limits');
+    expect(html).toContain('1 bot · 1 game instance · 20 actions');
     expect(html).toContain('Bot Pools');
     expect(html).toContain('Global Bot Limit');
     expect(html).toContain('Bot-count viability');
@@ -160,6 +173,26 @@ describe('renderer workflow smoke tests', () => {
     expect(html).toContain('Test Profile');
   });
 
+  it('renders browser DOM scan mode with field help in the browser wizard', () => {
+    const html = renderToStaticMarkup(
+      <BrowserGameWizardPanel
+        url="http://localhost:5173"
+        browserName="chromium"
+        browserDomScanMode="fallback"
+        controlMappings="Confirm = Enter"
+        onUrlChange={() => undefined}
+        onBrowserNameChange={() => undefined}
+        onDomScanModeChange={() => undefined}
+        onControlMappingsChange={() => undefined}
+      />
+    );
+
+    expect(html).toContain('Browser Game Wizard');
+    expect(html).toContain('DOM Scan Mode');
+    expect(html).toContain('Fallback when UI hooks are missing');
+    expect(html).toContain('DOM UI Clues');
+  });
+
   it('renders live dashboard monitoring and stop/report controls', () => {
     const html = renderToStaticMarkup(<LiveSessionPage />);
 
@@ -168,6 +201,12 @@ describe('renderer workflow smoke tests', () => {
     expect(html).toContain('Stop selected bot');
     expect(html).toContain('Open logs');
     expect(html).toContain('Open reports');
+    expect(html).toContain('Current Bot Goal');
+    expect(html).toContain('Current Action');
+    expect(html).toContain('Action Reason');
+    expect(html).toContain('Action Quality');
+    expect(html).toContain('Last Result');
+    expect(html).toContain('Next Likely Action');
   });
 
   it('renders the issue viewer with GitHub export preview controls', () => {
@@ -191,6 +230,19 @@ describe('renderer workflow smoke tests', () => {
     expect(html).toContain('No reports yet');
   });
 
+  it('renders grouped logs with session selection and noise controls', () => {
+    const html = renderToStaticMarkup(<LogsPage />);
+
+    expect(html).toContain('Logs');
+    expect(html).toContain('Session');
+    expect(html).toContain('Overview');
+    expect(html).toContain('Bot Actions');
+    expect(html).toContain('Console/Page Errors');
+    expect(html).toContain('Only important logs');
+    expect(html).toContain('Hide noisy state snapshots');
+    expect(html).toContain('Export visible logs');
+  });
+
   it('renders gated advanced intelligence settings with hover-help labels', () => {
     const html = renderToStaticMarkup(<SettingsPage />);
 
@@ -199,5 +251,20 @@ describe('renderer workflow smoke tests', () => {
     expect(html).toContain('Vision Model');
     expect(html).toContain('Bug Deduplication');
     expect(html).toContain('Help for Vision Model');
+  });
+
+  it('renders first-test help for each adapter type with hover-help labels', () => {
+    const html = renderToStaticMarkup(<HelpFirstTestPage />);
+
+    expect(html).toContain('Help / First Test');
+    expect(html).toContain('Quick Start');
+    expect(html).toContain('Browser Game First Test');
+    expect(html).toContain('Desktop Game First Test');
+    expect(html).toContain('Unity First Test');
+    expect(html).toContain('Godot First Test');
+    expect(html).toContain('Unreal First Test');
+    expect(html).toContain('Custom Engine First Test');
+    expect(html).toContain('Safe First Settings');
+    expect(html).toContain('Help for Game Profile');
   });
 });

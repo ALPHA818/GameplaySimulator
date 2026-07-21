@@ -3,6 +3,13 @@ import { z } from 'zod';
 import type { SimulationService } from '../services/simulationService';
 
 const SessionIdSchema = z.string().min(1);
+const SessionCleanupOptionsSchema = z.object({
+  sessionId: SessionIdSchema,
+  deleteRawStateLogs: z.boolean().default(false),
+  keepScreenshots: z.boolean().default(true),
+  keepSummaries: z.boolean().default(true),
+  archiveSessionBundle: z.boolean().default(false)
+});
 
 export function registerSimulationIpc(service: SimulationService): void {
   ipcMain.handle('simulation:createSession', (_event, payload: unknown) => service.createSession(payload));
@@ -62,6 +69,18 @@ export function registerSimulationIpc(service: SimulationService): void {
   );
   ipcMain.handle('simulation:openLogs', (_event, sessionId: unknown) =>
     service.openLogs(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:openSessionFolder', (_event, sessionId: unknown) =>
+    service.openSessionFolder(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:openIssueFolder', (_event, sessionId: unknown) =>
+    service.openIssueFolder(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:openScreenshotsFolder', (_event, sessionId: unknown) =>
+    service.openScreenshotsFolder(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:cleanupSessionBundle', (_event, payload: unknown) =>
+    service.cleanupSessionBundle(SessionCleanupOptionsSchema.parse(payload))
   );
   ipcMain.handle('simulation:compareSessions', (_event, oldSessionId: unknown, newSessionId: unknown) =>
     service.compareSessions(SessionIdSchema.parse(oldSessionId), SessionIdSchema.parse(newSessionId))

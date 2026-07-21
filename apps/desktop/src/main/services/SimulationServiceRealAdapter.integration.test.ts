@@ -96,6 +96,7 @@ function instrumentedProfile(endpoint: string): GameProfile {
     testingTargets: [],
     progressSignals: [],
     failureSignals: [],
+    uiFlows: [],
     knownContent: knownContent()
   };
 }

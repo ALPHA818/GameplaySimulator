@@ -4,6 +4,7 @@ export * from './base/BaseGameAdapter';
 export * from './base/EngineWrapperAdapter';
 export * from './base/GameAdapter';
 export * from './browser/BrowserAdapter';
+export * from './browser/BrowserUIAwareness';
 export * from './custom/CustomAdapter';
 export * from './desktop/DesktopAdapter';
 export * from './desktop/DesktopWindowAdapter';

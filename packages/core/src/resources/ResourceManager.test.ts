@@ -33,6 +33,7 @@ function request(overrides: Partial<RuntimeViabilityRequest['runConfig']> = {}):
       testingTargets: [],
       progressSignals: [],
       failureSignals: [],
+      uiFlows: [],
       knownContent: {
         scenes: [],
         levels: [],

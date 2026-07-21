@@ -1,4 +1,4 @@
-import { Activity, Bot, FileText, Gamepad2, LayoutDashboard, ListFilter, Play, Settings, Siren } from 'lucide-react';
+import { Activity, Bot, CircleHelp, FileText, Gamepad2, LayoutDashboard, ListFilter, Play, Settings, Siren } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { PageId } from '../routes';
 import { useConfigStore } from '../store/configStore';
@@ -16,6 +16,7 @@ const navigation: Array<{ page: PageId; label: string; icon: typeof LayoutDashbo
   { page: 'issues', label: 'Issues', icon: Siren },
   { page: 'logs', label: 'Logs', icon: ListFilter },
   { page: 'reports', label: 'Reports', icon: FileText },
+  { page: 'helpFirstTest', label: 'Help / First Test', icon: CircleHelp },
   { page: 'settings', label: 'Settings', icon: Settings }
 ];
 
@@ -26,7 +27,12 @@ export function AppShell({ children }: AppShellProps) {
   return (
     <div className="app-layout">
       <aside className="sidebar">
-        <div className="sidebar__brand">GameplaySimulator</div>
+        <div className="sidebar__brand" aria-label="GameplaySimulator">
+          <span className="sidebar__brand-full">GameplaySimulator</span>
+          <span className="sidebar__brand-short" aria-hidden="true">
+            GS
+          </span>
+        </div>
         <nav className="sidebar__nav" aria-label="Main">
           {navigation.map((item) => {
             const Icon = item.icon;
@@ -37,6 +43,8 @@ export function AppShell({ children }: AppShellProps) {
                 key={item.page}
                 className="nav-button"
                 data-active={isActive}
+                aria-label={item.label}
+                title={item.label}
                 type="button"
                 onClick={() => navigate(item.page)}
               >

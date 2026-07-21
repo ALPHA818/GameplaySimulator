@@ -238,6 +238,10 @@ function capacityPerInstance(
   return Math.max(1, runConfig.perGameInstanceBotLimit);
 }
 
+function isStartupFlowPlan(plan: BotLaunchPlan): boolean {
+  return plan.botId.startsWith('startup-flow-') && plan.profileId === 'ui-journey-bot';
+}
+
 function estimateInstanceCount(
   botCount: number,
   runConfig: SimulationRunConfig,
@@ -568,8 +572,10 @@ export function planGameInstances(input: GameInstancePlanningInput): GameInstanc
   const adapterType = input.adapterType ?? input.runConfig.adapterType;
   const concurrencyModel = resolveConcurrencyModel(input.runConfig, capabilities);
   const sortedLaunchPlans = [...input.launchPlans].sort((a, b) => a.launchIndex - b.launchIndex);
+  const startupLaunchPlans = sortedLaunchPlans.filter(isStartupFlowPlan);
+  const normalLaunchPlans = sortedLaunchPlans.filter((plan) => !isStartupFlowPlan(plan));
   const instanceCount = estimateInstanceCount(
-    sortedLaunchPlans.length,
+    normalLaunchPlans.length > 0 ? normalLaunchPlans.length : sortedLaunchPlans.length,
     input.runConfig,
     capabilities,
     concurrencyModel
@@ -624,7 +630,18 @@ export function planGameInstances(input: GameInstancePlanningInput): GameInstanc
   const activeCapacity = instanceCount * instanceCapacity;
   const queuedBotIds: string[] = [];
 
-  sortedLaunchPlans.forEach((bot, index) => {
+  for (const bot of startupLaunchPlans) {
+    const instance = instances[0];
+
+    if (!instance) {
+      queuedBotIds.push(bot.botId);
+      continue;
+    }
+
+    instance.assignedBots.push(bot);
+  }
+
+  normalLaunchPlans.forEach((bot, index) => {
     if (index >= activeCapacity || instances.length === 0) {
       queuedBotIds.push(bot.botId);
       return;

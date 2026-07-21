@@ -1,5 +1,6 @@
 import type {
   AdapterType,
+  BrowserDomScanMode,
   ControlBinding,
   GameProfile,
   InstrumentationTransportType,
@@ -31,6 +32,7 @@ export interface AdapterProfileOptionsResult {
   instrumentationTransport: InstrumentationTransportType;
   browserUrl?: string;
   browserName?: string;
+  browserDomScanMode: BrowserDomScanMode;
   screenshotDirectory: string;
 }
 
@@ -217,6 +219,7 @@ export function createAdapterOptionsFromGameProfile(
   const instrumentationTransport = gameProfile.adapter.instrumentationTransport ?? 'local-http';
   const browserUrl = adapterType === 'browser' ? trimmed(gameProfile.launch.url) : undefined;
   const browserName = trimmed(gameProfile.adapter.browserName);
+  const browserDomScanMode = gameProfile.adapter.browserDomScanMode ?? 'fallback';
   const runtimeMode = runtimeModeFor(adapterType, instrumentationEndpoint);
   const usesDesktopFallback = runtimeMode === 'desktop-window' || runtimeMode === 'engine-desktop-fallback';
   const capabilities = adapterCapabilitiesFromProfile(gameProfile, adapterType, usesDesktopFallback);
@@ -240,6 +243,7 @@ export function createAdapterOptionsFromGameProfile(
     browser: {
       targetUrl: browserUrl,
       browserName,
+      domScanMode: browserDomScanMode,
       controlBindings,
       screenshotDirectory,
       capabilities
@@ -281,6 +285,7 @@ export function createAdapterOptionsFromGameProfile(
     instrumentationTransport,
     browserUrl,
     browserName,
+    browserDomScanMode,
     screenshotDirectory
   };
 }

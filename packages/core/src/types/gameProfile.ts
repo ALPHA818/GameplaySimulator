@@ -9,6 +9,8 @@ export const InstrumentationTransportSchema = z.enum([
   'plugin-bridge'
 ]);
 
+export const BrowserDomScanModeSchema = z.enum(['off', 'fallback', 'always']);
+
 export const SaveIsolationModeSchema = z.enum([
   'none',
   'copy-directory',
@@ -43,6 +45,36 @@ export const SignalDefinitionSchema = z.object({
   severity: SeveritySchema.optional(),
   pattern: z.string().optional(),
   metadata: z.record(z.string(), z.unknown()).default({})
+});
+
+export const UIFlowMouseTargetSchema = z.object({
+  selector: z.string().min(1).optional(),
+  label: z.string().min(1).optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
+  description: z.string().optional()
+});
+
+export const UIFlowStepSchema = z.object({
+  stepId: z.string().min(1).optional(),
+  expectedScreen: z.string().min(1).optional(),
+  actionType: z.string().min(1),
+  targetLabel: z.string().min(1).optional(),
+  keyBinding: z.string().min(1).optional(),
+  mouseTarget: z.union([z.string().min(1), UIFlowMouseTargetSchema]).optional(),
+  waitAfterMs: z.number().int().min(0).optional(),
+  successCondition: z.string().min(1).optional(),
+  fallbackAction: z.string().min(1).optional(),
+  maxRetries: z.number().int().min(0).optional()
+});
+
+export const UIFlowSchema = z.object({
+  flowId: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().optional(),
+  startState: z.string().min(1).optional(),
+  endState: z.string().min(1).optional(),
+  steps: z.array(UIFlowStepSchema).default([])
 });
 
 export const KnownContentSchema = z.object({
@@ -125,21 +157,27 @@ export const GameProfileSchema = z.object({
     supportsSaveIsolation: z.boolean(),
     instrumentationEndpoint: z.string().min(1).optional(),
     instrumentationTransport: InstrumentationTransportSchema.optional(),
-    browserName: z.string().min(1).optional()
+    browserName: z.string().min(1).optional(),
+    browserDomScanMode: BrowserDomScanModeSchema.optional()
   }),
   controls: z.array(ControlBindingSchema).default([]),
   testingTargets: z.array(TestingTargetSchema).default([]),
   progressSignals: z.array(SignalDefinitionSchema).default([]),
   failureSignals: z.array(SignalDefinitionSchema).default([]),
+  uiFlows: z.array(UIFlowSchema).default([]),
   saveIsolation: SaveIsolationConfigSchema.optional(),
   knownContent: KnownContentSchema.default(emptyKnownContent)
 });
 
 export type ControlBinding = z.infer<typeof ControlBindingSchema>;
 export type InstrumentationTransportType = z.infer<typeof InstrumentationTransportSchema>;
+export type BrowserDomScanMode = z.infer<typeof BrowserDomScanModeSchema>;
 export type SaveIsolationMode = z.infer<typeof SaveIsolationModeSchema>;
 export type SaveIsolationConfig = z.infer<typeof SaveIsolationConfigSchema>;
 export type TestingTarget = z.infer<typeof TestingTargetSchema>;
 export type SignalDefinition = z.infer<typeof SignalDefinitionSchema>;
+export type UIFlowMouseTarget = z.infer<typeof UIFlowMouseTargetSchema>;
+export type UIFlowStep = z.infer<typeof UIFlowStepSchema>;
+export type UIFlow = z.infer<typeof UIFlowSchema>;
 export type KnownContent = z.infer<typeof KnownContentSchema>;
 export type GameProfile = z.infer<typeof GameProfileSchema>;

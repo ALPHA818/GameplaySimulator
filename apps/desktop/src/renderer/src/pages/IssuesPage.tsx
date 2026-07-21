@@ -145,6 +145,7 @@ export function IssuesPage() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const activeIssues = useSessionStore((state) => state.issues);
   const preferredReviewSessionId = useSessionStore((state) => state.reviewSessionId);
+  const preferredReviewIssueId = useSessionStore((state) => state.reviewIssueId);
   const setPreferredReviewSessionId = useSessionStore((state) => state.setReviewSessionId);
   const runConfigs = useConfigStore((state) => state.runConfigs);
   const reviewedIssueIds = useSessionStore((state) => state.reviewedIssueIds);
@@ -156,7 +157,7 @@ export function IssuesPage() {
   const [category, setCategory] = useState('all');
   const [scene, setScene] = useState('all');
   const [query, setQuery] = useState('');
-  const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
+  const [selectedIssueId, setSelectedIssueId] = useState<string | null>(preferredReviewIssueId);
   const [copyState, setCopyState] = useState('Copy');
   const [exportSessionId, setExportSessionId] = useState('');
   const [exportIssueOptions, setExportIssueOptions] = useState<DetectedIssue[]>([]);
@@ -283,6 +284,12 @@ export function IssuesPage() {
       setExportSessionId(preferredReviewSessionId);
     }
   }, [preferredReviewSessionId]);
+
+  useEffect(() => {
+    if (preferredReviewIssueId) {
+      setSelectedIssueId(preferredReviewIssueId);
+    }
+  }, [preferredReviewIssueId]);
 
   useEffect(() => {
     let cancelled = false;

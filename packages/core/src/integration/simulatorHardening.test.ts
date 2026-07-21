@@ -39,6 +39,7 @@ const browserGameProfile: GameProfile = {
   testingTargets: [],
   progressSignals: [],
   failureSignals: [],
+  uiFlows: [],
   knownContent: {
     scenes: ['Start Area'],
     levels: ['Level 1'],

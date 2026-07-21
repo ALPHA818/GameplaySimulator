@@ -42,12 +42,57 @@ const seededGameProfiles: GameProfile[] = [
       supportsDirectActions: false,
       supportsScreenshots: true,
       supportsVideo: false,
-      supportsSaveIsolation: true
+      supportsSaveIsolation: true,
+      browserDomScanMode: 'fallback'
     },
     controls: [],
     testingTargets: [],
     progressSignals: [],
     failureSignals: [],
+    uiFlows: [
+      {
+        flowId: 'create-world',
+        name: 'Create World',
+        description: 'Navigate from the browser game menu into a playable world.',
+        startState: 'main-menu',
+        endState: 'world-loaded',
+        steps: [
+          {
+            stepId: 'choose-play-game',
+            expectedScreen: 'main-menu',
+            actionType: 'choose-play-game',
+            targetLabel: 'Play Game',
+            keyBinding: 'Enter',
+            waitAfterMs: 500,
+            successCondition: 'Play menu is visible',
+            fallbackAction: 'wait',
+            maxRetries: 2
+          },
+          {
+            stepId: 'choose-create-game',
+            expectedScreen: 'play-menu',
+            actionType: 'choose-create-game',
+            targetLabel: 'Create Game',
+            keyBinding: 'Enter',
+            waitAfterMs: 500,
+            successCondition: 'Game settings screen is visible',
+            fallbackAction: 'wait',
+            maxRetries: 2
+          },
+          {
+            stepId: 'start-world',
+            expectedScreen: 'game-settings',
+            actionType: 'start-world',
+            targetLabel: 'Start World',
+            keyBinding: 'Enter',
+            waitAfterMs: 1500,
+            successCondition: 'World loaded',
+            fallbackAction: 'wait',
+            maxRetries: 3
+          }
+        ]
+      }
+    ],
     saveIsolation: {
       mode: 'temp-directory',
       workingSaveRoot: 'runs/sample-browser-game/saves',

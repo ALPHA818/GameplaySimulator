@@ -3,6 +3,38 @@ import { AdapterTypeSchema, LaunchConfigSchema } from './adapter';
 import { BotStatusSchema } from './bot';
 import { SaveIsolationModeSchema } from './gameProfile';
 
+export const BrowserVisibleButtonSchema = z.object({
+  label: z.string().min(1),
+  selector: z.string().min(1).optional(),
+  role: z.string().min(1).optional(),
+  disabled: z.boolean().default(false),
+  x: z.number().optional(),
+  y: z.number().optional()
+});
+
+export const BrowserDomSnapshotSchema = z.object({
+  headings: z.array(z.string().min(1)).default([]),
+  dialogs: z.array(z.string().min(1)).default([]),
+  visibleText: z.array(z.string().min(1)).default([]),
+  hasCanvas: z.boolean().default(false),
+  canvasCount: z.number().int().min(0).default(0),
+  scannedAt: z.string().min(1)
+});
+
+export const BrowserUIStateSchema = z.object({
+  currentScreen: z.string().min(1).optional(),
+  openMenus: z.array(z.string().min(1)).default([]),
+  focusedElement: z.string().min(1).optional(),
+  visibleButtons: z.array(BrowserVisibleButtonSchema).default([]),
+  modalStack: z.array(z.string().min(1)).default([]),
+  canStartGame: z.boolean().default(false),
+  isInGameplay: z.boolean().default(false),
+  isPaused: z.boolean().default(false),
+  isLoading: z.boolean().default(false),
+  source: z.enum(['hook', 'dom', 'merged']).default('hook'),
+  dom: BrowserDomSnapshotSchema.optional()
+});
+
 export const GameStateSnapshotSchema = z.object({
   snapshotId: z.string().min(1),
   sessionId: z.string().min(1),
@@ -12,6 +44,7 @@ export const GameStateSnapshotSchema = z.object({
   capturedAt: z.string().min(1),
   tick: z.number().int().min(0).optional(),
   scene: z.string().optional(),
+  uiState: BrowserUIStateSchema.optional(),
   state: z.record(z.string(), z.unknown()).default({}),
   metrics: z.record(z.string(), z.number()).default({}),
   screenshotPath: z.string().optional()
@@ -40,6 +73,16 @@ export const ActionResultSchema = z.object({
   stateSnapshotId: z.string().min(1).optional(),
   issueIds: z.array(z.string().min(1)).default([])
 });
+
+export const ActionQualitySchema = z.enum([
+  'planned',
+  'exploratory',
+  'recovery',
+  'repeated',
+  'risky',
+  'random',
+  'startup-flow'
+]);
 
 export const SaveIsolationRuntimeInfoSchema = z.object({
   mode: SaveIsolationModeSchema,
@@ -151,13 +194,23 @@ export const RuntimeBotSnapshotSchema = z.object({
   status: BotStatusSchema,
   gameInstanceId: z.string().min(1).optional(),
   currentGoalId: z.string().min(1).optional(),
+  currentGoal: z.string().min(1).optional(),
   lastActionId: z.string().min(1).optional(),
+  currentAction: z.string().min(1).optional(),
+  actionReason: z.string().min(1).optional(),
+  actionQuality: ActionQualitySchema.optional(),
+  lastResult: z.string().min(1).optional(),
+  nextLikelyAction: z.string().min(1).optional(),
   message: z.string().optional()
 });
 
 export type GameStateSnapshot = z.infer<typeof GameStateSnapshotSchema>;
+export type BrowserVisibleButton = z.infer<typeof BrowserVisibleButtonSchema>;
+export type BrowserDomSnapshot = z.infer<typeof BrowserDomSnapshotSchema>;
+export type BrowserUIState = z.infer<typeof BrowserUIStateSchema>;
 export type GameAction = z.infer<typeof GameActionSchema>;
 export type ActionResult = z.infer<typeof ActionResultSchema>;
+export type ActionQuality = z.infer<typeof ActionQualitySchema>;
 export type SaveIsolationRuntimeInfo = z.infer<typeof SaveIsolationRuntimeInfoSchema>;
 export type GameInstanceConfig = z.infer<typeof GameInstanceConfigSchema>;
 export type ResourceEstimate = z.infer<typeof ResourceEstimateSchema>;

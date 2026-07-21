@@ -1,5 +1,13 @@
 import type { LogEntry } from '@core/logging/LogEntry';
-import type { ActionResult, ControlBinding, GameAction, GameInstanceConfig, GameStateSnapshot } from '@core/types';
+import type {
+  ActionResult,
+  BrowserDomScanMode,
+  BrowserUIState,
+  ControlBinding,
+  GameAction,
+  GameInstanceConfig,
+  GameStateSnapshot
+} from '@core/types';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { chromium, firefox, webkit } from 'playwright';
@@ -11,6 +19,15 @@ import type {
   GameAdapterInstance,
   ScreenshotCapture
 } from '../base/GameAdapter';
+import {
+  clickBrowserDomTarget,
+  domActionsFromUIState,
+  domTargetFromActionPayload,
+  hasBrowserUIClues,
+  mergeBrowserUIStates,
+  normalizeBrowserUIState,
+  scanBrowserDom
+} from './BrowserUIAwareness';
 
 type BrowserActionStatus = ActionResult['status'];
 type BrowserKind = 'chromium' | 'firefox' | 'webkit';
@@ -93,6 +110,7 @@ interface BrowserRuntime {
   };
   openedAt: string;
   lastHeartbeatAt?: string;
+  lastUIState?: BrowserUIState;
 }
 
 export interface BrowserAdapterOptions {
@@ -106,6 +124,7 @@ export interface BrowserAdapterOptions {
   contextOptions?: Record<string, unknown>;
   launchOptions?: Record<string, unknown>;
   browserLauncher?: BrowserLauncherLike;
+  domScanMode?: BrowserDomScanMode;
   capabilities?: Partial<AdapterCapabilities>;
 }
 
@@ -287,6 +306,7 @@ function actionResultFromHook(value: unknown, action: GameAction, botId: string,
 export class BrowserAdapter extends BaseGameAdapter {
   readonly browserName?: string;
   readonly targetUrl?: string;
+  readonly domScanMode: BrowserDomScanMode;
   private readonly browserKind: BrowserKind;
   private readonly browserLauncher: BrowserLauncherLike;
   private readonly controlBindings: ControlBinding[];
@@ -319,6 +339,7 @@ export class BrowserAdapter extends BaseGameAdapter {
 
     this.browserName = options.browserName;
     this.targetUrl = options.targetUrl;
+    this.domScanMode = options.domScanMode ?? 'fallback';
     this.browserKind = normalizeBrowserKind(options.browserName);
     this.browserLauncher = options.browserLauncher ?? defaultLauncher(this.browserKind);
     this.controlBindings = options.controlBindings ?? [];
@@ -368,7 +389,8 @@ export class BrowserAdapter extends BaseGameAdapter {
         browserSpecific: true,
         browserType: this.browserKind,
         targetUrl,
-        contextPerInstance: true
+        contextPerInstance: true,
+        domScanMode: this.domScanMode
       }
     };
 
@@ -418,9 +440,10 @@ export class BrowserAdapter extends BaseGameAdapter {
       return instrumentedState;
     }
 
-    const [url, title] = await Promise.all([
+    const [url, title, uiState] = await Promise.all([
       Promise.resolve(runtime.page.url()),
-      runtime.page.title().catch(() => '')
+      runtime.page.title().catch(() => ''),
+      this.readBrowserUIState(runtime, undefined, instanceId, botId).catch(() => null)
     ]);
 
     return {
@@ -430,13 +453,16 @@ export class BrowserAdapter extends BaseGameAdapter {
       gameInstanceId: instanceId,
       botId,
       capturedAt,
-      scene: title || url,
+      scene: (uiState?.currentScreen ?? title) || url,
+      uiState: uiState ?? undefined,
       state: {
         adapterId: this.id,
         adapterType: this.adapterType,
         browserType: this.browserKind,
         url,
         title,
+        uiState: uiState ?? undefined,
+        domScanMode: this.domScanMode,
         pageStatus: runtime.closed || runtime.page.isClosed() ? 'closed' : runtime.crashed ? 'crashed' : 'open',
         consoleErrors: runtime.consoleLogs.filter((log) => log.type === 'error'),
         consoleWarnings: runtime.consoleLogs.filter((log) => log.type === 'warning' || log.type === 'warn'),
@@ -458,16 +484,28 @@ export class BrowserAdapter extends BaseGameAdapter {
       return instrumentedActions;
     }
 
-    if (this.controlBindings.length > 0) {
-      return this.controlBindings.map((binding) => ({
-        actionType: binding.action ?? binding.controlId,
-        label: binding.label,
-        description: `Mapped to browser ${binding.inputType} control ${binding.binding ?? binding.controlId}.`,
-        requiresInputSimulation: true,
-        requiresDirectAction: false,
-        requiresStateRead: false,
-        payloadSchema: binding.metadata
-      }));
+    const mappedActions: AvailableGameAction[] = this.controlBindings.map((binding) => ({
+      actionType: binding.action ?? binding.controlId,
+      label: binding.label,
+      description: `Mapped to browser ${binding.inputType} control ${binding.binding ?? binding.controlId}.`,
+      requiresInputSimulation: true,
+      requiresDirectAction: false,
+      requiresStateRead: false,
+      payloadSchema: binding.metadata
+    }));
+    const uiState = runtime.lastUIState ?? await this.readBrowserUIState(
+      runtime,
+      undefined,
+      instanceId,
+      botId
+    ).catch(() => null);
+    const domActions = domActionsFromUIState(uiState);
+    const browserActions = [...domActions, ...mappedActions].filter(
+      (action, index, actions) => actions.findIndex((candidate) => candidate.actionType === action.actionType) === index
+    );
+
+    if (browserActions.length > 0) {
+      return browserActions;
     }
 
     return [
@@ -536,6 +574,20 @@ export class BrowserAdapter extends BaseGameAdapter {
       if (actionType === 'reload') {
         await runtime.page.reload({ waitUntil: 'domcontentloaded' });
         return this.recordAction(runtime, action, botId, 'succeeded', startedAt, 'Reloaded browser page.');
+      }
+
+      const domTarget = domTargetFromActionPayload(action.payload);
+
+      if (domTarget) {
+        const domResult = await runtime.page.evaluate(clickBrowserDomTarget, domTarget);
+
+        if (domResult.succeeded) {
+          return this.recordAction(runtime, action, botId, 'succeeded', startedAt, domResult.message);
+        }
+
+        if (!binding?.binding) {
+          return this.recordAction(runtime, action, botId, 'failed', startedAt, domResult.message);
+        }
       }
 
       if (binding?.binding) {
@@ -648,6 +700,8 @@ export class BrowserAdapter extends BaseGameAdapter {
         lastAction: runtime.lastAction,
         lastHeartbeatAt: runtime.lastHeartbeatAt,
         screenshotPath: runtime.lastScreenshotPath,
+        domScanMode: this.domScanMode,
+        uiState: runtime.lastUIState,
         browserSpecific: true
       }
     };
@@ -688,6 +742,44 @@ export class BrowserAdapter extends BaseGameAdapter {
     return runtime;
   }
 
+  private async readBrowserUIState(
+    runtime: BrowserRuntime,
+    embeddedUIState?: unknown,
+    instanceId?: string,
+    botId?: string
+  ): Promise<BrowserUIState | null> {
+    const embeddedState = normalizeBrowserUIState(embeddedUIState, 'hook');
+    const hookValue = await runtime.page.evaluate(({ currentInstanceId, currentBotId }) => {
+      const globalUIState = (window as unknown as {
+        __GAMEPLAY_SIM_UI_STATE__?: unknown | ((context: { instanceId?: string; botId?: string }) => unknown);
+      }).__GAMEPLAY_SIM_UI_STATE__;
+
+      if (typeof globalUIState === 'function') {
+        return globalUIState({ instanceId: currentInstanceId, botId: currentBotId });
+      }
+
+      return globalUIState ?? null;
+    }, { currentInstanceId: instanceId, currentBotId: botId }).catch(() => null);
+    const separateHookState = normalizeBrowserUIState(hookValue, 'hook');
+    const hookState = mergeBrowserUIStates(separateHookState, embeddedState, 'hook');
+    const shouldScanDom =
+      this.domScanMode === 'always' ||
+      (this.domScanMode === 'fallback' && !hasBrowserUIClues(hookState));
+    const domValue = shouldScanDom
+      ? await runtime.page.evaluate(scanBrowserDom).catch(() => null)
+      : null;
+    const domState = normalizeBrowserUIState(domValue, 'dom');
+    const mergedState = hookState && domState
+      ? mergeBrowserUIStates(hookState, domState, 'merged')
+      : hookState ?? domState;
+
+    if (mergedState) {
+      runtime.lastUIState = mergedState;
+    }
+
+    return mergedState;
+  }
+
   private async readInstrumentedState(
     runtime: BrowserRuntime,
     instanceId: string,
@@ -712,6 +804,12 @@ export class BrowserAdapter extends BaseGameAdapter {
 
     const tracked = this.instances.get(instanceId);
     const rawState = isRecord(value.state) ? value.state : {};
+    const uiState = await this.readBrowserUIState(
+      runtime,
+      value.uiState ?? rawState.uiState,
+      instanceId,
+      botId
+    );
     const performance = isRecord(value.performance) ? value.performance : undefined;
     const metrics = {
       ...numericMetricsFrom(value.metrics),
@@ -740,11 +838,12 @@ export class BrowserAdapter extends BaseGameAdapter {
       botId,
       capturedAt,
       tick,
-      scene: typeof value.scene === 'string' ? value.scene : undefined,
+      scene: typeof value.scene === 'string' ? value.scene : uiState?.currentScreen,
+      uiState: uiState ?? undefined,
       state: {
         ...rawState,
         playerPosition: value.playerPosition,
-        uiState: value.uiState,
+        uiState: uiState ?? value.uiState,
         inventory: value.inventory,
         quests: value.quests,
         performance,

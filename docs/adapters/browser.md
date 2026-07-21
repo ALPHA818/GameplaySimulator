@@ -6,6 +6,8 @@
 
 Use `BrowserAdapter` for games that run in a normal browser or local web runtime. For best results, add instrumentation to the game and expose structured state/actions through a local endpoint, `window` bridge, dev server route, or WebSocket.
 
+For a ready-to-adapt example of all four browser hooks, see [Browser Instrumentation Hooks](browser-instrumentation.md).
+
 Recommended browser implementation:
 
 - Expose state from the game runtime rather than scraping DOM or canvas pixels.
@@ -28,7 +30,8 @@ With instrumentation:
 With browser-only fallback:
 
 - Page URL/title.
-- DOM text for DOM-based games.
+- Visible buttons, headings, dialogs, menus, focused element, text, and canvas presence through optional DOM scan mode.
+- Best-effort clues for main menu, loading, pause, and gameplay screens.
 - Screenshots.
 - Console/log events if connected.
 - Limited canvas/WebGL awareness.
@@ -139,6 +142,7 @@ With browser/input fallback:
 - Run the game locally with a stable dev server URL.
 - Expose instrumentation only for localhost or authenticated internal QA sessions.
 - Add deterministic fixtures and reset endpoints for repeatable tests.
+- Expose `window.__GAMEPLAY_SIM_UI_STATE__` for reliable layered menu journeys.
+- Use `DOM Scan Mode: Fallback` until the UI hook is complete.
 - Emit JavaScript errors and rejected promises.
 - Provide isolated storage profiles per bot or game instance.
-

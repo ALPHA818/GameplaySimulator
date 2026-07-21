@@ -1,5 +1,6 @@
 {
   "sessionId": "sample-smoke-test",
+  "sessionLabel": "Smoke Test",
   "gameProfilePath": "examples/game-profiles/sample-game-profile.json",
   "adapterType": "browser",
   "runMode": "parallel",
@@ -9,6 +10,9 @@
   "saveScreenshots": true,
   "saveVideo": false,
   "screenshotEveryNActions": 25,
+  "startupFlowId": "create-world",
+  "continueOnStartupFlowFailure": false,
+  "startupFlowTimeoutMs": 60000,
   "saveActionTimeline": true,
   "saveStateSnapshots": true,
   "botPools": [

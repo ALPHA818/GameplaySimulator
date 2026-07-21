@@ -41,8 +41,12 @@ class FakePage {
   currentUrl = '';
   titleText = 'Browser Test Game';
   state: Record<string, unknown> | null = null;
+  uiState: Record<string, unknown> | null = null;
+  domState: Record<string, unknown> | null = null;
   actions: Array<Record<string, unknown>> | null = null;
   performedActions: string[] = [];
+  clickedDomTargets: string[] = [];
+  directHookEnabled = true;
 
   async goto(url: string) {
     this.currentUrl = url;
@@ -64,12 +68,29 @@ class FakePage {
       return this.state as T;
     }
 
+    if (source.includes('__GAMEPLAY_SIM_UI_STATE__')) {
+      return this.uiState as T;
+    }
+
+    if (source.includes('__GAMEPLAY_SIM_DOM_SCAN__')) {
+      return this.domState as T;
+    }
+
+    if (source.includes('__GAMEPLAY_SIM_DOM_CLICK__')) {
+      const target = arg as { label?: string };
+      this.clickedDomTargets.push(target.label ?? 'unknown');
+      return {
+        succeeded: Boolean(target.label),
+        message: target.label ? `Clicked visible button "${target.label}".` : 'No target.'
+      } as T;
+    }
+
     if (source.includes('__GAMEPLAY_SIM_ACTIONS__')) {
       return this.actions as T;
     }
 
     if (source.includes('__GAMEPLAY_SIM_PERFORM_ACTION__') && source.includes('typeof')) {
-      return true as T;
+      return this.directHookEnabled as T;
     }
 
     if (source.includes('__GAMEPLAY_SIM_PERFORM_ACTION__')) {
@@ -267,6 +288,85 @@ describe('BrowserAdapter', () => {
     expect(actions[0]).toMatchObject({ actionType: 'dash', label: 'Dash' });
     expect(result).toMatchObject({ status: 'succeeded', message: 'Hook handled dash.' });
     expect(launcher.page.performedActions).toContain('dash');
+  });
+
+  it('merges the dedicated UI hook into browser game snapshots', async () => {
+    const launcher = new FakeLauncher();
+    launcher.page.state = {
+      gameId: 'browser-test-game',
+      instanceId: instanceConfig.instanceId,
+      scene: 'Browser Shell',
+      state: { hp: 10 }
+    };
+    launcher.page.uiState = {
+      currentScreen: 'create-world',
+      openMenus: ['world-settings'],
+      focusedElement: 'World Name',
+      visibleButtons: ['Create World', { label: 'Back', selector: '#back' }],
+      modalStack: ['settings-dialog'],
+      canStartGame: true,
+      isInGameplay: false,
+      isPaused: false,
+      isLoading: false
+    };
+    const adapter = new BrowserAdapter({ browserLauncher: launcher, domScanMode: 'fallback' });
+    await adapter.launchInstance(instanceConfig);
+
+    const state = await adapter.getState(instanceConfig.instanceId, 'browser-bot-001');
+
+    expect(state.uiState).toMatchObject({
+      currentScreen: 'create-world',
+      focusedElement: 'World Name',
+      canStartGame: true,
+      source: 'hook'
+    });
+    expect(state.uiState?.visibleButtons.map((button) => button.label)).toEqual(['Create World', 'Back']);
+    expect(state.state.uiState).toEqual(state.uiState);
+  });
+
+  it('uses bounded DOM clues and visible buttons when custom hooks are missing', async () => {
+    const launcher = new FakeLauncher();
+    launcher.page.directHookEnabled = false;
+    launcher.page.domState = {
+      currentScreen: 'main-menu',
+      openMenus: ['Main Menu'],
+      focusedElement: 'Play Game',
+      visibleButtons: [
+        { label: 'Play Game', selector: '#play-game', x: 100, y: 60 },
+        { label: 'Disabled', selector: '#disabled', disabled: true }
+      ],
+      modalStack: [],
+      canStartGame: true,
+      isInGameplay: false,
+      isPaused: false,
+      isLoading: false,
+      dom: {
+        headings: ['Main Menu'],
+        dialogs: [],
+        visibleText: ['Play Game'],
+        hasCanvas: true,
+        canvasCount: 1,
+        scannedAt: '2026-07-21T10:00:00.000Z'
+      }
+    };
+    const adapter = new BrowserAdapter({ browserLauncher: launcher, domScanMode: 'fallback' });
+    await adapter.launchInstance(instanceConfig);
+
+    const state = await adapter.getState(instanceConfig.instanceId, 'browser-bot-001');
+    const available = await adapter.getAvailableActions(instanceConfig.instanceId, 'browser-bot-001');
+    const playAction = available.find((item) => item.label === 'Play Game');
+    const result = await adapter.performAction(
+      instanceConfig.instanceId,
+      'browser-bot-001',
+      action(playAction?.actionType ?? 'click-play-game', { adapterPayload: playAction?.payloadSchema })
+    );
+
+    expect(state.scene).toBe('main-menu');
+    expect(state.uiState).toMatchObject({ source: 'dom', canStartGame: true });
+    expect(available.map((item) => item.label)).toContain('Play Game');
+    expect(available.map((item) => item.label)).not.toContain('Disabled');
+    expect(result).toMatchObject({ status: 'succeeded', message: 'Clicked visible button "Play Game".' });
+    expect(launcher.page.clickedDomTargets).toEqual(['Play Game']);
   });
 
   it('falls back to mapped keyboard/mouse input, reload, wait, screenshot, and clean stop', async () => {

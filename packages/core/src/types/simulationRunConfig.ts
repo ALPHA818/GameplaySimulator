@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AdapterTypeSchema } from './adapter';
 import { BotPoolConfigSchema } from './bot';
+import { SessionLabelSchema } from './sessionBundle';
 
 export const RunModeSchema = z.enum(['parallel', 'sequential', 'hybrid']);
 
@@ -16,6 +17,7 @@ export const ResourceLimitsSchema = z.object({
 export const SimulationRunConfigSchema = z
   .object({
     sessionId: z.string().min(1),
+    sessionLabel: SessionLabelSchema.optional(),
     gameProfilePath: z.string().min(1),
     adapterType: AdapterTypeSchema,
     runMode: RunModeSchema,
@@ -28,6 +30,9 @@ export const SimulationRunConfigSchema = z
     saveActionTimeline: z.boolean(),
     saveStateSnapshots: z.boolean(),
     useMockRuntime: z.boolean().optional(),
+    startupFlowId: z.string().min(1).optional(),
+    continueOnStartupFlowFailure: z.boolean().optional(),
+    startupFlowTimeoutMs: z.number().int().positive().optional(),
     botPools: z.array(BotPoolConfigSchema).min(1),
     globalBotLimit: z.number().int().min(1),
     perGameInstanceBotLimit: z.number().int().min(1),

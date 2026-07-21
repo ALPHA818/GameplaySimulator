@@ -8,16 +8,22 @@ import type {
   GameProfile,
   GameStateSnapshot,
   RuntimeViabilityReport,
+  SessionLabel,
   SimulationRunConfig
 } from '@core/types';
 import {
+  ActionResultSchema,
   DetectedIssueSchema,
+  GameActionSchema,
   GameProfileSchema,
   RuntimeViabilityReportSchema,
+  SessionBundleSchema,
+  SessionLabelSchema,
   SimulationRunConfigSchema
 } from '@core/types';
 import type { LogEntry } from '@core/logging/LogEntry';
 import type { ContentCoverageSummary } from '@core/coverage/CoverageTracker';
+import { actionInsightFromAction, actionResultSummary } from '@core/bot/ActionExplanation';
 import type { SimulationBotStatus, SimulationRuntimeStatus } from './simulationService';
 
 export interface SessionIssueCounts {
@@ -36,9 +42,20 @@ export interface SessionBotCounts {
 
 export interface SessionReportPaths {
   sessionDirectory: string;
+  metadataJson?: string;
+  summaryJson?: string;
   summaryMarkdown?: string;
   htmlReport?: string;
   sessionLog?: string;
+  importantEvents?: string;
+  fullStructuredLogs?: string;
+  issuesJson?: string;
+  issueTimeline?: string;
+  screenshotsDirectory?: string;
+  reportsDirectory?: string;
+  exportsDirectory?: string;
+  replayDirectory?: string;
+  issueDirectory?: string;
   config?: string;
   viabilityReport?: string;
   githubExportDirectory?: string;
@@ -53,6 +70,7 @@ export interface PersistedSessionMetadata {
   engineType?: string;
   adapterType?: string;
   runMode?: string;
+  sessionLabel?: SessionLabel;
   createdAt: string;
   startedAt?: string;
   stoppedAt?: string;
@@ -162,6 +180,11 @@ function issueCounts(issues: DetectedIssue[]): SessionIssueCounts {
     bySeverity: countBy(issues, (issue) => issue.severity),
     byCategory: countBy(issues, (issue) => issue.category)
   };
+}
+
+function safeSessionLabel(value: unknown, fallback: SessionLabel = 'Custom'): SessionLabel {
+  const parsed = SessionLabelSchema.safeParse(value);
+  return parsed.success ? parsed.data : fallback;
 }
 
 function botCounts(runConfig: SimulationRunConfig, botStatuses: SimulationBotStatus[]): SessionBotCounts {
@@ -297,15 +320,31 @@ function cloneIssue(issue: DetectedIssue): DetectedIssue {
 
 function reportPathsFor(sessionDir: string): SessionReportPaths {
   const githubExportDirectory = join(sessionDir, 'github-issues');
+  const exportsDirectory = join(sessionDir, 'exports');
 
   return {
     sessionDirectory: sessionDir,
+    metadataJson: existsSync(join(sessionDir, 'metadata.json')) ? join(sessionDir, 'metadata.json') : undefined,
+    summaryJson: existsSync(join(sessionDir, 'session-summary.json')) ? join(sessionDir, 'session-summary.json') : undefined,
     summaryMarkdown: existsSync(join(sessionDir, 'session-summary.md')) ? join(sessionDir, 'session-summary.md') : undefined,
     htmlReport: existsSync(join(sessionDir, 'session-report.html')) ? join(sessionDir, 'session-report.html') : undefined,
     sessionLog: existsSync(join(sessionDir, 'session-log.jsonl')) ? join(sessionDir, 'session-log.jsonl') : undefined,
+    importantEvents: existsSync(join(sessionDir, 'important-events.jsonl')) ? join(sessionDir, 'important-events.jsonl') : undefined,
+    fullStructuredLogs: existsSync(join(sessionDir, 'full-structured-logs.jsonl')) ? join(sessionDir, 'full-structured-logs.jsonl') : undefined,
+    issuesJson: existsSync(join(sessionDir, 'issues.json')) ? join(sessionDir, 'issues.json') : undefined,
+    issueTimeline: existsSync(join(sessionDir, 'issue-timeline.json')) ? join(sessionDir, 'issue-timeline.json') : undefined,
+    screenshotsDirectory: existsSync(join(sessionDir, 'screenshots')) ? join(sessionDir, 'screenshots') : undefined,
+    reportsDirectory: existsSync(join(sessionDir, 'reports')) ? join(sessionDir, 'reports') : undefined,
+    exportsDirectory: existsSync(exportsDirectory) ? exportsDirectory : undefined,
+    replayDirectory: existsSync(join(sessionDir, 'replay')) ? join(sessionDir, 'replay') : undefined,
+    issueDirectory: existsSync(join(sessionDir, 'issues')) ? join(sessionDir, 'issues') : undefined,
     config: existsSync(join(sessionDir, 'config.json')) ? join(sessionDir, 'config.json') : undefined,
     viabilityReport: existsSync(join(sessionDir, 'viability-report.json')) ? join(sessionDir, 'viability-report.json') : undefined,
-    githubExportDirectory: existsSync(githubExportDirectory) ? githubExportDirectory : undefined
+    githubExportDirectory: existsSync(join(exportsDirectory, 'github-issues'))
+      ? join(exportsDirectory, 'github-issues')
+      : existsSync(githubExportDirectory)
+        ? githubExportDirectory
+        : undefined
   };
 }
 
@@ -349,6 +388,7 @@ export class SessionRepository {
       engineType: input.gameProfile.engine.type,
       adapterType: input.runConfig.adapterType,
       runMode: input.runConfig.runMode,
+      sessionLabel: input.runConfig.sessionLabel ?? 'Custom',
       createdAt: input.createdAt,
       startedAt: input.startedAt,
       stoppedAt: input.stoppedAt,
@@ -453,9 +493,32 @@ export class SessionRepository {
     botStatuses: SimulationBotStatus[],
     sessionEvents: Record<string, unknown>[]
   ): PersistedSessionMetadata {
-    const metadata = readJsonFileIfExists(join(sessionDir, 'session.json'));
+    const metadata = readJsonFileIfExists(join(sessionDir, 'session.json')) ??
+      readJsonFileIfExists(join(sessionDir, 'metadata.json'));
 
     if (isRecord(metadata)) {
+      const bundle = SessionBundleSchema.safeParse(metadata);
+      const bundlePaths = bundle.success ? bundle.data.paths : undefined;
+      const reportPaths = isRecord(metadata.reportPaths)
+        ? metadata.reportPaths as unknown as SessionReportPaths
+        : bundlePaths
+          ? {
+              sessionDirectory: bundlePaths.sessionDirectory,
+              metadataJson: bundlePaths.metadataJson,
+              summaryJson: bundlePaths.summaryJson,
+              summaryMarkdown: bundlePaths.summaryMarkdown,
+              importantEvents: bundlePaths.importantEventsJsonl,
+              fullStructuredLogs: bundlePaths.fullStructuredLogsJsonl,
+              issuesJson: bundlePaths.issuesJson,
+              issueTimeline: bundlePaths.issueTimelineJson,
+              screenshotsDirectory: bundlePaths.screenshotsDirectory,
+              reportsDirectory: bundlePaths.reportsDirectory,
+              exportsDirectory: bundlePaths.exportsDirectory,
+              replayDirectory: bundlePaths.replayDirectory,
+              issueDirectory: existsSync(join(sessionDir, 'issues')) ? join(sessionDir, 'issues') : undefined
+            }
+          : reportPathsFor(sessionDir);
+
       return {
         sessionId: String(metadata.sessionId ?? config.runConfig.sessionId),
         gameName: String(metadata.gameName ?? config.gameProfile.gameName),
@@ -465,6 +528,7 @@ export class SessionRepository {
         engineType: typeof metadata.engineType === 'string' ? metadata.engineType : config.gameProfile.engine.type,
         adapterType: typeof metadata.adapterType === 'string' ? metadata.adapterType : config.runConfig.adapterType,
         runMode: typeof metadata.runMode === 'string' ? metadata.runMode : config.runConfig.runMode,
+        sessionLabel: safeSessionLabel(metadata.sessionLabel ?? metadata.label, config.runConfig.sessionLabel ?? 'Custom'),
         createdAt: String(metadata.createdAt ?? latestTimestamp(sessionEvents, 'session_start') ?? new Date(0).toISOString()),
         startedAt: typeof metadata.startedAt === 'string' ? metadata.startedAt : latestTimestamp(sessionEvents, 'session_start'),
         stoppedAt: typeof metadata.stoppedAt === 'string' ? metadata.stoppedAt : latestTimestamp(sessionEvents, 'session_stop'),
@@ -472,7 +536,7 @@ export class SessionRepository {
         issueCounts: isRecord(metadata.issueCounts) ? metadata.issueCounts as unknown as SessionIssueCounts : issueCounts(issues),
         botCounts: isRecord(metadata.botCounts) ? metadata.botCounts as unknown as SessionBotCounts : botCounts(config.runConfig, botStatuses),
         coveragePercentage: typeof metadata.coveragePercentage === 'number' ? metadata.coveragePercentage : undefined,
-        reportPaths: isRecord(metadata.reportPaths) ? metadata.reportPaths as unknown as SessionReportPaths : reportPathsFor(sessionDir)
+        reportPaths
       };
     }
 
@@ -490,6 +554,7 @@ export class SessionRepository {
       engineType: config.gameProfile.engine.type,
       adapterType: config.runConfig.adapterType,
       runMode: config.runConfig.runMode,
+      sessionLabel: config.runConfig.sessionLabel ?? 'Custom',
       createdAt,
       startedAt,
       stoppedAt,
@@ -502,10 +567,22 @@ export class SessionRepository {
 
   private readIssues(sessionDir: string): DetectedIssue[] {
     const byId = new Map<string, DetectedIssue>();
+    const issuesArtifact = readJsonFileIfExists(join(sessionDir, 'issues.json'));
+
+    if (Array.isArray(issuesArtifact)) {
+      for (const issueValue of issuesArtifact) {
+        const parsed = DetectedIssueSchema.safeParse(issueValue);
+
+        if (parsed.success) {
+          byId.set(issueId(parsed.data), cloneIssue(parsed.data));
+        }
+      }
+    }
+
     const botsDir = join(sessionDir, 'bots');
 
     if (!existsSync(botsDir)) {
-      return [];
+      return [...byId.values()].sort((a, b) => (a.firstSeenAt ?? a.timestamp ?? '').localeCompare(b.firstSeenAt ?? b.timestamp ?? ''));
     }
 
     for (const botDirName of readdirSync(botsDir)) {
@@ -543,6 +620,11 @@ export class SessionRepository {
       const actionEvents = readJsonl(join(botDir, 'actions.jsonl'));
       const stateEvents = readJsonl(join(botDir, 'states.jsonl'));
       const lastAction = actionEvents.at(-1);
+      const parsedAction = GameActionSchema.safeParse(isRecord(lastAction?.action) ? lastAction.action : undefined);
+      const action = parsedAction.success ? parsedAction.data : undefined;
+      const actionInsight = actionInsightFromAction(action);
+      const parsedResult = ActionResultSchema.safeParse(isRecord(lastAction?.result) ? lastAction.result : undefined);
+      const result = parsedResult.success ? parsedResult.data : undefined;
       const lastState = stateEvents.at(-1);
       const snapshot = isRecord(lastState?.snapshot) ? lastState.snapshot : undefined;
       const profileId = report.profileId ?? runConfig.botPools.find((pool) => botId.startsWith(pool.profileId.replace(/-bot$/, '')))?.profileId ?? botId;
@@ -559,7 +641,12 @@ export class SessionRepository {
             ? lastState.gameInstanceId
             : undefined,
         currentGoalId: undefined,
-        lastActionId: isRecord(lastAction?.action) && typeof lastAction.action.actionId === 'string' ? lastAction.action.actionId : undefined,
+        lastActionId: action?.actionId,
+        currentAction: action?.type,
+        actionReason: actionInsight?.explanation,
+        actionQuality: actionInsight?.quality,
+        lastResult: actionResultSummary(result),
+        nextLikelyAction: actionInsight?.nextLikelyAction,
         currentArea:
           report.currentArea ??
           (isRecord(snapshot) && typeof snapshot.scene === 'string' ? snapshot.scene : 'Persisted session'),

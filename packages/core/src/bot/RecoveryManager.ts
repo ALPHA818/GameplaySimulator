@@ -333,11 +333,15 @@ export class RecoveryManager {
       botId: this.options.botId,
       type: actionType,
       payload: {
+        planner: 'recovery',
         recovery: true,
         recoveryAttemptId: input.attemptId,
         recoveryLabel: label,
         recoveryStepType: input.step.type,
         stuckReason: input.stuckReason,
+        reason: input.stuckReason,
+        quality: 'recovery',
+        explanation: `The bot chose ${actionType} as a recovery action because it was stuck: ${input.stuckReason}.`,
         randomDirectionSeed: hashString(salt)
       },
       requestedAt: this.now()

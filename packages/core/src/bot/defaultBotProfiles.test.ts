@@ -9,6 +9,7 @@ const expectedIds = [
   'speedrunner-bot',
   'chaos-monkey-bot',
   'ui-tester-bot',
+  'ui-journey-bot',
   'economy-tester-bot',
   'combat-tester-bot',
   'quest-tester-bot',
@@ -26,7 +27,7 @@ const expectedIds = [
 describe('defaultBotProfiles', () => {
   it('defines the expected reusable bot profiles', () => {
     expect(DEFAULT_BOT_PROFILE_IDS).toEqual(expectedIds);
-    expect(defaultBotProfiles).toHaveLength(18);
+    expect(defaultBotProfiles).toHaveLength(19);
   });
 
   it('defines behavior traits, action preferences, goals, and count ranges for every profile', () => {

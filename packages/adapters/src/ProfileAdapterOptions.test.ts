@@ -74,6 +74,7 @@ const unityProfile: GameProfile = {
   testingTargets: [],
   progressSignals: [],
   failureSignals: [],
+  uiFlows: [],
   knownContent: {
     scenes: [],
     levels: [],
@@ -218,5 +219,36 @@ describe('createAdapterOptionsFromGameProfile', () => {
         expect.objectContaining({ path: 'saveIsolation.sourceSavePath' })
       ])
     );
+  });
+
+  it('passes the browser DOM scan policy from the game profile to BrowserAdapter', () => {
+    const profile: GameProfile = {
+      ...unityProfile,
+      engine: { type: 'browser' },
+      launch: {
+        platform: 'browser',
+        url: 'http://localhost:5173',
+        arguments: []
+      },
+      adapter: {
+        ...unityProfile.adapter,
+        type: 'browser',
+        instrumentationEndpoint: undefined,
+        browserName: 'chromium',
+        browserDomScanMode: 'always'
+      }
+    };
+    const result = createAdapterOptionsFromGameProfile(profile, {
+      ...runConfig,
+      adapterType: 'browser'
+    });
+
+    expect(result.runtimeMode).toBe('browser');
+    expect(result.browserDomScanMode).toBe('always');
+    expect(result.options.browser).toMatchObject({
+      targetUrl: 'http://localhost:5173',
+      browserName: 'chromium',
+      domScanMode: 'always'
+    });
   });
 });

@@ -43,6 +43,7 @@ const gameProfile: GameProfile = {
   testingTargets: [],
   progressSignals: [],
   failureSignals: [],
+  uiFlows: [],
   saveIsolation: {
     mode: 'temp-directory',
     cleanupTempSaves: false,

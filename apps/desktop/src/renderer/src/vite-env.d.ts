@@ -19,6 +19,9 @@ import type {
   GitHubIssueMarkdownExportResult,
   GitHubIssuePostRequest,
   GitHubIssuePostResult,
+  OpenSessionPathResult,
+  SessionCleanupOptions,
+  SessionCleanupResult,
   ContentCoverageSummary,
   DesktopControlTestRequest,
   DesktopControlTestResult,
@@ -73,10 +76,14 @@ declare global {
         getLogs: (sessionId: string) => Promise<LogEntry[]>;
         getCoverage: (sessionId: string) => Promise<ContentCoverageSummary>;
         getStructuredLogs: (sessionId: string) => Promise<StructuredLogReadResult>;
-        openEvidence: (sessionId: string, evidencePath: string) => Promise<OpenEvidenceResult>;
-        openReport: (sessionId: string) => Promise<OpenReportResult>;
-        openLogs: (sessionId: string) => Promise<OpenLogsResult>;
-        compareSessions: (oldSessionId: string, newSessionId: string) => Promise<ComparisonReportResult>;
+	        openEvidence: (sessionId: string, evidencePath: string) => Promise<OpenEvidenceResult>;
+	        openReport: (sessionId: string) => Promise<OpenReportResult>;
+	        openLogs: (sessionId: string) => Promise<OpenLogsResult>;
+	        openSessionFolder: (sessionId: string) => Promise<OpenSessionPathResult>;
+	        openIssueFolder: (sessionId: string) => Promise<OpenSessionPathResult>;
+	        openScreenshotsFolder: (sessionId: string) => Promise<OpenSessionPathResult>;
+	        cleanupSessionBundle: (payload: SessionCleanupOptions) => Promise<SessionCleanupResult>;
+	        compareSessions: (oldSessionId: string, newSessionId: string) => Promise<ComparisonReportResult>;
         previewGitHubIssueExport: (payload: GitHubIssueExportRequest) => Promise<GitHubIssueExportPreviewResult>;
         exportGitHubIssueMarkdown: (payload: GitHubIssueExportRequest) => Promise<GitHubIssueMarkdownExportResult>;
         postGitHubIssues: (payload: GitHubIssuePostRequest) => Promise<GitHubIssuePostResult>;

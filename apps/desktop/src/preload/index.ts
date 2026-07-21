@@ -18,6 +18,9 @@ import type {
   GitHubIssueMarkdownExportResult,
   GitHubIssuePostRequest,
   GitHubIssuePostResult,
+  OpenSessionPathResult,
+  SessionCleanupOptions,
+  SessionCleanupResult,
   ContentCoverageSummary,
   DesktopControlTestRequest,
   DesktopControlTestResult,
@@ -99,6 +102,14 @@ const api = {
       ipcRenderer.invoke('simulation:openReport', sessionId) as Promise<OpenReportResult>,
     openLogs: (sessionId: string) =>
       ipcRenderer.invoke('simulation:openLogs', sessionId) as Promise<OpenLogsResult>,
+    openSessionFolder: (sessionId: string) =>
+      ipcRenderer.invoke('simulation:openSessionFolder', sessionId) as Promise<OpenSessionPathResult>,
+    openIssueFolder: (sessionId: string) =>
+      ipcRenderer.invoke('simulation:openIssueFolder', sessionId) as Promise<OpenSessionPathResult>,
+    openScreenshotsFolder: (sessionId: string) =>
+      ipcRenderer.invoke('simulation:openScreenshotsFolder', sessionId) as Promise<OpenSessionPathResult>,
+    cleanupSessionBundle: (payload: SessionCleanupOptions) =>
+      ipcRenderer.invoke('simulation:cleanupSessionBundle', payload) as Promise<SessionCleanupResult>,
     compareSessions: (oldSessionId: string, newSessionId: string) =>
       ipcRenderer.invoke('simulation:compareSessions', oldSessionId, newSessionId) as Promise<ComparisonReportResult>,
     previewGitHubIssueExport: (payload: GitHubIssueExportRequest) =>

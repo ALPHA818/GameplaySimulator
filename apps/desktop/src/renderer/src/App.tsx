@@ -4,6 +4,7 @@ import { BotProfilesPage } from './pages/BotProfilesPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { GameProfileEditorPage } from './pages/GameProfileEditorPage';
 import { GameProfilesPage } from './pages/GameProfilesPage';
+import { HelpFirstTestPage } from './pages/HelpFirstTestPage';
 import { IssuesPage } from './pages/IssuesPage';
 import { LiveSessionPage } from './pages/LiveSessionPage';
 import { LogsPage } from './pages/LogsPage';
@@ -79,6 +80,7 @@ export function App() {
       {currentPage === 'issues' ? <IssuesPage /> : null}
       {currentPage === 'logs' ? <LogsPage /> : null}
       {currentPage === 'reports' ? <ReportsPage /> : null}
+      {currentPage === 'helpFirstTest' ? <HelpFirstTestPage /> : null}
       {currentPage === 'settings' ? <SettingsPage /> : null}
     </AppShell>
   );
