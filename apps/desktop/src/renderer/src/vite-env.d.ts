@@ -27,6 +27,7 @@ import type {
   DesktopControlTestResult,
   GameProfileTestRequest,
   GameProfileTestResult,
+  LiveObservationState,
   PersistedSessionMetadata,
   SimulationBotStatus,
   SimulationSessionCreateResult,
@@ -35,11 +36,13 @@ import type {
   SimulationValidationResult
 } from '../../main/services/simulationService';
 import type { DesktopAdapterDependencyReport } from '../../../../../packages/adapters/src';
+import type { RuntimeObservationConfig } from '@core/config/runtimeObservationConfig';
 
 interface SimulationSessionPayload {
   runConfig: SimulationRunConfig;
   gameProfile: GameProfile;
   botProfiles?: BotProfile[];
+  runtimeObservation?: RuntimeObservationConfig;
 }
 
 declare global {
@@ -69,6 +72,11 @@ declare global {
         resumeSession: (sessionId: string) => Promise<SimulationSessionStatusSnapshot>;
         getSessionStatus: (sessionId?: string) => Promise<SimulationSessionStatusSnapshot>;
         getBotStatuses: (sessionId: string) => Promise<SimulationBotStatus[]>;
+        getLiveObservationState: (sessionId: string) => Promise<LiveObservationState>;
+        followBot: (sessionId: string, botId: string) => Promise<LiveObservationState>;
+        stopFollowingBot: (sessionId: string) => Promise<LiveObservationState>;
+        showAdjacentBot: (sessionId: string, direction: 'next' | 'previous') => Promise<LiveObservationState>;
+        focusObservedGameWindow: (sessionId: string) => Promise<LiveObservationState>;
         stopBot: (sessionId: string, botId: string) => Promise<SimulationBotStatus[]>;
         stopBotPool: (sessionId: string, profileId: string) => Promise<SimulationBotStatus[]>;
         getInstanceStatuses: (sessionId: string) => Promise<GameInstanceStatus[]>;

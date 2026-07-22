@@ -1,7 +1,7 @@
-import { DesktopWindowAdapter } from '../desktop/DesktopWindowAdapter';
+import { DesktopWindowAdapter, type DesktopWindowAdapterOptions } from '../desktop/DesktopWindowAdapter';
 import { EngineWrapperAdapter } from '../base/EngineWrapperAdapter';
 import type { GameAdapter } from '../base/GameAdapter';
-import { InstrumentedAdapter } from '../instrumented/InstrumentedAdapter';
+import { InstrumentedAdapter, type InstrumentedAdapterOptions } from '../instrumented/InstrumentedAdapter';
 
 export interface UnityAdapterOptions {
   id?: string;
@@ -9,6 +9,8 @@ export interface UnityAdapterOptions {
   unityVersion?: string;
   instrumentationEndpoint?: string;
   delegate?: GameAdapter;
+  desktopOptions?: DesktopWindowAdapterOptions;
+  instrumentedOptions?: InstrumentedAdapterOptions;
 }
 
 export class UnityAdapter extends EngineWrapperAdapter {
@@ -21,12 +23,14 @@ export class UnityAdapter extends EngineWrapperAdapter {
         ? new InstrumentedAdapter({
             id: 'unity-instrumented',
             name: 'Unity Instrumented Adapter',
+            ...options.instrumentedOptions,
             instrumentationEndpoint: options.instrumentationEndpoint
           })
         : new DesktopWindowAdapter({
             id: 'unity-desktop-window',
             name: 'Unity Desktop Window Adapter',
-            adapterType: 'unity'
+            adapterType: 'unity',
+            ...options.desktopOptions
           }));
 
     super({

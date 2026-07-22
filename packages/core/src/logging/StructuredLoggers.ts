@@ -24,6 +24,7 @@ import type {
   SimulationRunConfig
 } from '../types';
 import { actionInsightFromAction, plannerMetadataForLog } from '../bot/ActionExplanation';
+import { resolveRuntimeObservationConfig } from '../config/runtimeObservationConfig';
 
 export type StructuredLogEventType =
   | 'session_start'
@@ -51,7 +52,11 @@ export type StructuredLogEventType =
   | 'crash'
   | 'freeze'
   | 'manual_stop'
-  | 'resource_warning';
+  | 'resource_warning'
+  | 'visible_window_started'
+  | 'visible_window_stopped'
+  | 'observation_bot_changed'
+  | 'observation_limit_reached';
 
 export interface StructuredLogEvent<TPayload extends Record<string, unknown> = Record<string, unknown>> {
   eventId: string;
@@ -844,6 +849,7 @@ export class SessionLogger {
   }
 
   writeSummary(input: SessionSummaryReportInput): void {
+    const runtimeObservation = resolveRuntimeObservationConfig(input.runConfig);
     const requestedBotRows = input.runConfig.botPools.map((pool) => [
       pool.profileId,
       pool.enabled ? 'yes' : 'no',
@@ -924,10 +930,22 @@ export class SessionLogger {
       `Version: ${input.gameProfile.version}`,
       `Build: ${gameBuild}`,
       `Adapter: ${input.runConfig.adapterType}`,
+      `Observation mode: ${runtimeObservation.observationMode}`,
+      `Visible gameplay: ${runtimeObservation.showBotGameplay ? 'yes' : 'no'}`,
       `Created: ${input.createdAt ?? 'Unknown'}`,
       `Started: ${input.startedAt ?? 'Not started'}`,
       `Stopped: ${input.stoppedAt ?? 'Not stopped'}`,
       `Total runtime: ${formatDuration(input.startedAt, input.stoppedAt)}`,
+      '',
+      '## Live Observation',
+      '',
+      `Show bot gameplay: ${runtimeObservation.showBotGameplay ? 'yes' : 'no'}`,
+      `Observation mode: ${runtimeObservation.observationMode}`,
+      `Selected bot: ${runtimeObservation.selectedBotId ?? 'None'}`,
+      `Bring game to front on action: ${runtimeObservation.bringGameToFrontOnAction ? 'yes' : 'no'}`,
+      `Visible action delay: ${runtimeObservation.visibleActionDelayMs} ms`,
+      `Show action information: ${runtimeObservation.showActionInformation ? 'yes' : 'no'}`,
+      `Maximum visible game windows: ${runtimeObservation.maxVisibleGameWindows}`,
       '',
       '## Startup Flow',
       '',
@@ -984,6 +1002,10 @@ export class SessionLogger {
       `Can run: ${input.viabilityReport.canRun ? 'yes' : 'no'}`,
       `Recommended total bots: ${input.viabilityReport.recommendedTotalBots}`,
       `Recommended game instances: ${input.viabilityReport.recommendedGameInstances}`,
+      `Recommended visible game instances: ${input.viabilityReport.observation.recommendedVisibleGameInstances}`,
+      `Background game instances: ${input.viabilityReport.observation.backgroundGameInstances}`,
+      `Observation CPU overhead: ${input.viabilityReport.observation.estimatedCpuPercent}%`,
+      `Observation RAM overhead: ${input.viabilityReport.observation.estimatedRamMb} MB`,
       `Estimated CPU: ${input.viabilityReport.estimatedCpuPercent}%`,
       `Estimated RAM: ${input.viabilityReport.estimatedRamMb} MB`,
       `Estimated GPU: ${
@@ -1568,6 +1590,7 @@ export class StructuredRunLogger {
 
   private writeSessionBundle(input: SessionSummaryReportInput): void {
     const paths = this.bundlePathsForSession();
+    const runtimeObservation = resolveRuntimeObservationConfig(input.runConfig);
     const fullLogs = this.structuredLogSources()
       .flatMap(sourcedJsonlRecords)
       .sort((a, b) => String(a.timestamp ?? '').localeCompare(String(b.timestamp ?? '')));
@@ -1623,6 +1646,7 @@ export class StructuredRunLogger {
         engine: input.gameProfile.engine
       },
       adapterType: input.runConfig.adapterType,
+      runtimeObservation,
       createdAt: input.createdAt,
       startedAt: input.startedAt,
       stoppedAt: input.stoppedAt,
@@ -1649,6 +1673,7 @@ export class StructuredRunLogger {
       version: input.gameProfile.version,
       buildId: input.gameProfile.buildId,
       adapterType: input.runConfig.adapterType,
+      runtimeObservation,
       status: input.status,
       createdAt: input.createdAt ?? this.sessionLogger.createdAt,
       startedAt: input.startedAt,

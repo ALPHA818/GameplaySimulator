@@ -1,7 +1,7 @@
-import { DesktopWindowAdapter } from '../desktop/DesktopWindowAdapter';
+import { DesktopWindowAdapter, type DesktopWindowAdapterOptions } from '../desktop/DesktopWindowAdapter';
 import { EngineWrapperAdapter } from '../base/EngineWrapperAdapter';
 import type { GameAdapter } from '../base/GameAdapter';
-import { InstrumentedAdapter } from '../instrumented/InstrumentedAdapter';
+import { InstrumentedAdapter, type InstrumentedAdapterOptions } from '../instrumented/InstrumentedAdapter';
 
 export interface GodotAdapterOptions {
   id?: string;
@@ -9,6 +9,8 @@ export interface GodotAdapterOptions {
   godotVersion?: string;
   instrumentationEndpoint?: string;
   delegate?: GameAdapter;
+  desktopOptions?: DesktopWindowAdapterOptions;
+  instrumentedOptions?: InstrumentedAdapterOptions;
 }
 
 export class GodotAdapter extends EngineWrapperAdapter {
@@ -21,12 +23,14 @@ export class GodotAdapter extends EngineWrapperAdapter {
         ? new InstrumentedAdapter({
             id: 'godot-instrumented',
             name: 'Godot Instrumented Adapter',
+            ...options.instrumentedOptions,
             instrumentationEndpoint: options.instrumentationEndpoint
           })
         : new DesktopWindowAdapter({
             id: 'godot-desktop-window',
             name: 'Godot Desktop Window Adapter',
-            adapterType: 'godot'
+            adapterType: 'godot',
+            ...options.desktopOptions
           }));
 
     super({

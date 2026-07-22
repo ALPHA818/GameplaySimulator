@@ -4,6 +4,7 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { PersistedSessionMetadata } from '../../../main/services/simulationService';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AppShell } from '../components/AppShell';
 import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
 import { LogsPage } from './LogsPage';
@@ -519,5 +520,44 @@ describe('LogsPage filters', () => {
       expect(container.textContent).toContain(`${rows.length} matching`);
       expect(container.textContent).toContain(`${structuredLogs.length} saved before filters`);
     });
+  });
+
+  it('keeps filters, actions, cards, chips, and tabs mounted through normal, collapsed, and narrow resizes', async () => {
+    const container = render(<AppShell><LogsPage /></AppShell>);
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('Session started.');
+    });
+
+    setSearch(container, 'crash');
+    selectValue(container, '#log-source-filter', 'bot-issues');
+    selectValue(container, '#log-event-type-filter', 'issue_detected');
+
+    for (const width of [1280, 900, 600, 1280]) {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+      act(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+
+      expect(container.querySelector('.app-layout')).not.toBeNull();
+      expect(container.querySelector('.sidebar')).not.toBeNull();
+
+      const filterIds = [
+        '#log-session-filter',
+        '#log-search',
+        '#log-source-filter',
+        '#log-event-type-filter',
+        '#log-bot-filter',
+        '#log-instance-filter'
+      ];
+      expect(filterIds.every((selector) => container.querySelector(selector) !== null)).toBe(true);
+      expect(container.querySelector('#log-instance-filter')?.closest('.filter-surface--logs')).not.toBeNull();
+      const headerActions = container.querySelector('.logs-page > .page-header > .page-actions');
+      expect(headerActions?.children.length).toBe(3);
+      expect(container.querySelectorAll('.log-summary-grid .metric-card').length).toBe(9);
+      expect(container.querySelectorAll('.log-counter-grid .metric-card').length).toBe(7);
+      expect(container.querySelectorAll('.filter-chip-list .filter-chip').length).toBeGreaterThanOrEqual(3);
+      expect(container.querySelectorAll('.log-tabs .log-tab-item').length).toBe(11);
+    }
   });
 });

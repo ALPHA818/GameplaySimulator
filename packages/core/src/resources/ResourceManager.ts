@@ -1,7 +1,13 @@
 import os from 'node:os';
+import {
+  defaultRuntimeObservationConfig,
+  resolveRuntimeObservationConfig,
+  type RuntimeObservationConfig
+} from '../config/runtimeObservationConfig';
 import type {
   BotPoolConfig,
   GameProfile,
+  RuntimeObservationEstimate,
   RuntimeViabilityReport,
   SimulationRunConfig
 } from '../types';
@@ -43,6 +49,7 @@ export interface ResourceManagerAssessment {
 export interface RuntimeViabilityRequest {
   runConfig: SimulationRunConfig;
   gameProfile: GameProfile;
+  runtimeObservation?: RuntimeObservationConfig;
   systemSnapshot?: SystemResourceSnapshot;
 }
 
@@ -80,6 +87,12 @@ const botWeightCost: Record<BotPoolConfig['resourceWeight'], ResourceCost> = {
   very_heavy: { cpuPercent: 7.6, ramMb: 560, gpuPercent: 2.5 }
 };
 
+const headedBrowserWindowCost: ResourceCost = { cpuPercent: 2.4, ramMb: 220, gpuPercent: 1 };
+const additionalBrowserWindowCost: ResourceCost = { cpuPercent: 1.4, ramMb: 140, gpuPercent: 0.7 };
+const additionalObservedWindowCost: ResourceCost = { cpuPercent: 0.15, ramMb: 8, gpuPercent: 0 };
+const actionOverlayCost: ResourceCost = { cpuPercent: 0.15, ramMb: 8, gpuPercent: 0.05 };
+const focusTrackingCost: ResourceCost = { cpuPercent: 0.2, ramMb: 8, gpuPercent: 0 };
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -90,6 +103,25 @@ function round(value: number): number {
 
 function sumRecommended(allocations: MutableAllocation[]): number {
   return allocations.reduce((total, allocation) => total + allocation.recommendedCount, 0);
+}
+
+function scaleCost(cost: ResourceCost, count: number): Required<ResourceCost> {
+  return {
+    cpuPercent: round(cost.cpuPercent * count),
+    ramMb: Math.round(cost.ramMb * count),
+    gpuPercent: round((cost.gpuPercent ?? 0) * count)
+  };
+}
+
+function addCosts(...costs: ResourceCost[]): Required<ResourceCost> {
+  return costs.reduce<Required<ResourceCost>>(
+    (total, cost) => ({
+      cpuPercent: total.cpuPercent + cost.cpuPercent,
+      ramMb: total.ramMb + cost.ramMb,
+      gpuPercent: total.gpuPercent + (cost.gpuPercent ?? 0)
+    }),
+    { cpuPercent: 0, ramMb: 0, gpuPercent: 0 }
+  );
 }
 
 export class ResourceManager {
@@ -166,6 +198,10 @@ export class ResourceManager {
   estimateViabilitySync(request: RuntimeViabilityRequest): RuntimeViabilityReport {
     const system = request.systemSnapshot ?? this.collectSystemResources();
     const { runConfig, gameProfile } = request;
+    const runtimeObservation = resolveRuntimeObservationConfig(
+      runConfig,
+      request.runtimeObservation ?? defaultRuntimeObservationConfig
+    );
     const costs = this.estimateCosts(runConfig, gameProfile);
     const costByProfile = new Map(costs.estimatedCostPerBot.map((item) => [item.profileId, item.cost]));
     const warnings: string[] = [];
@@ -245,12 +281,28 @@ export class ResourceManager {
       runConfig,
       gameProfile.adapter.supportsMultipleInstances
     );
-    const estimated = this.estimateTotalCost(
+    const baseEstimated = this.estimateTotalCost(
       allocations,
       recommendedGameInstances,
       costs.estimatedCostPerGameInstance,
       costByProfile
     );
+    const observation = this.estimateObservationResources({
+      runConfig,
+      gameProfile,
+      runtimeObservation,
+      system,
+      totalBotCount: recommendedTotalBots,
+      totalRunningGameInstances: recommendedGameInstances,
+      baseEstimated,
+      resourceCapacity,
+      warnings
+    });
+    const estimated = addCosts(baseEstimated, {
+      cpuPercent: observation.estimatedCpuPercent,
+      ramMb: observation.estimatedRamMb,
+      gpuPercent: observation.estimatedGpuPercent
+    });
     const cpuWithCurrentLoad = estimated.cpuPercent + (system.currentCpuLoadPercent ?? 0);
     const ramUsedMb = system.totalRamMb - system.freeRamMb;
     const ramWithCurrentUsage = estimated.ramMb + ramUsedMb + runConfig.resourceLimits.reserveRamMb;
@@ -310,8 +362,191 @@ export class ResourceManager {
       estimatedCpuPercent: round(cpuWithCurrentLoad),
       estimatedRamMb: Math.round(estimated.ramMb),
       estimatedGpuPercent,
-      botAllocation: allocations.map(({ pool: _pool, ...allocation }) => allocation)
+      botAllocation: allocations.map(({ pool: _pool, ...allocation }) => allocation),
+      observation
     };
+  }
+
+  private estimateObservationResources(input: {
+    runConfig: SimulationRunConfig;
+    gameProfile: GameProfile;
+    runtimeObservation: RuntimeObservationConfig;
+    system: SystemResourceSnapshot;
+    totalBotCount: number;
+    totalRunningGameInstances: number;
+    baseEstimated: ResourceCost;
+    resourceCapacity: ResourceCost;
+    warnings: string[];
+  }): RuntimeObservationEstimate {
+    const {
+      runConfig,
+      gameProfile,
+      runtimeObservation,
+      system,
+      totalBotCount,
+      totalRunningGameInstances,
+      baseEstimated,
+      resourceCapacity,
+      warnings
+    } = input;
+    const observationRequested =
+      runtimeObservation.showBotGameplay &&
+      runtimeObservation.observationMode !== 'background';
+    const enabled =
+      observationRequested &&
+      totalRunningGameInstances > 0;
+    const requestedVisibleGameInstances = !enabled
+      ? 0
+      : runtimeObservation.observationMode === 'show-all-instances'
+        ? Math.min(totalRunningGameInstances, runtimeObservation.maxVisibleGameWindows)
+        : Math.min(totalRunningGameInstances, 1);
+    const recommendedVisibleWindowLimit = this.recommendedVisibleWindowLimit(system);
+    let recommendedVisibleGameInstances = Math.min(
+      requestedVisibleGameInstances,
+      recommendedVisibleWindowLimit
+    );
+
+    while (recommendedVisibleGameInstances > 0) {
+      const candidate = this.observationCost(
+        gameProfile,
+        runtimeObservation,
+        recommendedVisibleGameInstances
+      );
+      const total = addCosts(baseEstimated, candidate.total);
+
+      if (
+        total.cpuPercent <= resourceCapacity.cpuPercent &&
+        total.ramMb <= resourceCapacity.ramMb &&
+        (resourceCapacity.gpuPercent === undefined || total.gpuPercent <= resourceCapacity.gpuPercent)
+      ) {
+        break;
+      }
+
+      recommendedVisibleGameInstances -= 1;
+    }
+
+    const cost = this.observationCost(
+      gameProfile,
+      runtimeObservation,
+      recommendedVisibleGameInstances
+    );
+    const backgroundGameInstances = Math.max(
+      0,
+      totalRunningGameInstances - recommendedVisibleGameInstances
+    );
+
+    if (observationRequested) {
+      warnings.push(
+        `Visible mode may use more RAM. The current estimate adds about ${cost.total.ramMb} MB for observation.`
+      );
+    }
+
+    if (observationRequested && runtimeObservation.observationMode === 'show-all-instances') {
+      warnings.push('Show All Instances may open several windows and cover the desktop.');
+    }
+
+    if (observationRequested && runtimeObservation.maxVisibleGameWindows > recommendedVisibleWindowLimit) {
+      warnings.push(
+        `The configured visible-window limit of ${runtimeObservation.maxVisibleGameWindows} is higher than the recommended ${recommendedVisibleWindowLimit} for this computer.`
+      );
+    }
+
+    if (observationRequested && system.currentRamUsagePercent >= 70) {
+      warnings.push(
+        `The current system is already using significant RAM (${round(system.currentRamUsagePercent)}%). Background mode is safer.`
+      );
+    }
+
+    if (recommendedVisibleGameInstances < requestedVisibleGameInstances) {
+      warnings.push(
+        `Only ${recommendedVisibleGameInstances} of ${requestedVisibleGameInstances} requested game windows are recommended as visible. The other ${backgroundGameInstances} game instances can continue in the background without removing bots.`
+      );
+    }
+
+    if (enabled && runConfig.sessionLabel === 'Stress Test') {
+      warnings.push('Background mode is recommended for stress tests so visible windows do not compete with bots.');
+    }
+
+    if (
+      enabled &&
+      runConfig.runUntilStopped &&
+      (runConfig.maxRuntimeMinutes === undefined || runConfig.maxRuntimeMinutes >= 240)
+    ) {
+      warnings.push('Background mode is recommended for long or overnight tests.');
+    }
+
+    return {
+      enabled,
+      totalBotCount,
+      totalRunningGameInstances,
+      requestedVisibleGameInstances,
+      recommendedVisibleGameInstances,
+      backgroundGameInstances,
+      recommendedVisibleWindowLimit,
+      estimatedCpuPercent: round(cost.total.cpuPercent),
+      estimatedRamMb: Math.round(cost.total.ramMb),
+      estimatedGpuPercent: cost.total.gpuPercent > 0 ? round(cost.total.gpuPercent) : undefined,
+      breakdown: {
+        headedBrowserWindow: cost.headedBrowserWindow,
+        additionalVisibleWindows: cost.additionalVisibleWindows,
+        actionOverlays: cost.actionOverlays,
+        focusTracking: cost.focusTracking
+      }
+    };
+  }
+
+  private observationCost(
+    gameProfile: GameProfile,
+    observation: RuntimeObservationConfig,
+    visibleCount: number
+  ): {
+    total: Required<ResourceCost>;
+    headedBrowserWindow: Required<ResourceCost>;
+    additionalVisibleWindows: Required<ResourceCost>;
+    actionOverlays: Required<ResourceCost>;
+    focusTracking: Required<ResourceCost>;
+  } {
+    const isBrowser = gameProfile.adapter.type === 'browser' || gameProfile.engine.type === 'browser';
+    const headedBrowserWindow = scaleCost(headedBrowserWindowCost, isBrowser && visibleCount > 0 ? 1 : 0);
+    const additionalVisibleWindows = scaleCost(
+      isBrowser ? additionalBrowserWindowCost : additionalObservedWindowCost,
+      Math.max(0, visibleCount - 1)
+    );
+    const actionOverlays = scaleCost(
+      actionOverlayCost,
+      isBrowser && observation.showActionInformation ? visibleCount : 0
+    );
+    const tracksFocus =
+      visibleCount > 0 &&
+      (observation.bringGameToFrontOnAction ||
+        observation.observationMode === 'follow-first-bot' ||
+        observation.observationMode === 'follow-selected-bot');
+    const focusTracking = scaleCost(focusTrackingCost, tracksFocus ? 1 : 0);
+
+    return {
+      total: addCosts(
+        headedBrowserWindow,
+        additionalVisibleWindows,
+        actionOverlays,
+        focusTracking
+      ),
+      headedBrowserWindow,
+      additionalVisibleWindows,
+      actionOverlays,
+      focusTracking
+    };
+  }
+
+  private recommendedVisibleWindowLimit(system: SystemResourceSnapshot): number {
+    if (system.totalRamMb <= 16_384 || system.cpuCoreCount <= 8) {
+      return 1;
+    }
+
+    if (system.totalRamMb <= 32_768 || system.cpuCoreCount <= 12) {
+      return 2;
+    }
+
+    return 3;
   }
 
   private collectGpuInfo(): GpuInfo | undefined {

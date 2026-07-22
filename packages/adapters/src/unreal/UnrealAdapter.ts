@@ -1,7 +1,7 @@
-import { DesktopWindowAdapter } from '../desktop/DesktopWindowAdapter';
+import { DesktopWindowAdapter, type DesktopWindowAdapterOptions } from '../desktop/DesktopWindowAdapter';
 import { EngineWrapperAdapter } from '../base/EngineWrapperAdapter';
 import type { GameAdapter } from '../base/GameAdapter';
-import { InstrumentedAdapter } from '../instrumented/InstrumentedAdapter';
+import { InstrumentedAdapter, type InstrumentedAdapterOptions } from '../instrumented/InstrumentedAdapter';
 
 export interface UnrealAdapterOptions {
   id?: string;
@@ -9,6 +9,8 @@ export interface UnrealAdapterOptions {
   unrealVersion?: string;
   instrumentationEndpoint?: string;
   delegate?: GameAdapter;
+  desktopOptions?: DesktopWindowAdapterOptions;
+  instrumentedOptions?: InstrumentedAdapterOptions;
 }
 
 export class UnrealAdapter extends EngineWrapperAdapter {
@@ -21,12 +23,14 @@ export class UnrealAdapter extends EngineWrapperAdapter {
         ? new InstrumentedAdapter({
             id: 'unreal-instrumented',
             name: 'Unreal Instrumented Adapter',
+            ...options.instrumentedOptions,
             instrumentationEndpoint: options.instrumentationEndpoint
           })
         : new DesktopWindowAdapter({
             id: 'unreal-desktop-window',
             name: 'Unreal Desktop Window Adapter',
-            adapterType: 'unreal'
+            adapterType: 'unreal',
+            ...options.desktopOptions
           }));
 
     super({

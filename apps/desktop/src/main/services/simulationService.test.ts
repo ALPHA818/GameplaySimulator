@@ -18,7 +18,8 @@ import type {
   AdapterHealth,
   AvailableGameAction,
   GameAdapter,
-  GameAdapterInstance
+  GameAdapterInstance,
+  ObservationTargetUpdate
 } from '../../../../../packages/adapters/src';
 import { SimulationService } from './simulationService';
 
@@ -190,7 +191,11 @@ const adapterCapabilities: AdapterCapabilities = {
   supportsGameLogs: true,
   supportsSaveIsolation: true,
   supportsReset: false,
-  supportsCheckpointReload: false
+  supportsCheckpointReload: false,
+  supportsLiveObservation: true,
+  supportsWindowFocus: true,
+  supportsMultipleVisibleWindows: true,
+  observationCapability: 'visible-window'
 };
 
 class RecordingGameAdapter implements GameAdapter {
@@ -200,6 +205,8 @@ class RecordingGameAdapter implements GameAdapter {
   readonly capabilities = adapterCapabilities;
   readonly launchConfigs: GameInstanceConfig[] = [];
   readonly stoppedInstances: string[] = [];
+  readonly focusedInstances: string[] = [];
+  readonly observationTargets: ObservationTargetUpdate[] = [];
   stoppedAll = false;
   private readonly runningInstances = new Set<string>();
 
@@ -291,6 +298,21 @@ class RecordingGameAdapter implements GameAdapter {
         adapterId: this.id
       }
     };
+  }
+
+  async openOrFocusGameWindow(instanceId: string) {
+    this.focusedInstances.push(instanceId);
+    return {
+      instanceId,
+      supported: true,
+      visible: true,
+      focused: true,
+      message: `Focused ${instanceId}.`
+    };
+  }
+
+  updateObservationTarget(target: ObservationTargetUpdate): void {
+    this.observationTargets.push(target);
   }
 }
 
@@ -556,6 +578,71 @@ describe('SimulationService', () => {
     expect((await service.getInstanceStatuses(adapterRunConfig.sessionId)).every((instance) => instance.status === 'stopped')).toBe(true);
   });
 
+  it('switches the watched bot, focuses its assigned instance, and falls back when it stops', async () => {
+    const adapter = new RecordingGameAdapter();
+    const service = new SimulationService({
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot,
+      adapterFactory: { createAdapter: () => adapter }
+    });
+    const observationRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-live-observation',
+      useMockRuntime: false,
+      perGameInstanceBotLimit: 1,
+      actionDelayMs: 10_000,
+      maxActionsPerBot: undefined
+    };
+
+    service.createSession({
+      runConfig: observationRunConfig,
+      gameProfile,
+      botProfiles,
+      runtimeObservation: {
+        showBotGameplay: true,
+        observationMode: 'follow-first-bot',
+        bringGameToFrontOnAction: false,
+        visibleActionDelayMs: 250,
+        showActionInformation: true,
+        maxVisibleGameWindows: 1
+      }
+    });
+    await service.startSession(observationRunConfig.sessionId);
+
+    const bots = service.getBotStatuses(observationRunConfig.sessionId);
+    const firstObservation = await service.getLiveObservationState(observationRunConfig.sessionId);
+    const secondBot = bots[1];
+    const followed = await service.followBot(observationRunConfig.sessionId, secondBot.botId);
+    const focused = await service.focusObservedGameWindow(observationRunConfig.sessionId);
+
+    expect(firstObservation.watchedBotId).toBe(bots[0].botId);
+    expect(followed).toMatchObject({
+      badge: 'Watching',
+      watchedBotId: secondBot.botId,
+      watchedGameInstanceId: secondBot.gameInstanceId
+    });
+    expect(adapter.observationTargets.at(-1)).toMatchObject({
+      botId: secondBot.botId,
+      instanceId: secondBot.gameInstanceId,
+      observationMode: 'follow-selected-bot'
+    });
+    expect(focused.windowStatus).toBe(`Focused ${secondBot.gameInstanceId}.`);
+    expect(adapter.focusedInstances).toEqual([secondBot.gameInstanceId]);
+
+    service.stopBot(observationRunConfig.sessionId, secondBot.botId);
+    const switched = await service.getLiveObservationState(observationRunConfig.sessionId);
+
+    expect(switched.watchedBotId).toBe(bots[0].botId);
+    expect(switched.message).toContain(`Watched bot ${secondBot.botId} stopped`);
+    expect(service.getLogs(observationRunConfig.sessionId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringContaining('observation_bot_changed:') })
+      ])
+    );
+
+    await service.stopSession(observationRunConfig.sessionId);
+  });
+
   it('completes a startup flow before running the normal bot pool', async () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-startup-success-'));
     const adapter = new StartupFlowGameAdapter();
@@ -704,15 +791,46 @@ describe('SimulationService', () => {
     expect(result.stopped).toBe(true);
     expect(result.availableActions).toEqual(['Wait']);
     expect(result.stateSummary).toContain('Recording Adapter Scene');
+    expect(result.observationCapability).toBe('visible-window');
+    expect(result.observationMessage).toContain('browser adapter can open a visible game window');
     expect(result.capabilities).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ label: 'State read', supported: true }),
-        expect.objectContaining({ label: 'Keyboard/mouse input', supported: true })
+        expect.objectContaining({ label: 'Keyboard/mouse input', supported: true }),
+        expect.objectContaining({ label: 'Live observation', supported: true }),
+        expect.objectContaining({ label: 'Window focus', supported: true })
       ])
     );
     expect(adapter.launchConfigs).toHaveLength(1);
     expect(adapter.launchConfigs[0].environment.GAMEPLAY_SIMULATOR_PROFILE_TEST).toBe('1');
     expect(adapter.stoppedAll).toBe(true);
+  });
+
+  it('passes a headed observation config to a visible browser profile test', async () => {
+    vi.useFakeTimers();
+    const adapter = new RecordingGameAdapter();
+    const createAdapter = vi.fn(
+      (_adapterType: SimulationRunConfig['adapterType'], _options?: unknown) => adapter
+    );
+    const service = new SimulationService({
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot,
+      adapterFactory: { createAdapter }
+    });
+
+    const resultPromise = service.testGameProfile({ gameProfile, showTestWindow: true });
+    await vi.advanceTimersByTimeAsync(1_500);
+    const result = await resultPromise;
+    const adapterOptions = createAdapter.mock.calls[0]?.[1] as {
+      browser?: { headless?: boolean; runtimeObservation?: { showBotGameplay?: boolean } };
+    };
+
+    expect(result.ok).toBe(true);
+    expect(result.stopped).toBe(true);
+    expect(adapterOptions.browser).toMatchObject({
+      headless: false,
+      runtimeObservation: { showBotGameplay: true }
+    });
   });
 
   it('rejects invalid desktop adapter profiles before session startup', () => {
@@ -825,6 +943,53 @@ describe('SimulationService', () => {
     expect(contents).toContain('## Content Coverage');
     expect(contents).toContain('HTML report:');
     expect(existsSync(join(dirname(result.reportPath), 'session-report.html'))).toBe(true);
+  });
+
+  it('resolves global observation defaults into config, metadata, and the readable report', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-observation-'));
+    const observationRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-observation-persisted'
+    };
+    const service = new SimulationService({ reportRoot, systemSnapshot });
+
+    service.createSession({
+      runConfig: observationRunConfig,
+      gameProfile,
+      botProfiles,
+      runtimeObservation: {
+        showBotGameplay: true,
+        observationMode: 'show-all-instances',
+        bringGameToFrontOnAction: false,
+        visibleActionDelayMs: 700,
+        showActionInformation: true,
+        maxVisibleGameWindows: 2
+      }
+    });
+
+    const report = await service.openReport(observationRunConfig.sessionId);
+    const sessionDirectory = dirname(report.reportPath);
+    const configArtifact = JSON.parse(await readFile(join(sessionDirectory, 'config.json'), 'utf8')) as {
+      runConfig: SimulationRunConfig;
+    };
+    const metadata = service.listSessions().find(
+      (session) => session.sessionId === observationRunConfig.sessionId
+    );
+    const reportContents = await readFile(report.reportPath, 'utf8');
+
+    expect(configArtifact.runConfig).toMatchObject({
+      showBotGameplay: true,
+      observationMode: 'show-all-instances',
+      visibleActionDelayMs: 700,
+      maxVisibleGameWindows: 2
+    });
+    expect(metadata?.runtimeObservation).toMatchObject({
+      showBotGameplay: true,
+      observationMode: 'show-all-instances',
+      maxVisibleGameWindows: 2
+    });
+    expect(reportContents).toContain('## Live Observation');
+    expect(reportContents).toContain('Observation mode: show-all-instances');
   });
 
   it('writes and opens structured JSONL logs', async () => {

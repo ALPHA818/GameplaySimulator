@@ -9,7 +9,11 @@ import { LogsPage } from './LogsPage';
 import { NewSessionPage } from './NewSessionPage';
 import { ReportsPage } from './ReportsPage';
 import { SettingsPage } from './SettingsPage';
-import { BrowserGameWizardPanel, GameProfileEditorPage } from './GameProfileEditorPage';
+import {
+  BrowserGameWizardPanel,
+  BrowserProfileTestWindowOption,
+  GameProfileEditorPage
+} from './GameProfileEditorPage';
 import { HelpFirstTestPage } from './HelpFirstTestPage';
 import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
@@ -144,6 +148,21 @@ describe('renderer workflow smoke tests', () => {
       issues: [issue],
       logs: [log],
       coverage: null,
+      liveObservation: {
+        sessionId: 'ui-session',
+        badge: 'Watching',
+        observationMode: 'follow-selected-bot',
+        watchedBotId: 'explorer-bot-001',
+        watchedGameInstanceId: 'instance-ui-001',
+        currentAction: 'move-forward',
+        actionReason: 'Explorer Bot chose move-forward because it was an unvisited action.',
+        actionStartedAt: '2026-07-05T09:00:04.000Z',
+        lastResult: 'succeeded: moved forward',
+        currentScene: 'Start Area',
+        windowStatus: 'The watched game window is available.',
+        message: 'Watching explorer-bot-001.',
+        canFocusWindow: true
+      },
       reviewedIssueIds: [],
       falsePositiveIssueIds: []
     });
@@ -193,6 +212,15 @@ describe('renderer workflow smoke tests', () => {
     expect(html).toContain('DOM UI Clues');
   });
 
+  it('offers a visible temporary window for browser profile tests', () => {
+    const html = renderToStaticMarkup(
+      <BrowserProfileTestWindowOption checked={false} onChange={() => undefined} />
+    );
+
+    expect(html).toContain('Show Test Window');
+    expect(html).toContain('Help for Show Test Window');
+  });
+
   it('renders live dashboard monitoring and stop/report controls', () => {
     const html = renderToStaticMarkup(<LiveSessionPage />);
 
@@ -207,6 +235,12 @@ describe('renderer workflow smoke tests', () => {
     expect(html).toContain('Action Quality');
     expect(html).toContain('Last Result');
     expect(html).toContain('Next Likely Action');
+    expect(html).toContain('Watch a bot play');
+    expect(html).toContain('Watched Game Instance');
+    expect(html).toContain('Focus Game Window');
+    expect(html).toContain('Follow This Bot');
+    expect(html).toContain('Show Next Bot');
+    expect(html).toContain('Show Previous Bot');
   });
 
   it('renders the issue viewer with GitHub export preview controls', () => {

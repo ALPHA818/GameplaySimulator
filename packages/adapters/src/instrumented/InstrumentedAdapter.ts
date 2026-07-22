@@ -9,9 +9,12 @@ import {
 import { BaseGameAdapter } from '../base/BaseGameAdapter';
 import type {
   AdapterCapabilities,
+  AdapterHealth,
   AvailableGameAction,
   GameAdapterInstance,
-  ScreenshotCapture
+  ObservationCapability,
+  ScreenshotCapture,
+  WindowFocusResult
 } from '../base/GameAdapter';
 
 export interface InstrumentedAdapterOptions {
@@ -21,6 +24,8 @@ export interface InstrumentedAdapterOptions {
   instrumentationTransport?: InstrumentationTransport;
   instrumentationClient?: InstrumentationClient;
   capabilities?: Partial<AdapterCapabilities>;
+  observationCapability?: ObservationCapability;
+  windowFocusHandler?: (instanceId: string) => Promise<WindowFocusResult>;
 }
 
 export class InstrumentedAdapter extends BaseGameAdapter {
@@ -28,8 +33,11 @@ export class InstrumentedAdapter extends BaseGameAdapter {
   readonly instrumentationTransport: InstrumentationTransport;
   private readonly instrumentationClient?: InstrumentationClient;
   private health?: InstrumentationHealth;
+  private readonly windowFocusHandler?: (instanceId: string) => Promise<WindowFocusResult>;
 
   constructor(options: InstrumentedAdapterOptions = {}) {
+    const observationCapability =
+      options.observationCapability ?? options.capabilities?.observationCapability ?? 'unavailable';
     super({
       id: options.id ?? 'instrumented',
       name: options.name ?? 'Instrumented Adapter',
@@ -46,12 +54,17 @@ export class InstrumentedAdapter extends BaseGameAdapter {
         supportsSaveIsolation: true,
         supportsReset: true,
         supportsCheckpointReload: true,
+        supportsLiveObservation: observationCapability !== 'unavailable',
+        supportsWindowFocus: Boolean(options.windowFocusHandler),
+        supportsMultipleVisibleWindows: false,
+        observationCapability,
         ...options.capabilities
       }
     });
 
     this.instrumentationEndpoint = options.instrumentationEndpoint;
     this.instrumentationTransport = options.instrumentationTransport ?? 'local-http';
+    this.windowFocusHandler = options.windowFocusHandler;
     this.instrumentationClient =
       options.instrumentationClient ??
       (options.instrumentationEndpoint
@@ -85,7 +98,10 @@ export class InstrumentedAdapter extends BaseGameAdapter {
         ...instance.metadata,
         instrumentationEndpoint: this.instrumentationEndpoint,
         instrumentationTransport: this.instrumentationTransport,
-        instrumentationHealth: health
+        instrumentationHealth: health,
+        observationCapability: this.capabilities.observationCapability,
+        visible: this.capabilities.supportsLiveObservation,
+        observationMessage: this.observationMessage()
       }
     };
   }
@@ -197,6 +213,50 @@ export class InstrumentedAdapter extends BaseGameAdapter {
     }
 
     return super.captureScreenshot(instanceId, botId);
+  }
+
+  async focusWindow(instanceId: string): Promise<WindowFocusResult> {
+    if (this.windowFocusHandler) {
+      return this.windowFocusHandler(instanceId);
+    }
+
+    return {
+      instanceId,
+      supported: false,
+      visible: this.capabilities.supportsLiveObservation,
+      focused: false,
+      message: this.capabilities.supportsLiveObservation
+        ? 'This instrumented target uses an external game window. Window focus is not supported by this adapter.'
+        : 'This instrumented target has no visible game window.'
+    };
+  }
+
+  openOrFocusGameWindow(instanceId: string): Promise<WindowFocusResult> {
+    return this.focusWindow(instanceId);
+  }
+
+  override async getHealth(instanceId: string): Promise<AdapterHealth> {
+    const health = await super.getHealth(instanceId);
+
+    return {
+      ...health,
+      details: {
+        ...health.details,
+        observationCapability: this.capabilities.observationCapability,
+        supportsWindowFocus: this.capabilities.supportsWindowFocus,
+        observationMessage: this.observationMessage()
+      }
+    };
+  }
+
+  private observationMessage(): string {
+    if (!this.capabilities.supportsLiveObservation) {
+      return 'This instrumented target has no visible game window.';
+    }
+
+    return this.capabilities.supportsWindowFocus
+      ? 'This instrumented target exposes a visible game window that the simulator can focus.'
+      : 'This instrumented target uses an external game window. Window focus is not supported by this adapter.';
   }
 
   private toGameStateSnapshot(state: InstrumentedGameState, botId: string): GameStateSnapshot {

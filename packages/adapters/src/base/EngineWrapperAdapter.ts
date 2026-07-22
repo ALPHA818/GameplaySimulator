@@ -12,8 +12,10 @@ import type {
   AvailableGameAction,
   GameAdapter,
   GameAdapterInstance,
+  ObservationTargetUpdate,
   ScreenshotCapture,
-  VideoCaptureHandle
+  VideoCaptureHandle,
+  WindowFocusResult
 } from './GameAdapter';
 
 export interface EngineWrapperAdapterOptions {
@@ -102,6 +104,32 @@ export abstract class EngineWrapperAdapter implements GameAdapter {
     }
 
     return this.delegate.captureLogs(instanceId);
+  }
+
+  focusWindow(instanceId: string): Promise<WindowFocusResult> {
+    if (!this.delegate.focusWindow) {
+      return Promise.resolve({
+        instanceId,
+        supported: false,
+        visible: this.capabilities.supportsLiveObservation,
+        focused: false,
+        message: 'Window focus is not supported by this adapter.'
+      });
+    }
+
+    return this.delegate.focusWindow(instanceId);
+  }
+
+  openOrFocusGameWindow(instanceId: string): Promise<WindowFocusResult> {
+    if (this.delegate.openOrFocusGameWindow) {
+      return this.delegate.openOrFocusGameWindow(instanceId);
+    }
+
+    return this.focusWindow(instanceId);
+  }
+
+  updateObservationTarget(target: ObservationTargetUpdate): Promise<void> | void {
+    return this.delegate.updateObservationTarget?.(target);
   }
 
   isRunning(instanceId: string): Promise<boolean> {

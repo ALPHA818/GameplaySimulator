@@ -125,6 +125,26 @@ button {
   gap: 22px;
 }
 
+.settings-page {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  container-type: inline-size;
+}
+
+.logs-page {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  container-type: inline-size;
+}
+
+.settings-page > *,
+.logs-page > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .page-header,
 .dashboard__header {
   display: flex;
@@ -472,6 +492,144 @@ h2 {
   accent-color: #2dd4bf;
 }
 
+.settings-page .section-heading {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px 16px;
+}
+
+.settings-page .section-heading > div {
+  min-width: 0;
+  flex: 1 1 260px;
+}
+
+.settings-page .section-heading h2,
+.settings-page .section-heading .eyebrow {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.settings-page .section-heading .status-pill {
+  width: fit-content;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.settings-page .metric-grid--session {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+}
+
+.settings-page .toggle-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+}
+
+.settings-page .metric-card,
+.settings-page .toggle-row,
+.settings-page .notice-list {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.settings-page .toggle-row {
+  align-items: flex-start;
+}
+
+.settings-page .toggle-row input {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.settings-page .toggle-row__label {
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 auto;
+  align-items: flex-start;
+}
+
+.settings-page .toggle-row__label .field-label__text,
+.settings-page .notice-list,
+.settings-page .notice-list span,
+.settings-page .notice-list strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.observation-adapter-support {
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  background: rgba(30, 58, 138, 0.16);
+  color: #bfdbfe;
+}
+
+.observation-settings-section .field-grid,
+.observation-settings-section .toggle-grid {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.new-session-page {
+  container-type: inline-size;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.session-observation-section .field-grid,
+.session-observation-section .toggle-grid,
+.session-confirmation .metric-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  min-width: 0;
+  max-width: 100%;
+}
+
+.profile-test-window-options {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  min-width: 0;
+  max-width: 100%;
+}
+
+.session-observation-section .section-heading,
+.session-confirmation .section-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.session-observation-section .section-heading > div,
+.session-confirmation .section-heading > div {
+  min-width: 0;
+  flex: 1 1 260px;
+}
+
+.session-observation-section .status-pill,
+.session-confirmation .status-pill {
+  width: fit-content;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+}
+
+@container (max-width: 520px) {
+  .session-observation-section .section-heading,
+  .session-confirmation .section-heading {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .session-observation-section .field-grid,
+  .session-observation-section .toggle-grid,
+  .session-confirmation .metric-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .form-actions {
   display: flex;
   align-items: center;
@@ -719,6 +877,107 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.live-session-page {
+  container-name: live-session;
+  container-type: inline-size;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.live-observation-panel {
+  min-width: 0;
+  overflow: visible;
+}
+
+.observation-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  border-top: 1px solid #303541;
+  border-bottom: 1px solid #303541;
+}
+
+.observation-field,
+.observation-detail-grid > .field {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  padding: 14px 16px;
+}
+
+.observation-field strong {
+  min-width: 0;
+  color: #ffffff;
+  font-size: 0.92rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.observation-field--wide {
+  grid-column: span 2;
+}
+
+.observation-controls {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.observation-controls button {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.observation-controls button span {
+  white-space: normal;
+}
+
+.observation-switch-message {
+  min-width: 0;
+  align-items: start;
+}
+
+.observation-switch-message span {
+  overflow-wrap: anywhere;
+}
+
+.observation-badge[data-status="Watching"] {
+  border-color: rgba(45, 212, 191, 0.5);
+  color: #99f6e4;
+}
+
+.observation-badge[data-status="Window unavailable"] {
+  border-color: rgba(248, 113, 113, 0.5);
+  color: #fecaca;
+}
+
+.observation-badge[data-status="Waiting for game"] {
+  border-color: rgba(250, 204, 21, 0.45);
+  color: #fef08a;
+}
+
+@container live-session (max-width: 620px) {
+  .live-observation-panel .viability-panel__header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .observation-field--wide {
+    grid-column: span 1;
+  }
+
+  .observation-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .observation-controls button {
+    width: 100%;
+    justify-content: flex-start;
+  }
 }
 
 .coverage-grid {
@@ -1004,7 +1263,7 @@ h2 {
 }
 
 .filter-surface--logs {
-  grid-template-columns: minmax(230px, 1.35fr) minmax(210px, 1.1fr) repeat(4, minmax(135px, 0.75fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
 }
 
 .filter-field {
@@ -1072,11 +1331,11 @@ h2 {
 }
 
 .log-summary-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
 }
 
 .log-counter-grid {
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
 }
 
 .log-run-separator {
@@ -1157,14 +1416,14 @@ h2 {
   border-radius: 8px;
   background: #191b20;
   display: grid;
-  grid-template-columns: repeat(3, minmax(180px, 1fr)) auto;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 10px;
   align-items: center;
   padding: 12px;
 }
 
 .log-export-button {
-  justify-self: end;
+  justify-self: stretch;
 }
 
 .review-layout {
@@ -1658,6 +1917,181 @@ h2 {
 .inline-notice--error {
   border-color: rgba(248, 113, 113, 0.42);
   color: #fecaca;
+}
+
+.logs-page .page-header {
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.logs-page .detail-header,
+.logs-page .issue-diagnosis__header {
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.logs-page .page-header > div:first-child,
+.logs-page .detail-header > div:first-child,
+.logs-page .issue-diagnosis__header > div:first-child {
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.logs-page .page-actions {
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 320px;
+}
+
+.logs-page .page-actions > *,
+.logs-page .secondary-button,
+.logs-page .status-pill {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.logs-page .filter-surface,
+.logs-page .filter-chip-row,
+.logs-page .metric-grid,
+.logs-page .log-tabs,
+.logs-page .log-controls,
+.logs-page .review-layout,
+.logs-page .review-list,
+.logs-page .detail-surface,
+.logs-page .issue-diagnosis,
+.logs-page .detail-section,
+.logs-page .evidence-list {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.logs-page .filter-field,
+.logs-page .filter-field .input,
+.logs-page .filter-field input {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.logs-page .filter-field select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.logs-page .metric-card,
+.logs-page .filter-chip,
+.logs-page .log-tab-item,
+.logs-page .toggle-row,
+.logs-page .evidence-row {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.logs-page .log-tab-button {
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  white-space: normal;
+}
+
+.logs-page .log-tab-button > span,
+.logs-page .filter-chip,
+.logs-page .log-run-separator,
+.logs-page .source-pill {
+  overflow-wrap: anywhere;
+}
+
+.logs-page .log-run-separator {
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.logs-page .log-controls .toggle-row {
+  align-items: flex-start;
+}
+
+.logs-page .log-controls .toggle-row__label {
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: flex-start;
+}
+
+.logs-page .issue-meta-grid,
+.logs-page .log-detail-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+}
+
+.logs-page .issue-diagnosis-grid,
+.logs-page .why-flagged-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+}
+
+@container (min-width: 1050px) {
+  .logs-page .filter-field--session,
+  .logs-page .filter-field--search {
+    grid-column: span 2;
+  }
+}
+
+@container (max-width: 760px) {
+  .logs-page .page-header,
+  .logs-page .detail-header,
+  .logs-page .issue-diagnosis__header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .logs-page .page-actions {
+    flex-basis: auto;
+    justify-content: flex-start;
+  }
+
+  .logs-page .filter-chip-row,
+  .logs-page .review-layout--logs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .logs-page .filter-chip-row .secondary-button {
+    justify-self: start;
+  }
+
+  .logs-page .review-list {
+    max-height: none;
+  }
+}
+
+@container (max-width: 480px) {
+  .settings-page .section-heading {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .settings-page .section-heading > div {
+    flex-basis: auto;
+  }
+
+  .settings-page .section-heading .status-pill {
+    align-self: flex-start;
+  }
+
+  .settings-page .metric-grid,
+  .settings-page .metric-grid--session,
+  .settings-page .toggle-grid,
+  .settings-page .field-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-page .form-section,
+  .settings-page .notice-list {
+    min-width: 0;
+    max-width: 100%;
+  }
 }
 
 @media (max-width: 980px) {

@@ -256,8 +256,15 @@ export function scanBrowserDom(): unknown {
   const scanMarker = '__GAMEPLAY_SIM_DOM_SCAN__';
   void scanMarker;
 
+  const overlaySelector = '[data-gameplay-simulator-overlay]';
   const clean = (value: string | null | undefined): string => (value ?? '').replace(/\s+/g, ' ').trim();
+  const isSimulatorOverlay = (element: Element): boolean =>
+    element.matches(overlaySelector) || Boolean(element.closest(overlaySelector));
   const isVisible = (element: Element): boolean => {
+    if (isSimulatorOverlay(element)) {
+      return false;
+    }
+
     const node = element as HTMLElement;
     const style = window.getComputedStyle(node);
     const rect = node.getBoundingClientRect();
@@ -327,11 +334,15 @@ export function scanBrowserDom(): unknown {
   const dialogs = labelledVisible('dialog[open], [role="dialog"], [aria-modal="true"]', 10);
   const openMenus = labelledVisible('[role="menu"], nav, [data-menu]:not([hidden]), [aria-expanded="true"]', 20);
   const modalStack = dialogs;
-  const focusedElement = document.activeElement && document.activeElement !== document.body
+  const focusedElement = document.activeElement &&
+    document.activeElement !== document.body &&
+    !isSimulatorOverlay(document.activeElement)
     ? labelFor(document.activeElement) || document.activeElement.id || document.activeElement.tagName.toLowerCase()
     : undefined;
+  const bodyClone = document.body?.cloneNode(true) as HTMLElement | undefined;
+  bodyClone?.querySelectorAll(overlaySelector).forEach((element) => element.remove());
   const visibleText = unique(
-    clean(document.body?.innerText)
+    clean(bodyClone?.textContent)
       .split(/\n+/)
       .map((line) => clean(line).slice(0, 180))
       .filter(Boolean)
@@ -339,7 +350,8 @@ export function scanBrowserDom(): unknown {
   const allText = clean([headings.join(' '), dialogs.join(' '), visibleButtons.map((button) => button.label).join(' '), visibleText.join(' ')].join(' ')).toLowerCase();
   const canvasCount = [...document.querySelectorAll('canvas')].filter(isVisible).length;
   const isLoading =
-    Boolean(document.querySelector('[aria-busy="true"], progress, .loading, [data-loading="true"]')) ||
+    [...document.querySelectorAll('[aria-busy="true"], progress, .loading, [data-loading="true"]')]
+      .some((element) => !isSimulatorOverlay(element)) ||
     /\bloading\b|please wait|generating world/.test(allText);
   const isPaused = /\bpaused\b|pause menu/.test(allText) || visibleButtons.some((button) => /\bresume\b/i.test(button.label));
   const canStartGame = !isPaused && visibleButtons.some((button) =>
@@ -349,7 +361,8 @@ export function scanBrowserDom(): unknown {
     document.body?.dataset.gameplay === 'true' ||
     document.documentElement.dataset.gameplay === 'true';
   const isInGameplay = explicitGameplay || (canvasCount > 0 && !isLoading && !isPaused && !canStartGame);
-  const screenElement = document.querySelector('[data-gameplay-screen]');
+  const screenElement = [...document.querySelectorAll('[data-gameplay-screen]')]
+    .find((element) => !isSimulatorOverlay(element));
   const explicitScreen = clean(
     document.body?.dataset.gameplayScreen ??
       document.body?.dataset.currentScreen ??
@@ -404,9 +417,16 @@ export function clickBrowserDomTarget(target: BrowserDomTarget): BrowserDomClick
   const clickMarker = '__GAMEPLAY_SIM_DOM_CLICK__';
   void clickMarker;
 
+  const overlaySelector = '[data-gameplay-simulator-overlay]';
   const clean = (value: string | null | undefined): string => (value ?? '').replace(/\s+/g, ' ').trim();
   const normalize = (value: string | undefined): string => clean(value).toLowerCase();
+  const isSimulatorOverlay = (element: Element): boolean =>
+    element.matches(overlaySelector) || Boolean(element.closest(overlaySelector));
   const isVisible = (element: Element): boolean => {
+    if (isSimulatorOverlay(element)) {
+      return false;
+    }
+
     const node = element as HTMLElement;
     const style = window.getComputedStyle(node);
     const rect = node.getBoundingClientRect();
@@ -448,7 +468,7 @@ export function clickBrowserDomTarget(target: BrowserDomTarget): BrowserDomClick
 
   if (typeof target.x === 'number' && typeof target.y === 'number') {
     const pointElement = document.elementFromPoint(target.x, target.y);
-    if (pointElement instanceof HTMLElement) {
+    if (pointElement instanceof HTMLElement && !isSimulatorOverlay(pointElement)) {
       pointElement.focus();
       pointElement.click();
       return { succeeded: true, message: `Clicked DOM target at ${target.x}, ${target.y}.` };

@@ -17,6 +17,39 @@ function action(type: string, actionId = `${type}-001`): GameAction {
 }
 
 describe('InstrumentedAdapter', () => {
+  it('describes headless and external-window observation honestly', async () => {
+    const headless = new InstrumentedAdapter();
+    const external = new InstrumentedAdapter({ observationCapability: 'external-window' });
+
+    await headless.launchInstance({
+      instanceId: 'headless-instance',
+      gameProfileId: 'headless-game',
+      launch: { platform: 'linux', arguments: [] },
+      maxBots: 1,
+      environment: {}
+    });
+    await external.launchInstance({
+      instanceId: 'external-instance',
+      gameProfileId: 'external-game',
+      launch: { platform: 'linux', arguments: [] },
+      maxBots: 1,
+      environment: {}
+    });
+
+    expect(headless.capabilities.supportsLiveObservation).toBe(false);
+    expect((await headless.focusWindow('headless-instance')).message).toBe(
+      'This instrumented target has no visible game window.'
+    );
+    expect(external.capabilities).toMatchObject({
+      supportsLiveObservation: true,
+      supportsWindowFocus: false,
+      observationCapability: 'external-window'
+    });
+    expect((await external.getHealth('external-instance')).details.observationMessage).toContain(
+      'Window focus is not supported'
+    );
+  });
+
   it('connects to the example fake game server and reads structured state', async () => {
     const server = await startInstrumentedTestServer({ port: 0 });
 

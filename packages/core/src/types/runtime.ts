@@ -163,6 +163,49 @@ export const BotAllocationSchema = z.object({
   reason: z.string().min(1)
 });
 
+const ObservationResourceCostSchema = z.object({
+  cpuPercent: z.number().min(0),
+  ramMb: z.number().min(0),
+  gpuPercent: z.number().min(0).max(100).optional()
+});
+
+export const RuntimeObservationEstimateSchema = z.object({
+  enabled: z.boolean(),
+  totalBotCount: z.number().int().min(0),
+  totalRunningGameInstances: z.number().int().min(0),
+  requestedVisibleGameInstances: z.number().int().min(0),
+  recommendedVisibleGameInstances: z.number().int().min(0),
+  backgroundGameInstances: z.number().int().min(0),
+  recommendedVisibleWindowLimit: z.number().int().min(0),
+  estimatedCpuPercent: z.number().min(0),
+  estimatedRamMb: z.number().min(0),
+  estimatedGpuPercent: z.number().min(0).max(100).optional(),
+  breakdown: z.object({
+    headedBrowserWindow: ObservationResourceCostSchema,
+    additionalVisibleWindows: ObservationResourceCostSchema,
+    actionOverlays: ObservationResourceCostSchema,
+    focusTracking: ObservationResourceCostSchema
+  })
+});
+
+const emptyRuntimeObservationEstimate = {
+  enabled: false,
+  totalBotCount: 0,
+  totalRunningGameInstances: 0,
+  requestedVisibleGameInstances: 0,
+  recommendedVisibleGameInstances: 0,
+  backgroundGameInstances: 0,
+  recommendedVisibleWindowLimit: 0,
+  estimatedCpuPercent: 0,
+  estimatedRamMb: 0,
+  breakdown: {
+    headedBrowserWindow: { cpuPercent: 0, ramMb: 0 },
+    additionalVisibleWindows: { cpuPercent: 0, ramMb: 0 },
+    actionOverlays: { cpuPercent: 0, ramMb: 0 },
+    focusTracking: { cpuPercent: 0, ramMb: 0 }
+  }
+};
+
 export const RuntimeViabilityReportSchema = z.object({
   canRun: z.boolean(),
   recommendedTotalBots: z.number().int().min(0),
@@ -172,7 +215,8 @@ export const RuntimeViabilityReportSchema = z.object({
   estimatedCpuPercent: z.number().min(0),
   estimatedRamMb: z.number().min(0),
   estimatedGpuPercent: z.number().min(0).max(100).optional(),
-  botAllocation: z.array(BotAllocationSchema).default([])
+  botAllocation: z.array(BotAllocationSchema).default([]),
+  observation: RuntimeObservationEstimateSchema.default(emptyRuntimeObservationEstimate)
 });
 
 export const SessionStatusSchema = z.enum([
@@ -218,6 +262,7 @@ export type GameInstanceRuntimeStatus = z.infer<typeof GameInstanceRuntimeStatus
 export type GameInstanceResourceUsage = z.infer<typeof GameInstanceResourceUsageSchema>;
 export type GameInstanceStatus = z.infer<typeof GameInstanceStatusSchema>;
 export type BotAllocation = z.infer<typeof BotAllocationSchema>;
+export type RuntimeObservationEstimate = z.infer<typeof RuntimeObservationEstimateSchema>;
 export type RuntimeViabilityReport = z.infer<typeof RuntimeViabilityReportSchema>;
 export type SessionStatus = z.infer<typeof SessionStatusSchema>;
 export type RuntimeBotSnapshot = z.infer<typeof RuntimeBotSnapshotSchema>;

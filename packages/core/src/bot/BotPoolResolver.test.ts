@@ -105,6 +105,23 @@ function report(overrides: Partial<RuntimeViabilityReport> = {}): RuntimeViabili
     blockers: [],
     estimatedCpuPercent: 40,
     estimatedRamMb: 6000,
+    observation: {
+      enabled: false,
+      totalBotCount: 0,
+      totalRunningGameInstances: 0,
+      requestedVisibleGameInstances: 0,
+      recommendedVisibleGameInstances: 0,
+      backgroundGameInstances: 0,
+      recommendedVisibleWindowLimit: 1,
+      estimatedCpuPercent: 0,
+      estimatedRamMb: 0,
+      breakdown: {
+        headedBrowserWindow: { cpuPercent: 0, ramMb: 0 },
+        additionalVisibleWindows: { cpuPercent: 0, ramMb: 0 },
+        actionOverlays: { cpuPercent: 0, ramMb: 0 },
+        focusTracking: { cpuPercent: 0, ramMb: 0 }
+      }
+    },
     botAllocation: [
       {
         profileId: 'explorer',

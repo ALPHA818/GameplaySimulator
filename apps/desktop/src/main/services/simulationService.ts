@@ -12,7 +12,8 @@ import type {
   AdapterProfileOptionsResult,
   AdapterHealth,
   DesktopAdapterDependencyReport,
-  GameAdapter
+  GameAdapter,
+  ObservationCapability
 } from '../../../../../packages/adapters/src';
 import { type BotAdapter, type BotMemory } from '@core/bot/Bot';
 import { BotManager } from '@core/bot/BotManager';
@@ -20,10 +21,22 @@ import { resolveBotPools } from '@core/bot/BotPoolResolver';
 import { defaultBotProfiles } from '@core/bot/defaultBotProfiles';
 import type { AvailableGameActionLike, CoverageData } from '@core/bot/ActionPlanner';
 import { actionInsightFromAction, plannerMetadataForLog } from '@core/bot/ActionExplanation';
+import {
+  applyRuntimeObservationToRunConfig,
+  defaultRuntimeObservationConfig,
+  resolveRuntimeObservationConfig,
+  RuntimeObservationConfigSchema,
+  type RuntimeObservationConfig
+} from '@core/config/runtimeObservationConfig';
 import { CoverageTracker, type ContentCoverageSummary } from '@core/coverage/CoverageTracker';
 import { IssueDetectionRunner } from '@core/detection/IssueDetectors';
 import type { LogEntry } from '@core/logging/LogEntry';
-import { StructuredRunLogger, type BotReportInput, type IssueEventLoggerContext } from '@core/logging/StructuredLoggers';
+import {
+  StructuredRunLogger,
+  type BotReportInput,
+  type IssueEventLoggerContext,
+  type StructuredLogEventType
+} from '@core/logging/StructuredLoggers';
 import { resourceManager, type SystemResourceSnapshot } from '@core/resources/ResourceManager';
 import {
   GameInstanceManager,
@@ -61,6 +74,10 @@ import {
   type SessionReportPaths
 } from './SessionRepository';
 import { EvidenceCaptureService, type EvidenceCaptureResult } from './EvidenceCaptureService';
+import {
+  RuntimeObservationManager,
+  type ObservationSelectionChange
+} from './RuntimeObservationManager';
 
 export type SimulationRuntimeStatus =
   | 'idle'
@@ -87,6 +104,7 @@ export interface SimulationSessionRequest {
   runConfig: SimulationRunConfig;
   gameProfile: GameProfile;
   botProfiles?: BotProfile[];
+  runtimeObservation?: RuntimeObservationConfig;
 }
 
 export interface DesktopControlTestRequest {
@@ -96,6 +114,7 @@ export interface DesktopControlTestRequest {
 
 export interface GameProfileTestRequest {
   gameProfile: GameProfile;
+  showTestWindow?: boolean;
 }
 
 export interface DesktopControlTestResult {
@@ -139,6 +158,8 @@ export interface GameProfileTestResult {
   screenshotPath?: string;
   stateSummary?: string;
   desktopDependencies?: DesktopAdapterDependencyReport;
+  observationCapability: ObservationCapability;
+  observationMessage: string;
 }
 
 export interface SimulationBotStatus extends RuntimeBotSnapshot {
@@ -148,6 +169,30 @@ export interface SimulationBotStatus extends RuntimeBotSnapshot {
   progressState: string;
   issueCount: number;
   actionCount?: number;
+  actionStartedAt?: string;
+  currentScreen?: string;
+}
+
+export type LiveObservationBadge =
+  | 'Watching'
+  | 'Running in background'
+  | 'Window unavailable'
+  | 'Waiting for game';
+
+export interface LiveObservationState {
+  sessionId: string;
+  badge: LiveObservationBadge;
+  observationMode: RuntimeObservationConfig['observationMode'];
+  watchedBotId?: string;
+  watchedGameInstanceId?: string;
+  currentAction?: string;
+  actionReason?: string;
+  actionStartedAt?: string;
+  lastResult?: string;
+  currentScene?: string;
+  windowStatus: string;
+  message: string;
+  canFocusWindow: boolean;
 }
 
 export interface SimulationSessionStatusSnapshot {
@@ -320,7 +365,8 @@ export interface SimulationServiceOptions {
 const SimulationSessionRequestSchema = z.object({
   runConfig: SimulationRunConfigSchema,
   gameProfile: GameProfileSchema,
-  botProfiles: z.array(BotProfileSchema).default([])
+  botProfiles: z.array(BotProfileSchema).default([]),
+  runtimeObservation: RuntimeObservationConfigSchema.default(defaultRuntimeObservationConfig)
 });
 
 const DesktopControlTestRequestSchema = z.object({
@@ -329,7 +375,8 @@ const DesktopControlTestRequestSchema = z.object({
 });
 
 const GameProfileTestRequestSchema = z.object({
-  gameProfile: GameProfileSchema
+  gameProfile: GameProfileSchema,
+  showTestWindow: z.boolean().default(false)
 });
 
 const GitHubIssueExportRequestSchema = z.object({
@@ -388,6 +435,7 @@ interface SimulationSessionRecord {
   loggedFlowStepActionIds: Set<string>;
   loggedFlowCompletionIds: Set<string>;
   loggedFlowAbandonedIds: Set<string>;
+  loggedAdapterLogIds: Set<string>;
   startupFlow?: StartupFlowRuntimeState;
   lastPeriodicScreenshotActionCountByBot: Map<string, number>;
   videoPathsByBot: Map<string, string>;
@@ -397,6 +445,8 @@ interface SimulationSessionRecord {
   botAdapter: BotAdapter;
   gameAdapter?: GameAdapter;
   gameInstanceManager?: GameInstanceManager;
+  observationManager: RuntimeObservationManager;
+  observationWindowStatus?: string;
   useMockRuntime: boolean;
   persisted: boolean;
   persistedCoverageSummary?: ContentCoverageSummary;
@@ -525,11 +575,33 @@ function adapterCapabilitiesForTest(adapter: GameAdapter): GameProfileTestCapabi
     ['Game logs', adapter.capabilities.supportsGameLogs],
     ['Save isolation', adapter.capabilities.supportsSaveIsolation],
     ['Reset', adapter.capabilities.supportsReset],
-    ['Checkpoint reload', adapter.capabilities.supportsCheckpointReload]
+    ['Checkpoint reload', adapter.capabilities.supportsCheckpointReload],
+    ['Live observation', adapter.capabilities.supportsLiveObservation],
+    ['Window focus', adapter.capabilities.supportsWindowFocus],
+    ['Multiple visible windows', adapter.capabilities.supportsMultipleVisibleWindows]
   ].map(([label, supported]) => ({
     label: String(label),
     supported: Boolean(supported)
   }));
+}
+
+function profileTestObservationMessage(
+  adapterOptions: AdapterProfileOptionsResult,
+  health: AdapterHealth | undefined,
+  instanceMetadata: Record<string, unknown> | undefined
+): string {
+  const healthMessage = health?.details.observationMessage;
+  const metadataMessage = instanceMetadata?.observationMessage;
+
+  if (typeof healthMessage === 'string') {
+    return healthMessage;
+  }
+
+  if (typeof metadataMessage === 'string') {
+    return metadataMessage;
+  }
+
+  return adapterOptions.observationMessage;
 }
 
 function summarizeProfileTestState(state: GameStateSnapshot | null): string | undefined {
@@ -594,6 +666,8 @@ function failedProfileTestResult(input: {
     launched: false,
     stopped: false,
     capabilities: [],
+    observationCapability: input.adapterOptions.observationCapability,
+    observationMessage: input.adapterOptions.observationMessage,
     availableActions: [],
     logs: [],
     desktopDependencies: input.desktopDependencies
@@ -1307,7 +1381,15 @@ export class SimulationService {
     }
 
     const useMockRuntime = result.data.runConfig.useMockRuntime ?? this.useMockRuntime;
-    const adapterOptions = createAdapterOptionsFromGameProfile(result.data.gameProfile, result.data.runConfig);
+    const runtimeObservation = resolveRuntimeObservationConfig(
+      result.data.runConfig,
+      result.data.runtimeObservation
+    );
+    const adapterOptions = createAdapterOptionsFromGameProfile(
+      result.data.gameProfile,
+      result.data.runConfig,
+      runtimeObservation
+    );
     const startupFlowMissing =
       result.data.runConfig.startupFlowId && !startupFlowFor(result.data.gameProfile, result.data.runConfig)
         ? [
@@ -1341,6 +1423,7 @@ export class SimulationService {
     const report = resourceManager.estimateViabilitySync({
       runConfig: request.runConfig,
       gameProfile: request.gameProfile,
+      runtimeObservation: request.runtimeObservation,
       systemSnapshot: this.systemSnapshot
     });
 
@@ -1373,7 +1456,17 @@ export class SimulationService {
   async testGameProfile(payload: unknown): Promise<GameProfileTestResult> {
     const request = GameProfileTestRequestSchema.parse(payload);
     const runConfig = createTemporaryGameProfileTestRunConfig(request.gameProfile);
-    const adapterOptions = createAdapterOptionsFromGameProfile(request.gameProfile, runConfig);
+    const profileTestObservation = RuntimeObservationConfigSchema.parse({
+      showBotGameplay: request.showTestWindow,
+      observationMode: request.showTestWindow ? 'follow-first-bot' : 'background',
+      visibleActionDelayMs: request.showTestWindow ? 250 : 0,
+      maxVisibleGameWindows: 1
+    });
+    const adapterOptions = createAdapterOptionsFromGameProfile(
+      request.gameProfile,
+      runConfig,
+      profileTestObservation
+    );
     const usesDesktopRuntime =
       adapterOptions.runtimeMode === 'desktop-window' ||
       adapterOptions.runtimeMode === 'engine-desktop-fallback';
@@ -1416,6 +1509,10 @@ export class SimulationService {
       });
       launched = true;
       instanceMetadata = instance.metadata;
+
+      if (request.showTestWindow && adapter.adapterType === 'browser') {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_500));
+      }
 
       health = await adapter.getHealth(instanceId).catch((error: unknown) => {
         warnings.push({
@@ -1485,7 +1582,9 @@ export class SimulationService {
         }),
         launched: wasLaunched,
         stopped,
-        capabilities: adapterCapabilitiesForTest(adapter)
+        capabilities: adapterCapabilitiesForTest(adapter),
+        observationCapability: adapter.capabilities.observationCapability,
+        observationMessage: profileTestObservationMessage(adapterOptions, health, instanceMetadata)
       };
     } finally {
       if (launched) {
@@ -1528,6 +1627,8 @@ export class SimulationService {
       stopped,
       running,
       capabilities: adapterCapabilitiesForTest(adapter),
+      observationCapability: adapter.capabilities.observationCapability,
+      observationMessage: profileTestObservationMessage(adapterOptions, health, instanceMetadata),
       health,
       detectedGame: detectedGameFromProfileTest(request.gameProfile, health, instanceMetadata),
       availableActions,
@@ -1685,9 +1786,22 @@ export class SimulationService {
   }
 
   createSession(payload: unknown): SimulationSessionCreateResult {
-    const request = SimulationSessionRequestSchema.parse(payload);
+    const parsedRequest = SimulationSessionRequestSchema.parse(payload);
+    const runtimeObservation = resolveRuntimeObservationConfig(
+      parsedRequest.runConfig,
+      parsedRequest.runtimeObservation
+    );
+    const request = {
+      ...parsedRequest,
+      runConfig: applyRuntimeObservationToRunConfig(parsedRequest.runConfig, runtimeObservation),
+      runtimeObservation
+    };
     const useMockRuntime = request.runConfig.useMockRuntime ?? this.useMockRuntime;
-    const adapterOptions = createAdapterOptionsFromGameProfile(request.gameProfile, request.runConfig);
+    const adapterOptions = createAdapterOptionsFromGameProfile(
+      request.gameProfile,
+      request.runConfig,
+      request.runtimeObservation
+    );
 
     if (!useMockRuntime && adapterOptions.errors.length > 0) {
       throw new Error(formatSimulationValidationErrors(adapterOptions.errors));
@@ -1792,7 +1906,8 @@ export class SimulationService {
       request: {
         runConfig: request.runConfig,
         gameProfile: request.gameProfile,
-        botProfiles
+        botProfiles,
+        runtimeObservation: request.runtimeObservation
       },
       viabilityReport,
       status: 'created',
@@ -1853,6 +1968,7 @@ export class SimulationService {
       loggedFlowStepActionIds: new Set(),
       loggedFlowCompletionIds: new Set(),
       loggedFlowAbandonedIds: new Set(),
+      loggedAdapterLogIds: new Set(),
       startupFlow: startupFlow
         ? {
             flowId: startupFlow.flowId,
@@ -1872,6 +1988,7 @@ export class SimulationService {
       botAdapter,
       gameAdapter,
       gameInstanceManager,
+      observationManager: new RuntimeObservationManager(request.runtimeObservation),
       useMockRuntime,
       persisted: false
     };
@@ -2116,6 +2233,79 @@ export class SimulationService {
 
   getBotStatuses(sessionId: string): SimulationBotStatus[] {
     return this.requireSession(sessionId).botStatuses.map((bot) => ({ ...bot }));
+  }
+
+  async getLiveObservationState(sessionId: string): Promise<LiveObservationState> {
+    const record = this.requireSession(sessionId);
+    const change = record.observationManager.reconcile(record.botStatuses);
+
+    if (change) {
+      await this.applyObservationSelectionChange(record, change);
+    }
+
+    return this.liveObservationStateFor(record);
+  }
+
+  async followBot(sessionId: string, botId: string): Promise<LiveObservationState> {
+    const record = this.requireSession(sessionId);
+    const change = record.observationManager.follow(botId, record.botStatuses);
+    await this.applyObservationSelectionChange(record, change);
+    return this.liveObservationStateFor(record);
+  }
+
+  async stopFollowingBot(sessionId: string): Promise<LiveObservationState> {
+    const record = this.requireSession(sessionId);
+    const change = record.observationManager.stopFollowing();
+    await this.applyObservationSelectionChange(record, change);
+    return this.liveObservationStateFor(record);
+  }
+
+  async showAdjacentBot(
+    sessionId: string,
+    direction: 'next' | 'previous'
+  ): Promise<LiveObservationState> {
+    const record = this.requireSession(sessionId);
+    const change = record.observationManager.move(direction, record.botStatuses);
+
+    if (change) {
+      await this.applyObservationSelectionChange(record, change);
+    }
+
+    return this.liveObservationStateFor(record);
+  }
+
+  async focusObservedGameWindow(sessionId: string): Promise<LiveObservationState> {
+    const record = this.requireSession(sessionId);
+    const change = record.observationManager.reconcile(record.botStatuses);
+
+    if (change) {
+      await this.applyObservationSelectionChange(record, change);
+    }
+
+    const bot = record.botStatuses.find(
+      (candidate) => candidate.botId === record.observationManager.selectedBotId
+    );
+    const instanceId = bot?.gameInstanceId;
+    const adapter = record.gameAdapter;
+
+    if (!instanceId) {
+      record.observationWindowStatus = 'Waiting for a watched bot with an assigned game instance.';
+      return this.liveObservationStateFor(record);
+    }
+
+    if (!adapter?.openOrFocusGameWindow) {
+      record.observationWindowStatus = adapter?.capabilities.supportsLiveObservation
+        ? 'Window focus is not supported by this adapter.'
+        : 'The test is running, but only logs and screenshots can be viewed.';
+      return this.liveObservationStateFor(record);
+    }
+
+    const focusResult = await adapter.openOrFocusGameWindow(instanceId).catch((error: unknown) => ({
+      message: error instanceof Error ? error.message : 'The game window could not be focused.'
+    }));
+    record.observationWindowStatus = focusResult.message;
+    record.logs.push(this.createLog(sessionId, focusResult.message.includes('could not') ? 'warn' : 'info', focusResult.message));
+    return this.liveObservationStateFor(record);
   }
 
   stopBot(sessionId: string, botId: string): SimulationBotStatus[] {
@@ -3333,7 +3523,8 @@ export class SimulationService {
       request: {
         runConfig: artifacts.runConfig,
         gameProfile: artifacts.gameProfile,
-        botProfiles
+        botProfiles,
+        runtimeObservation: resolveRuntimeObservationConfig(artifacts.runConfig)
       },
       viabilityReport: artifacts.viabilityReport,
       status: artifacts.metadata.status,
@@ -3365,6 +3556,7 @@ export class SimulationService {
       loggedFlowStepActionIds: new Set(),
       loggedFlowCompletionIds: new Set(),
       loggedFlowAbandonedIds: new Set(),
+      loggedAdapterLogIds: new Set(),
       lastPeriodicScreenshotActionCountByBot: new Map(),
       videoPathsByBot: new Map(),
       evidenceCaptureService: new EvidenceCaptureService({
@@ -3373,6 +3565,7 @@ export class SimulationService {
       sessionStartLogged: true,
       sessionStopLogged: true,
       botAdapter,
+      observationManager: new RuntimeObservationManager(resolveRuntimeObservationConfig(artifacts.runConfig)),
       useMockRuntime: false,
       persisted: true,
       persistedCoverageSummary: artifacts.coverageSummary
@@ -3640,6 +3833,7 @@ export class SimulationService {
     try {
       record.instanceStatuses = await record.gameInstanceManager.refreshHealth();
       this.logInstanceManagerEvents(record);
+      await this.refreshAdapterLogs(record);
       record.label = statusLabel(record);
       this.writeStructuredReports(record);
     } catch (error) {
@@ -3689,6 +3883,7 @@ export class SimulationService {
       } else {
         this.markInstancesStopped(record);
       }
+      await this.refreshAdapterLogs(record);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown adapter shutdown failure.';
       record.logs.push(this.createLog(sessionId, 'warn', `Adapter shutdown failed during ${reason}: ${message}`));
@@ -3704,6 +3899,154 @@ export class SimulationService {
     }
 
     this.markInstancesStopped(record);
+  }
+
+  private async refreshAdapterLogs(record: SimulationSessionRecord): Promise<void> {
+    const adapter = record.gameAdapter;
+
+    if (!adapter?.captureLogs) {
+      return;
+    }
+
+    const observationEventTypes = new Set<StructuredLogEventType>([
+      'visible_window_started',
+      'visible_window_stopped',
+      'observation_bot_changed',
+      'observation_limit_reached'
+    ]);
+
+    for (const instance of record.instanceStatuses) {
+      const logs = await adapter.captureLogs(instance.instanceId).catch(() => []);
+
+      for (const entry of logs) {
+        if (record.loggedAdapterLogIds.has(entry.id)) {
+          continue;
+        }
+
+        record.loggedAdapterLogIds.add(entry.id);
+        record.logs.push(entry);
+        const eventType = entry.message.split(':', 1)[0] as StructuredLogEventType;
+
+        if (observationEventTypes.has(eventType)) {
+          const event = record.structuredLogger.logSession(
+            eventType,
+            {
+              level: entry.level,
+              message: entry.message,
+              source: entry.source
+            },
+            {
+              gameInstanceId: instance.instanceId,
+              timestamp: entry.timestamp
+            }
+          );
+          record.structuredLogger.logInstance(event, instance);
+        }
+      }
+    }
+  }
+
+  private async applyObservationSelectionChange(
+    record: SimulationSessionRecord,
+    change: ObservationSelectionChange
+  ): Promise<void> {
+    const sessionId = record.request.runConfig.sessionId;
+    const adapter = record.gameAdapter;
+
+    await adapter?.updateObservationTarget?.({
+      botId: change.watchedBotId,
+      instanceId: change.watchedGameInstanceId,
+      observationMode: change.observationMode
+    });
+    record.observationWindowStatus = undefined;
+    record.logs.push(this.createLog(sessionId, 'info', `observation_bot_changed: ${change.message}`));
+    record.structuredLogger.logSession(
+      'observation_bot_changed',
+      {
+        previousBotId: change.previousBotId,
+        watchedBotId: change.watchedBotId,
+        watchedGameInstanceId: change.watchedGameInstanceId,
+        observationMode: change.observationMode,
+        reason: change.reason,
+        message: change.message
+      },
+      {
+        botId: change.watchedBotId,
+        gameInstanceId: change.watchedGameInstanceId,
+        timestamp: this.now()
+      }
+    );
+  }
+
+  private liveObservationStateFor(record: SimulationSessionRecord): LiveObservationState {
+    const observationConfig =
+      record.request.runtimeObservation ?? resolveRuntimeObservationConfig(record.request.runConfig);
+    const watchedBotId = record.observationManager.selectedBotId;
+    const bot = record.botStatuses.find((candidate) => candidate.botId === watchedBotId);
+    const instance = record.instanceStatuses.find(
+      (candidate) => candidate.instanceId === bot?.gameInstanceId
+    );
+    const adapter = record.gameAdapter;
+    const supportsObservation = adapter?.capabilities.supportsLiveObservation ?? false;
+    const isBackground =
+      !observationConfig.showBotGameplay || record.observationManager.mode === 'background';
+    let badge: LiveObservationBadge;
+
+    if (!bot || !instance || ['starting', 'stopping'].includes(instance.status)) {
+      badge = 'Waiting for game';
+    } else if (!supportsObservation) {
+      badge = 'Window unavailable';
+    } else if (isBackground) {
+      badge = 'Running in background';
+    } else {
+      badge = 'Watching';
+    }
+
+    const windowStatus = record.observationWindowStatus ?? (() => {
+      if (!adapter) {
+        return record.persisted
+          ? 'This saved session has no live game window.'
+          : 'Waiting for the game adapter.';
+      }
+
+      if (!supportsObservation) {
+        return adapter.capabilities.observationCapability === 'unavailable'
+          ? 'The test is running, but only logs and screenshots can be viewed.'
+          : 'Window focus is not supported by this adapter.';
+      }
+
+      if (!instance) {
+        return 'Waiting for the watched bot to receive a game instance.';
+      }
+
+      if (isBackground) {
+        return 'The game is running without window following or focus changes.';
+      }
+
+      return instance.status === 'running'
+        ? 'The watched game window is available.'
+        : `The watched game instance is ${instance.status}.`;
+    })();
+
+    return {
+      sessionId: record.request.runConfig.sessionId,
+      badge,
+      observationMode: record.observationManager.mode,
+      watchedBotId: bot?.botId,
+      watchedGameInstanceId: bot?.gameInstanceId,
+      currentAction: bot?.currentAction,
+      actionReason: bot?.actionReason,
+      actionStartedAt: bot?.actionStartedAt,
+      lastResult: bot?.lastResult,
+      currentScene: bot?.currentScreen ?? bot?.currentArea,
+      windowStatus,
+      message: record.observationManager.message,
+      canFocusWindow: Boolean(
+        instance?.status === 'running' &&
+        adapter?.capabilities.supportsWindowFocus &&
+        adapter.openOrFocusGameWindow
+      )
+    };
   }
 
   private markInstancesStopped(record: SimulationSessionRecord): void {
@@ -5200,13 +5543,20 @@ export class SimulationService {
       currentAction: status.currentAction,
       actionReason: status.actionReason,
       actionQuality: status.actionQuality,
+      actionStartedAt: memory.lastAction?.requestedAt,
       lastResult: status.lastResult,
       nextLikelyAction: status.nextLikelyAction,
       currentArea: memory.currentArea ?? current.currentArea,
+      currentScreen: memory.lastState?.uiState?.currentScreen ?? memory.lastState?.scene,
       progressState: memory.progressState ?? status.message ?? current.progressState,
       issueCount,
       message: status.message
     };
+    const observationChange = record.observationManager.reconcile(record.botStatuses);
+
+    if (observationChange) {
+      await this.applyObservationSelectionChange(record, observationChange);
+    }
     record.tick = record.botStatuses.reduce((total, bot) => {
       const memory = record.botManager.getMemory(bot.botId);
       return total + (memory?.actionCount ?? 0);

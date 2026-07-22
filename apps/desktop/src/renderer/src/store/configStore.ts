@@ -5,6 +5,11 @@ import {
   defaultAdvancedIntelligenceConfig,
   type AdvancedIntelligenceConfig
 } from '@core/config/advancedIntelligenceConfig';
+import {
+  defaultRuntimeObservationConfig,
+  RuntimeObservationConfigSchema,
+  type RuntimeObservationConfig
+} from '@core/config/runtimeObservationConfig';
 import { create } from 'zustand';
 import type { PageId } from '../routes';
 
@@ -16,11 +21,65 @@ interface ConfigState {
   runConfigs: SimulationRunConfig[];
   lastValidatedRunConfig: SimulationRunConfig | null;
   advancedIntelligence: AdvancedIntelligenceConfig;
+  runtimeObservation: RuntimeObservationConfig;
   navigate: (page: PageId) => void;
   openGameProfileEditor: (gameId?: string) => void;
   saveGameProfile: (profile: GameProfile) => void;
   saveRunConfig: (config: SimulationRunConfig) => void;
   updateAdvancedIntelligence: (patch: Partial<AdvancedIntelligenceConfig>) => void;
+  updateRuntimeObservation: (patch: Partial<RuntimeObservationConfig>) => void;
+}
+
+type PreferenceStorage = Pick<Storage, 'getItem' | 'setItem'>;
+
+export const RUNTIME_OBSERVATION_STORAGE_KEY = 'gameplay-simulator.runtime-observation.v1';
+
+function browserPreferenceStorage(): PreferenceStorage | undefined {
+  if (typeof window === 'undefined') {
+    return undefined;
+  }
+
+  try {
+    return window.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+export function loadRuntimeObservationPreference(
+  storage: PreferenceStorage | undefined = browserPreferenceStorage()
+): RuntimeObservationConfig {
+  if (!storage) {
+    return defaultRuntimeObservationConfig;
+  }
+
+  try {
+    const saved = storage.getItem(RUNTIME_OBSERVATION_STORAGE_KEY);
+
+    if (!saved) {
+      return defaultRuntimeObservationConfig;
+    }
+
+    const result = RuntimeObservationConfigSchema.safeParse(JSON.parse(saved));
+    return result.success ? result.data : defaultRuntimeObservationConfig;
+  } catch {
+    return defaultRuntimeObservationConfig;
+  }
+}
+
+export function saveRuntimeObservationPreference(
+  config: RuntimeObservationConfig,
+  storage: PreferenceStorage | undefined = browserPreferenceStorage()
+): void {
+  if (!storage) {
+    return;
+  }
+
+  try {
+    storage.setItem(RUNTIME_OBSERVATION_STORAGE_KEY, JSON.stringify(config));
+  } catch {
+    // Settings remain usable when browser storage is unavailable or full.
+  }
 }
 
 const seededGameProfiles: GameProfile[] = [
@@ -158,6 +217,7 @@ export const useConfigStore = create<ConfigState>((set) => ({
   runConfigs: [],
   lastValidatedRunConfig: null,
   advancedIntelligence: defaultAdvancedIntelligenceConfig,
+  runtimeObservation: loadRuntimeObservationPreference(),
   navigate: (currentPage) => set({ currentPage }),
   openGameProfileEditor: (gameId) =>
     set({ currentPage: 'gameProfileEditor', editingGameId: gameId ?? null }),
@@ -186,5 +246,15 @@ export const useConfigStore = create<ConfigState>((set) => ({
         ...state.advancedIntelligence,
         ...patch
       })
-    }))
+    })),
+  updateRuntimeObservation: (patch) =>
+    set((state) => {
+      const runtimeObservation = RuntimeObservationConfigSchema.parse({
+        ...state.runtimeObservation,
+        ...patch
+      });
+
+      saveRuntimeObservationPreference(runtimeObservation);
+      return { runtimeObservation };
+    })
 }));

@@ -30,6 +30,15 @@ describe('core model schemas', () => {
     expect(config.botPools[0].maxCount).toBe(20);
   });
 
+  it('keeps old run configs valid when session observation fields are absent', () => {
+    const config = SimulationRunConfigSchema.parse(
+      readExampleJson('examples/run-configs/sample-run-config.json')
+    );
+
+    expect(config.showBotGameplay).toBeUndefined();
+    expect(config.observationMode).toBeUndefined();
+  });
+
   it('validates a bot profile', () => {
     const profile = BotProfileSchema.parse(readExampleJson('examples/bot-profiles/explorer.json'));
 

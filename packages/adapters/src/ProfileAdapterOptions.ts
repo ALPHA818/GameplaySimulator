@@ -6,8 +6,13 @@ import type {
   InstrumentationTransportType,
   SimulationRunConfig
 } from '@core/types';
+import {
+  defaultRuntimeObservationConfig,
+  type RuntimeObservationConfig
+} from '@core/config/runtimeObservationConfig';
 import type { AdapterFactoryOptions } from './AdapterFactory';
-import type { AdapterCapabilities } from './base/GameAdapter';
+import type { AdapterCapabilities, ObservationCapability } from './base/GameAdapter';
+import { createExternalDesktopWindowFocusHandler } from './desktop/DesktopWindowAdapter';
 
 export interface AdapterProfileValidationIssue {
   path: string;
@@ -34,6 +39,8 @@ export interface AdapterProfileOptionsResult {
   browserName?: string;
   browserDomScanMode: BrowserDomScanMode;
   screenshotDirectory: string;
+  observationCapability: ObservationCapability;
+  observationMessage: string;
 }
 
 const engineAdapterTypes = new Set<AdapterType>(['unity', 'godot', 'unreal']);
@@ -54,7 +61,8 @@ function cloneControlBindings(bindings: ControlBinding[]): ControlBinding[] {
 function adapterCapabilitiesFromProfile(
   gameProfile: GameProfile,
   adapterType: AdapterType,
-  usesDesktopFallback: boolean
+  usesDesktopFallback: boolean,
+  observationCapability: ObservationCapability
 ): Partial<AdapterCapabilities> {
   const supportsMultipleBotsPerInstance =
     !usesDesktopFallback &&
@@ -75,8 +83,49 @@ function adapterCapabilitiesFromProfile(
     supportsGameLogs: gameProfile.adapter.supportsStateRead,
     supportsSaveIsolation: gameProfile.adapter.supportsSaveIsolation,
     supportsReset: gameProfile.adapter.supportsDirectActions,
-    supportsCheckpointReload: gameProfile.adapter.supportsDirectActions
+    supportsCheckpointReload: gameProfile.adapter.supportsDirectActions,
+    supportsLiveObservation: observationCapability !== 'unavailable',
+    supportsWindowFocus: observationCapability === 'external-window' || usesDesktopFallback || adapterType === 'browser',
+    supportsMultipleVisibleWindows:
+      adapterType === 'browser' || (usesDesktopFallback && gameProfile.adapter.supportsMultipleInstances),
+    observationCapability
   };
+}
+
+function observationCapabilityFor(
+  gameProfile: GameProfile,
+  runtimeMode: AdapterRuntimeMode
+): ObservationCapability {
+  if (runtimeMode === 'browser' || runtimeMode === 'desktop-window' || runtimeMode === 'engine-desktop-fallback') {
+    return 'visible-window';
+  }
+
+  if (runtimeMode === 'instrumented' || runtimeMode === 'engine-instrumented') {
+    return trimmed(gameProfile.launch.executablePath) ? 'external-window' : 'unavailable';
+  }
+
+  return 'unavailable';
+}
+
+function observationMessageFor(
+  runtimeMode: AdapterRuntimeMode,
+  observationCapability: ObservationCapability
+): string {
+  if (runtimeMode === 'desktop-window' || runtimeMode === 'engine-desktop-fallback') {
+    return 'This game is already running in a visible desktop window.';
+  }
+
+  if (runtimeMode === 'browser') {
+    return 'This browser adapter can open a visible game window when Show Bot Gameplay is enabled.';
+  }
+
+  if (runtimeMode === 'instrumented' || runtimeMode === 'engine-instrumented') {
+    return observationCapability === 'unavailable'
+      ? 'This instrumented target has no visible game window.'
+      : 'This instrumented target uses an external game window that the simulator can try to focus.';
+  }
+
+  return 'The test is running, but only logs and screenshots can be viewed.';
 }
 
 function instrumentationEndpointFor(gameProfile: GameProfile, adapterType: AdapterType): string | undefined {
@@ -212,7 +261,8 @@ function validateProfileAdapterSettings(input: {
 
 export function createAdapterOptionsFromGameProfile(
   gameProfile: GameProfile,
-  runConfig: SimulationRunConfig
+  runConfig: SimulationRunConfig,
+  runtimeObservation: RuntimeObservationConfig = defaultRuntimeObservationConfig
 ): AdapterProfileOptionsResult {
   const adapterType = runConfig.adapterType;
   const instrumentationEndpoint = instrumentationEndpointFor(gameProfile, adapterType);
@@ -222,7 +272,14 @@ export function createAdapterOptionsFromGameProfile(
   const browserDomScanMode = gameProfile.adapter.browserDomScanMode ?? 'fallback';
   const runtimeMode = runtimeModeFor(adapterType, instrumentationEndpoint);
   const usesDesktopFallback = runtimeMode === 'desktop-window' || runtimeMode === 'engine-desktop-fallback';
-  const capabilities = adapterCapabilitiesFromProfile(gameProfile, adapterType, usesDesktopFallback);
+  const observationCapability = observationCapabilityFor(gameProfile, runtimeMode);
+  const observationMessage = observationMessageFor(runtimeMode, observationCapability);
+  const capabilities = adapterCapabilitiesFromProfile(
+    gameProfile,
+    adapterType,
+    usesDesktopFallback,
+    observationCapability
+  );
   const controlBindings = cloneControlBindings(gameProfile.controls);
   const launchArguments = [...gameProfile.launch.arguments];
   const screenshotDirectory = `runs/${runConfig.sessionId}/adapter-screenshots`;
@@ -232,11 +289,17 @@ export function createAdapterOptionsFromGameProfile(
     launchArguments,
     controlBindings,
     screenshotDirectory,
+    runtimeObservation,
     capabilities
   };
   const instrumentedOptions = {
     instrumentationEndpoint,
     instrumentationTransport,
+    observationCapability,
+    windowFocusHandler:
+      observationCapability === 'external-window' && gameProfile.launch.executablePath
+        ? createExternalDesktopWindowFocusHandler(gameProfile.launch.executablePath)
+        : undefined,
     capabilities
   };
   const options: AdapterFactoryOptions = {
@@ -246,25 +309,35 @@ export function createAdapterOptionsFromGameProfile(
       domScanMode: browserDomScanMode,
       controlBindings,
       screenshotDirectory,
+      headless:
+        !runtimeObservation.showBotGameplay || runtimeObservation.observationMode === 'background',
+      runtimeObservation,
       capabilities
     },
     custom: {
       protocolName: gameProfile.engine.type,
+      observationCapability,
       capabilities
     },
     desktop: desktopOptions,
     instrumented: instrumentedOptions,
     unity: {
       unityVersion: gameProfile.engine.version,
-      instrumentationEndpoint
+      instrumentationEndpoint,
+      desktopOptions,
+      instrumentedOptions
     },
     godot: {
       godotVersion: gameProfile.engine.version,
-      instrumentationEndpoint
+      instrumentationEndpoint,
+      desktopOptions,
+      instrumentedOptions
     },
     unreal: {
       unrealVersion: gameProfile.engine.version,
-      instrumentationEndpoint
+      instrumentationEndpoint,
+      desktopOptions,
+      instrumentedOptions
     }
   };
   const validation = validateProfileAdapterSettings({
@@ -286,6 +359,8 @@ export function createAdapterOptionsFromGameProfile(
     browserUrl,
     browserName,
     browserDomScanMode,
-    screenshotDirectory
+    screenshotDirectory,
+    observationCapability,
+    observationMessage
   };
 }

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { SimulationService } from '../services/simulationService';
 
 const SessionIdSchema = z.string().min(1);
+const ObservationDirectionSchema = z.enum(['next', 'previous']);
 const SessionCleanupOptionsSchema = z.object({
   sessionId: SessionIdSchema,
   deleteRawStateLogs: z.boolean().default(false),
@@ -39,6 +40,24 @@ export function registerSimulationIpc(service: SimulationService): void {
   );
   ipcMain.handle('simulation:getBotStatuses', (_event, sessionId: unknown) =>
     service.getBotStatuses(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:getLiveObservationState', (_event, sessionId: unknown) =>
+    service.getLiveObservationState(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:followBot', (_event, sessionId: unknown, botId: unknown) =>
+    service.followBot(SessionIdSchema.parse(sessionId), SessionIdSchema.parse(botId))
+  );
+  ipcMain.handle('simulation:stopFollowingBot', (_event, sessionId: unknown) =>
+    service.stopFollowingBot(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:showAdjacentBot', (_event, sessionId: unknown, direction: unknown) =>
+    service.showAdjacentBot(
+      SessionIdSchema.parse(sessionId),
+      ObservationDirectionSchema.parse(direction)
+    )
+  );
+  ipcMain.handle('simulation:focusObservedGameWindow', (_event, sessionId: unknown) =>
+    service.focusObservedGameWindow(SessionIdSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:stopBot', (_event, sessionId: unknown, botId: unknown) =>
     service.stopBot(SessionIdSchema.parse(sessionId), SessionIdSchema.parse(botId))

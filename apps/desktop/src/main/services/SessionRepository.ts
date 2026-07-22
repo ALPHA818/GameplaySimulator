@@ -24,6 +24,11 @@ import {
 import type { LogEntry } from '@core/logging/LogEntry';
 import type { ContentCoverageSummary } from '@core/coverage/CoverageTracker';
 import { actionInsightFromAction, actionResultSummary } from '@core/bot/ActionExplanation';
+import {
+  resolveRuntimeObservationConfig,
+  RuntimeObservationConfigSchema,
+  type RuntimeObservationConfig
+} from '@core/config/runtimeObservationConfig';
 import type { SimulationBotStatus, SimulationRuntimeStatus } from './simulationService';
 
 export interface SessionIssueCounts {
@@ -71,6 +76,7 @@ export interface PersistedSessionMetadata {
   adapterType?: string;
   runMode?: string;
   sessionLabel?: SessionLabel;
+  runtimeObservation?: RuntimeObservationConfig;
   createdAt: string;
   startedAt?: string;
   stoppedAt?: string;
@@ -389,6 +395,7 @@ export class SessionRepository {
       adapterType: input.runConfig.adapterType,
       runMode: input.runConfig.runMode,
       sessionLabel: input.runConfig.sessionLabel ?? 'Custom',
+      runtimeObservation: resolveRuntimeObservationConfig(input.runConfig),
       createdAt: input.createdAt,
       startedAt: input.startedAt,
       stoppedAt: input.stoppedAt,
@@ -519,6 +526,8 @@ export class SessionRepository {
             }
           : reportPathsFor(sessionDir);
 
+      const parsedObservation = RuntimeObservationConfigSchema.safeParse(metadata.runtimeObservation);
+
       return {
         sessionId: String(metadata.sessionId ?? config.runConfig.sessionId),
         gameName: String(metadata.gameName ?? config.gameProfile.gameName),
@@ -529,6 +538,9 @@ export class SessionRepository {
         adapterType: typeof metadata.adapterType === 'string' ? metadata.adapterType : config.runConfig.adapterType,
         runMode: typeof metadata.runMode === 'string' ? metadata.runMode : config.runConfig.runMode,
         sessionLabel: safeSessionLabel(metadata.sessionLabel ?? metadata.label, config.runConfig.sessionLabel ?? 'Custom'),
+        runtimeObservation: parsedObservation.success
+          ? parsedObservation.data
+          : resolveRuntimeObservationConfig(config.runConfig),
         createdAt: String(metadata.createdAt ?? latestTimestamp(sessionEvents, 'session_start') ?? new Date(0).toISOString()),
         startedAt: typeof metadata.startedAt === 'string' ? metadata.startedAt : latestTimestamp(sessionEvents, 'session_start'),
         stoppedAt: typeof metadata.stoppedAt === 'string' ? metadata.stoppedAt : latestTimestamp(sessionEvents, 'session_stop'),
@@ -555,6 +567,7 @@ export class SessionRepository {
       adapterType: config.runConfig.adapterType,
       runMode: config.runConfig.runMode,
       sessionLabel: config.runConfig.sessionLabel ?? 'Custom',
+      runtimeObservation: resolveRuntimeObservationConfig(config.runConfig),
       createdAt,
       startedAt,
       stoppedAt,

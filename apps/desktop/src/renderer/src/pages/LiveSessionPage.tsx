@@ -1,7 +1,21 @@
 import type { BotPoolConfig } from '@core/types';
-import { BookOpen, FileText, Pause, Play, RotateCw, Square, UserX, UsersRound } from 'lucide-react';
-import { useMemo, useState } from 'react';
-import { FieldLabel } from '../components/FormFields';
+import {
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+  Eye,
+  EyeOff,
+  FileText,
+  Focus,
+  Pause,
+  Play,
+  RotateCw,
+  Square,
+  UserX,
+  UsersRound
+} from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { FieldLabel, SelectInput } from '../components/FormFields';
 import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
 
@@ -49,6 +63,7 @@ export function LiveSessionPage() {
   const issues = useSessionStore((state) => state.issues);
   const logs = useSessionStore((state) => state.logs);
   const coverage = useSessionStore((state) => state.coverage);
+  const liveObservation = useSessionStore((state) => state.liveObservation);
   const applySessionSnapshot = useSessionStore((state) => state.applySessionSnapshot);
   const applyRuntimeDetails = useSessionStore((state) => state.applyRuntimeDetails);
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
@@ -90,11 +105,14 @@ export function LiveSessionPage() {
       };
     });
   }, [activeConfig, botStatuses, issueCountByBot]);
-  const selectedBot = botStatuses.find((bot) => bot.botId === selectedBotId) ?? botStatuses[0] ?? null;
-  const selectedBotProfile = botProfiles.find((profile) => profile.profileId === selectedBot?.profileId);
+  const activeBots = botStatuses.filter((bot) => isRunningStatus(bot.status));
+  const selectedBot = botStatuses.find((bot) => bot.botId === selectedBotId) ?? activeBots[0] ?? botStatuses[0] ?? null;
+  const watchedBot = botStatuses.find((bot) => bot.botId === liveObservation?.watchedBotId) ?? null;
+  const actionBot = watchedBot ?? selectedBot;
+  const selectedBotProfile = botProfiles.find((profile) => profile.profileId === actionBot?.profileId);
   const selectedBotGoal =
-    selectedBot?.currentGoal ??
-    selectedBotProfile?.goals.find((goal) => goal.goalId === selectedBot?.currentGoalId)?.name ??
+    actionBot?.currentGoal ??
+    selectedBotProfile?.goals.find((goal) => goal.goalId === actionBot?.currentGoalId)?.name ??
     selectedBotProfile?.goals[0]?.name ??
     'No active goal';
   const selectedPool = selectedPoolId ?? selectedBot?.profileId ?? botPools[0]?.profileId ?? null;
@@ -103,14 +121,26 @@ export function LiveSessionPage() {
   const canResume = activeSessionId !== null && status === 'paused';
   const canStop = activeSessionId !== null && ['created', 'starting', 'running', 'paused'].includes(status);
 
+  useEffect(() => {
+    if (liveObservation?.watchedBotId) {
+      setSelectedBotId(liveObservation.watchedBotId);
+      return;
+    }
+
+    if (!selectedBotId || !botStatuses.some((bot) => bot.botId === selectedBotId)) {
+      setSelectedBotId(activeBots[0]?.botId ?? botStatuses[0]?.botId ?? null);
+    }
+  }, [activeBots, botStatuses, liveObservation?.watchedBotId, selectedBotId]);
+
   async function refreshSession(sessionId: string) {
-    const [snapshot, nextBots, nextInstances, nextIssues, nextLogs, nextCoverage] = await Promise.all([
+    const [snapshot, nextBots, nextInstances, nextIssues, nextLogs, nextCoverage, nextObservation] = await Promise.all([
       window.gameplaySimulator.simulation.getSessionStatus(sessionId),
       window.gameplaySimulator.simulation.getBotStatuses(sessionId),
       window.gameplaySimulator.simulation.getInstanceStatuses(sessionId),
       window.gameplaySimulator.simulation.getIssues(sessionId),
       window.gameplaySimulator.simulation.getLogs(sessionId),
-      window.gameplaySimulator.simulation.getCoverage(sessionId)
+      window.gameplaySimulator.simulation.getCoverage(sessionId),
+      window.gameplaySimulator.simulation.getLiveObservationState(sessionId)
     ]);
 
     applySessionSnapshot(snapshot);
@@ -119,7 +149,8 @@ export function LiveSessionPage() {
       instanceStatuses: nextInstances,
       issues: nextIssues,
       logs: nextLogs,
-      coverage: nextCoverage
+      coverage: nextCoverage,
+      liveObservation: nextObservation
     });
   }
 
@@ -196,8 +227,46 @@ export function LiveSessionPage() {
     }
   }
 
+  async function followBot(botId: string) {
+    if (!activeSessionId) {
+      return;
+    }
+
+    const observation = await window.gameplaySimulator.simulation.followBot(activeSessionId, botId);
+    setSelectedBotId(observation.watchedBotId ?? botId);
+    applyRuntimeDetails({ liveObservation: observation });
+  }
+
+  async function stopFollowing() {
+    if (!activeSessionId) {
+      return;
+    }
+
+    const observation = await window.gameplaySimulator.simulation.stopFollowingBot(activeSessionId);
+    applyRuntimeDetails({ liveObservation: observation });
+  }
+
+  async function showAdjacentBot(direction: 'next' | 'previous') {
+    if (!activeSessionId) {
+      return;
+    }
+
+    const observation = await window.gameplaySimulator.simulation.showAdjacentBot(activeSessionId, direction);
+    setSelectedBotId(observation.watchedBotId ?? null);
+    applyRuntimeDetails({ liveObservation: observation });
+  }
+
+  async function focusGameWindow() {
+    if (!activeSessionId) {
+      return;
+    }
+
+    const observation = await window.gameplaySimulator.simulation.focusObservedGameWindow(activeSessionId);
+    applyRuntimeDetails({ liveObservation: observation });
+  }
+
   return (
-    <section className="page-stack">
+    <section className="page-stack live-session-page">
       <div className="page-header">
         <div>
           <p className="eyebrow">Monitor</p>
@@ -270,6 +339,159 @@ export function LiveSessionPage() {
             <FieldLabel label="Issues found" />
             <strong>{issues.length}</strong>
           </div>
+        </div>
+      </section>
+
+      <section className="viability-panel live-observation-panel" aria-label="Observation panel">
+        <div className="viability-panel__header">
+          <div>
+            <p className="eyebrow">Observation</p>
+            <h2>Watch a bot play</h2>
+          </div>
+          <span className="status-pill observation-badge" data-status={liveObservation?.badge ?? 'Waiting for game'}>
+            {liveObservation?.badge ?? 'Waiting for game'}
+          </span>
+        </div>
+
+        <div className="observation-detail-grid">
+          <div className="observation-field">
+            <FieldLabel
+              label="Observation Status"
+              helpText="This tells you whether a game window is being watched. Watching means the selected game window is available. Background means bots keep running without focus changes. Window unavailable means this adapter can only provide logs or screenshots. Watching does not add bots, but a visible window can use more CPU, RAM, and screen space."
+            />
+            <strong>{liveObservation?.badge ?? 'Waiting for game'}</strong>
+          </div>
+          <SelectInput
+            id="watched-bot"
+            label="Watched Bot"
+            helpText="This is the running bot whose game instance you want to watch. Changing it updates observation only and does not pause or stop any bot. The watched game window may use extra screen space, but choosing a bot adds no CPU or RAM by itself. If the bot stops, the simulator chooses the next running bot."
+            value={liveObservation?.watchedBotId ?? ''}
+            disabled={!activeSessionId || activeBots.length === 0}
+            onChange={(event) => {
+              if (event.currentTarget.value) {
+                void followBot(event.currentTarget.value);
+              }
+            }}
+          >
+            <option value="">No bot selected</option>
+            {activeBots.map((bot) => (
+              <option key={bot.botId} value={bot.botId}>
+                {bot.botId} ({bot.gameInstanceId ?? 'waiting for instance'})
+              </option>
+            ))}
+          </SelectInput>
+          <div className="observation-field">
+            <FieldLabel
+              label="Watched Game Instance"
+              helpText="This is the already-running copy of the game assigned to the watched bot. Focus Game Window uses this ID and never starts another copy. It uses no extra CPU or RAM by itself. If it is blank, wait for the bot to receive an instance."
+            />
+            <strong>{liveObservation?.watchedGameInstanceId ?? 'Waiting for assignment'}</strong>
+          </div>
+          <div className="observation-field">
+            <FieldLabel
+              label="Observation Mode"
+              helpText="This shows how the session is handling game windows. Follow selected bot watches one bot, while Background avoids focus changes. Switching modes does not interrupt bots. Visible modes can use more screen space and must be supported by the selected adapter."
+            />
+            <strong>{liveObservation?.observationMode ?? 'background'}</strong>
+          </div>
+          <div className="observation-field">
+            <FieldLabel
+              label="Current Action"
+              helpText="This is the action the watched bot most recently started. It comes from the bot runtime and matches the watched bot only. Showing this text uses almost no CPU or RAM and opens no window. If it stays empty, the bot may still be waiting for the game."
+            />
+            <strong>{liveObservation?.currentAction ?? 'Waiting for first action'}</strong>
+          </div>
+          <div className="observation-field observation-field--wide">
+            <FieldLabel
+              label="Action Reason"
+              helpText="This explains why the watched bot chose its current action. It helps you tell planned testing from exploration, recovery, or random stress. Showing the reason uses almost no resources and works when the bot planner provides an explanation."
+            />
+            <strong>{liveObservation?.actionReason ?? 'No action reason yet'}</strong>
+          </div>
+          <div className="observation-field">
+            <FieldLabel
+              label="Action Start Time"
+              helpText="This is when the watched bot began its current action. Use it to understand waits, slow controls, or stuck behavior. It opens no windows and uses almost no CPU or RAM. A blank value means no action has started yet."
+            />
+            <strong>{liveObservation?.actionStartedAt ?? 'Not started'}</strong>
+          </div>
+          <div className="observation-field">
+            <FieldLabel
+              label="Last Result"
+              helpText="This shows whether the watched bot's last action worked, failed, timed out, or was skipped. It does not change the game and uses almost no resources. Repeated failures usually mean controls, game state, or adapter setup needs checking."
+            />
+            <strong>{liveObservation?.lastResult ?? 'No result yet'}</strong>
+          </div>
+          <div className="observation-field">
+            <FieldLabel
+              label="Current Scene or UI Screen"
+              helpText="This is the latest area, scene, menu, or screen reported for the watched bot. Instrumented and browser adapters usually know more than desktop fallback. Reading richer state may use a little CPU and RAM, but it opens no extra window."
+            />
+            <strong>{liveObservation?.currentScene ?? 'Unknown'}</strong>
+          </div>
+          <div className="observation-field observation-field--wide">
+            <FieldLabel
+              label="Window Status"
+              helpText="This explains whether the watched game window can be shown or focused. Focus support depends on the selected adapter and operating system. Focusing opens no new game copy, but it may interrupt other work on your computer. If unavailable, use logs and screenshots instead."
+            />
+            <strong>{liveObservation?.windowStatus ?? 'Waiting for adapter status'}</strong>
+          </div>
+        </div>
+
+        <div className="observation-controls">
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!liveObservation?.canFocusWindow}
+            onClick={() => void focusGameWindow()}
+          >
+            <Focus size={18} aria-hidden="true" />
+            <span>Focus Game Window</span>
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!selectedBot || !isRunningStatus(selectedBot.status)}
+            onClick={() => selectedBot && void followBot(selectedBot.botId)}
+          >
+            <Eye size={18} aria-hidden="true" />
+            <span>Follow This Bot</span>
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!liveObservation?.watchedBotId}
+            onClick={() => void stopFollowing()}
+          >
+            <EyeOff size={18} aria-hidden="true" />
+            <span>Stop Following</span>
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={activeBots.length === 0}
+            onClick={() => void showAdjacentBot('previous')}
+          >
+            <ChevronLeft size={18} aria-hidden="true" />
+            <span>Show Previous Bot</span>
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={activeBots.length === 0}
+            onClick={() => void showAdjacentBot('next')}
+          >
+            <ChevronRight size={18} aria-hidden="true" />
+            <span>Show Next Bot</span>
+          </button>
+        </div>
+
+        <div className="inline-notice observation-switch-message" aria-live="polite">
+          <FieldLabel
+            label="Observation Update"
+            helpText="This message explains why the watched bot changed. The simulator switches automatically when a watched bot stops. Switching observation does not pause bots, change their actions, add windows, or increase the bot count."
+          />
+          <span>{liveObservation?.message ?? 'Waiting for a running bot to observe.'}</span>
         </div>
       </section>
 
@@ -440,7 +662,7 @@ export function LiveSessionPage() {
           <p className="eyebrow">Individual Bots</p>
           <h2>Bot status</h2>
         </div>
-        <div className="bot-decision-grid" aria-label="Selected bot action explanation">
+        <div className="bot-decision-grid" aria-label="Watched bot action explanation">
             <div>
               <FieldLabel
                 label="Current Bot Goal"
@@ -453,35 +675,35 @@ export function LiveSessionPage() {
                 label="Current Action"
                 helpText="This is the action the selected bot most recently chose and is working on. The simulator sends it to the game adapter. For example, open-menu or move-forward. If it does nothing, check the action result and control mapping. Beginners should watch this value change during a run."
               />
-              <strong>{selectedBot?.currentAction ?? selectedBot?.lastActionId ?? 'Waiting for first action'}</strong>
+              <strong>{actionBot?.currentAction ?? actionBot?.lastActionId ?? 'Waiting for first action'}</strong>
             </div>
             <div>
               <FieldLabel
                 label="Action Reason"
                 helpText="This explains why the bot chose the current action. The simulator turns planner rules, coverage, and randomness into a short sentence. For example, an Explorer may choose move-forward because it is unvisited. If the reason seems wrong, inspect the bot profile and available actions. Beginners can use this to understand bot behavior."
               />
-              <strong>{selectedBot?.actionReason ?? 'The bot has not explained an action yet.'}</strong>
+              <strong>{actionBot?.actionReason ?? 'The bot has not explained an action yet.'}</strong>
             </div>
             <div>
               <FieldLabel
                 label="Action Quality"
                 helpText="This labels the kind of decision the bot made. Planned follows profile rules, exploratory tries something new, recovery escapes a stuck state, repeated tries an action again, risky tests an edge case, random is chaos behavior, and startup-flow follows configured menus. If the label is unexpected, read the action reason. Beginners do not need to change anything here."
               />
-              <strong className="action-quality-pill">{selectedBot?.actionQuality ?? 'not-known'}</strong>
+              <strong className="action-quality-pill">{actionBot?.actionQuality ?? 'not-known'}</strong>
             </div>
             <div>
               <FieldLabel
                 label="Last Result"
                 helpText="This shows what happened after the selected bot's last action. It includes success, failure, skip, timeout, and any short message from the game adapter. For example, succeeded: menu opened. If it failed, check controls, adapter health, and logs. Beginners should investigate repeated failures before adding more bots."
               />
-              <strong>{selectedBot?.lastResult ?? 'No result yet'}</strong>
+              <strong>{actionBot?.lastResult ?? 'No result yet'}</strong>
             </div>
             <div>
               <FieldLabel
                 label="Next Likely Action"
                 helpText="This is the action the planner currently thinks may be a good next choice. It is only a helpful guess because game state can change after every action. For example, close-menu may follow open-menu. If it is blank, the planner does not know yet. Beginners can use it to spot surprising plans early."
               />
-              <strong>{selectedBot?.nextLikelyAction ?? 'Not known yet'}</strong>
+              <strong>{actionBot?.nextLikelyAction ?? 'Not known yet'}</strong>
             </div>
         </div>
         <div className="allocation-table">

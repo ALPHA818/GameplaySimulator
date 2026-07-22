@@ -16,6 +16,11 @@ import {
   recommendedFirstTestTemplate
 } from '@core/config/firstTestTemplates';
 import type { FirstTestTemplate, FirstTestTemplateId } from '@core/config/firstTestTemplates';
+import {
+  resolveRuntimeObservationConfig,
+  type ObservationMode,
+  type RuntimeObservationConfig
+} from '@core/config/runtimeObservationConfig';
 import { planGameInstances } from '@core/sessions/GameInstanceManager';
 import { Pause, Play, Plus, RotateCw, ShieldCheck, Square, Trash2 } from 'lucide-react';
 import type { FormEvent } from 'react';
@@ -53,6 +58,14 @@ interface RunFormState {
   reserveRamMb: number;
   maxGameInstances: number;
   allowAutoScaling: boolean;
+  useGlobalObservationSettings: boolean;
+  showBotGameplay: boolean;
+  observationMode: ObservationMode;
+  selectedObservationBotId: string;
+  bringGameToFrontOnAction: boolean;
+  visibleActionDelayMs: number;
+  showActionInformation: boolean;
+  maxVisibleGameWindows: number;
 }
 
 const runModes: Array<{ value: RunMode; label: string }> = [
@@ -62,6 +75,39 @@ const runModes: Array<{ value: RunMode; label: string }> = [
 ];
 
 const sessionLabels: SessionLabel[] = ['Smoke Test', 'Regression', 'UI Flow', 'Stress Test', 'Custom'];
+
+const observationModes: Array<{ value: ObservationMode; label: string }> = [
+  { value: 'background', label: 'Background' },
+  { value: 'follow-first-bot', label: 'Follow first bot' },
+  { value: 'follow-selected-bot', label: 'Follow selected bot' },
+  { value: 'show-all-instances', label: 'Show all instances' }
+];
+
+function observationSupportMessage(gameProfile: GameProfile | undefined): string {
+  if (!gameProfile) {
+    return 'Choose a game profile to see whether its adapter can show a game window.';
+  }
+
+  const adapterType = gameProfile.adapter.type;
+  const isEngine = adapterType === 'unity' || adapterType === 'godot' || adapterType === 'unreal';
+  const usesInstrumentation = Boolean(gameProfile.adapter.instrumentationEndpoint?.trim());
+
+  if (adapterType === 'browser') {
+    return 'This browser adapter can open a visible game window. Visible windows increase CPU, RAM, and screen use.';
+  }
+
+  if (adapterType === 'desktop' || adapterType === 'rpg_maker' || adapterType === 'gamemaker' || (isEngine && !usesInstrumentation)) {
+    return 'This game is already running in a visible desktop window. Enable Bring Game To Front On Action only when you want the simulator to focus it.';
+  }
+
+  if (adapterType === 'instrumented' || (isEngine && usesInstrumentation)) {
+    return gameProfile.launch.executablePath?.trim()
+      ? 'This instrumented target uses an external game window that the simulator can try to focus safely through the operating system.'
+      : 'This instrumented target has no visible game window. The test runs through state, logs, and screenshots when available.';
+  }
+
+  return 'The test is running, but only logs and screenshots can be viewed unless the custom adapter explicitly adds observation support.';
+}
 
 function botPoolForTemplate(template: FirstTestTemplate, botProfiles: BotProfile[]): BotPoolConfig | null {
   const profile = botProfiles.find((item) => item.profileId === template.botProfileId);
@@ -87,7 +133,8 @@ function applyTemplateToForm(
   current: RunFormState,
   template: FirstTestTemplate,
   gameProfile: GameProfile,
-  botProfiles: BotProfile[]
+  botProfiles: BotProfile[],
+  forceBackgroundObservation = false
 ): RunFormState | null {
   const botPool = botPoolForTemplate(template, botProfiles);
 
@@ -125,11 +172,27 @@ function applyTemplateToForm(
     maxGpuPercent: '75',
     reserveRamMb: 2048,
     maxGameInstances: 1,
-    allowAutoScaling: false
+    allowAutoScaling: false,
+    useGlobalObservationSettings: false,
+    showBotGameplay:
+      !forceBackgroundObservation && template.observationPreference !== 'background',
+    observationMode:
+      forceBackgroundObservation || template.observationPreference === 'background'
+        ? 'background'
+        : 'follow-first-bot',
+    selectedObservationBotId: '',
+    bringGameToFrontOnAction: false,
+    visibleActionDelayMs: template.actionDelayMs,
+    showActionInformation: true,
+    maxVisibleGameWindows: 1
   };
 }
 
-function initialRunFormState(gameProfile: GameProfile | undefined, botProfiles: BotProfile[]): RunFormState {
+function initialRunFormState(
+  gameProfile: GameProfile | undefined,
+  botProfiles: BotProfile[],
+  runtimeObservation: RuntimeObservationConfig
+): RunFormState {
   const base: RunFormState = {
     sessionId: `session-${Date.now()}`,
     sessionLabel: 'Smoke Test',
@@ -156,7 +219,15 @@ function initialRunFormState(gameProfile: GameProfile | undefined, botProfiles: 
     maxGpuPercent: '75',
     reserveRamMb: 2048,
     maxGameInstances: 1,
-    allowAutoScaling: false
+    allowAutoScaling: false,
+    useGlobalObservationSettings: true,
+    showBotGameplay: runtimeObservation.showBotGameplay,
+    observationMode: runtimeObservation.observationMode,
+    selectedObservationBotId: runtimeObservation.selectedBotId ?? '',
+    bringGameToFrontOnAction: runtimeObservation.bringGameToFrontOnAction,
+    visibleActionDelayMs: runtimeObservation.visibleActionDelayMs,
+    showActionInformation: runtimeObservation.showActionInformation,
+    maxVisibleGameWindows: runtimeObservation.maxVisibleGameWindows
   };
   const template = gameProfile ? recommendedFirstTestTemplate(gameProfile) : undefined;
 
@@ -204,6 +275,18 @@ function buildRunConfig(form: RunFormState, adapterType: SimulationRunConfig['ad
       : undefined,
     saveActionTimeline: form.saveActionTimeline,
     saveStateSnapshots: form.saveStateSnapshots,
+    ...(form.useGlobalObservationSettings
+      ? {}
+      : {
+          showBotGameplay: form.showBotGameplay,
+          observationMode: form.showBotGameplay ? form.observationMode : 'background',
+          selectedObservationBotId: optionalText(form.selectedObservationBotId),
+          bringGameToFrontOnAction:
+            form.showBotGameplay && form.bringGameToFrontOnAction,
+          visibleActionDelayMs: form.visibleActionDelayMs,
+          showActionInformation: form.showActionInformation,
+          maxVisibleGameWindows: form.maxVisibleGameWindows
+        }),
     botPools: form.botPools,
     globalBotLimit: form.globalBotLimit,
     perGameInstanceBotLimit: form.perGameInstanceBotLimit,
@@ -254,6 +337,10 @@ function applyResolvedAutoCounts(
 export function NewSessionPage() {
   const gameProfiles = useConfigStore((state) => state.gameProfiles);
   const botProfiles = useConfigStore((state) => state.botProfiles);
+  const runtimeObservation = useConfigStore((state) => state.runtimeObservation);
+  const longOvernightTestMode = useConfigStore(
+    (state) => state.advancedIntelligence.longOvernightTestMode
+  );
   const saveRunConfig = useConfigStore((state) => state.saveRunConfig);
   const openGameProfileEditor = useConfigStore((state) => state.openGameProfileEditor);
   const setSessionPreview = useSessionStore((state) => state.setSessionPreview);
@@ -267,7 +354,19 @@ export function NewSessionPage() {
   const applyRuntimeDetails = useSessionStore((state) => state.applyRuntimeDetails);
   const initialGameProfile = gameProfiles[0];
   const initialTemplate = initialGameProfile ? recommendedFirstTestTemplate(initialGameProfile) : undefined;
-  const [form, setForm] = useState<RunFormState>(() => initialRunFormState(initialGameProfile, botProfiles));
+  const [form, setForm] = useState<RunFormState>(() => {
+    const initial = initialRunFormState(initialGameProfile, botProfiles, runtimeObservation);
+
+    return longOvernightTestMode
+      ? {
+          ...initial,
+          useGlobalObservationSettings: false,
+          showBotGameplay: false,
+          observationMode: 'background',
+          bringGameToFrontOnAction: false
+        }
+      : initial;
+  });
   const [selectedTemplateId, setSelectedTemplateId] = useState<FirstTestTemplateId>(
     initialTemplate?.id ?? 'browser-smoke-test'
   );
@@ -285,6 +384,7 @@ export function NewSessionPage() {
   const [startupFlowTestResult, setStartupFlowTestResult] = useState<string | null>(null);
   const selectedProfile = gameProfiles.find((profile) => profile.gameId === form.gameProfileId);
   const adapterType = selectedProfile?.adapter.type ?? 'custom';
+  const observationSupport = observationSupportMessage(selectedProfile);
   const videoSupported = selectedProfile?.adapter.supportsVideo ?? false;
   const canPause = activeSessionId !== null && sessionStatus === 'running';
   const canResume = activeSessionId !== null && sessionStatus === 'paused';
@@ -311,6 +411,7 @@ export function NewSessionPage() {
     [adapterType, form, videoSupported]
   );
   const requestedBots = countRequestedBots(preview);
+  const effectiveObservation = resolveRuntimeObservationConfig(preview, runtimeObservation);
   const screenshotEvery = optionalText(form.screenshotEveryNActions)
     ? Math.max(1, Number(form.screenshotEveryNActions))
     : undefined;
@@ -358,6 +459,31 @@ export function NewSessionPage() {
     (selectedProfile?.saveIsolation?.mode ?? 'none') === 'none'
       ? 'Multiple game instances are planned without save isolation. Bots may overwrite the same save/profile data.'
       : '';
+  const plannedInstanceCount = plannedGameInstances?.instances.length ?? Math.max(
+    1,
+    Math.min(
+      form.maxGameInstances,
+      Math.ceil(requestedBots / Math.max(1, form.perGameInstanceBotLimit))
+    )
+  );
+  const observationWarnings = effectiveObservation.showBotGameplay
+    ? [
+        ...(effectiveObservation.observationMode === 'show-all-instances'
+          ? ['Showing all game instances can open several windows and cover your desktop.']
+          : []),
+        ...(effectiveObservation.observationMode === 'show-all-instances' &&
+        plannedInstanceCount > effectiveObservation.maxVisibleGameWindows
+          ? [
+              `${plannedInstanceCount} game instances are requested, but only ${effectiveObservation.maxVisibleGameWindows} may be visible. The remaining instances will continue in the background when the adapter supports it.`
+            ]
+          : []),
+        ...(requestedBots >= 5
+          ? [
+              `${requestedBots} bots are requested with visible gameplay. Visible windows can increase CPU and RAM use, so background mode is safer for a large run.`
+            ]
+          : [])
+      ]
+    : [];
 
   useEffect(() => {
     let cancelled = false;
@@ -375,7 +501,7 @@ export function NewSessionPage() {
     setViabilityError(null);
 
     window.gameplaySimulator.simulation
-      .estimateViability({ runConfig: parsed.data, gameProfile: selectedProfile, botProfiles })
+      .estimateViability({ runConfig: parsed.data, gameProfile: selectedProfile, botProfiles, runtimeObservation })
       .then((report) => {
         if (!cancelled) {
           setViabilityReport(report);
@@ -390,7 +516,7 @@ export function NewSessionPage() {
       });
 
     window.gameplaySimulator.simulation
-      .validateSessionConfig({ runConfig: parsed.data, gameProfile: selectedProfile, botProfiles })
+      .validateSessionConfig({ runConfig: parsed.data, gameProfile: selectedProfile, botProfiles, runtimeObservation })
       .then((validation) => {
         if (!cancelled) {
           setAdapterValidationErrors(validation.errors.map((error) => `${error.path}: ${error.message}`));
@@ -407,7 +533,7 @@ export function NewSessionPage() {
     return () => {
       cancelled = true;
     };
-  }, [adapterType, botProfiles, form, selectedProfile, videoSupported]);
+  }, [adapterType, botProfiles, form, runtimeObservation, selectedProfile, videoSupported]);
 
   function update<K extends keyof RunFormState>(key: K, value: RunFormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -472,7 +598,13 @@ export function NewSessionPage() {
       return;
     }
 
-    const nextForm = applyTemplateToForm(form, selectedTemplate, selectedProfile, botProfiles);
+    const nextForm = applyTemplateToForm(
+      form,
+      selectedTemplate,
+      selectedProfile,
+      botProfiles,
+      longOvernightTestMode
+    );
 
     if (!nextForm) {
       setTemplateApplyMessage(`The ${selectedTemplate.botProfileId} profile is missing, so this template cannot be applied.`);
@@ -595,7 +727,8 @@ export function NewSessionPage() {
     const payload = {
       runConfig: adjustedResult.data,
       gameProfile: selectedProfile,
-      botProfiles
+      botProfiles,
+      runtimeObservation
     };
     const backendValidation = await window.gameplaySimulator.simulation.validateSessionConfig(payload);
 
@@ -674,7 +807,7 @@ export function NewSessionPage() {
   }
 
   return (
-    <section className="page-stack">
+    <section className="page-stack new-session-page">
       <div className="page-header">
         <div>
           <p className="eyebrow">Simulation</p>
@@ -814,7 +947,7 @@ export function NewSessionPage() {
               helpText="These are hard small-run settings applied by the template. They prevent an accidental large first test. Every template uses one bot, one game instance, no video, and no more than 20 actions. If you change them later, the run can use more computer power. Beginners should keep these limits for the first report."
             />
             <span>
-              1 bot · 1 game instance · {selectedTemplate.actionCount} actions · {selectedTemplate.actionDelayMs} ms delay · video off
+              1 bot · 1 game instance · {selectedTemplate.actionCount} actions · {selectedTemplate.actionDelayMs} ms delay · video off · visible when supported
             </span>
           </div>
 
@@ -843,7 +976,22 @@ export function NewSessionPage() {
               label="Session Label"
               name="sessionLabel"
               value={form.sessionLabel}
-              onChange={(event) => update('sessionLabel', event.target.value as SessionLabel)}
+              onChange={(event) => {
+                const sessionLabel = event.target.value as SessionLabel;
+
+                setForm((current) =>
+                  sessionLabel === 'Stress Test'
+                    ? {
+                        ...current,
+                        sessionLabel,
+                        useGlobalObservationSettings: false,
+                        showBotGameplay: false,
+                        observationMode: 'background',
+                        bringGameToFrontOnAction: false
+                      }
+                    : { ...current, sessionLabel }
+                );
+              }}
             >
               {sessionLabels.map((label) => (
                 <option key={label} value={label}>
@@ -862,7 +1010,13 @@ export function NewSessionPage() {
 
                 setForm((current) => {
                   if (nextProfile && nextTemplate) {
-                    return applyTemplateToForm(current, nextTemplate, nextProfile, botProfiles) ?? {
+                    return applyTemplateToForm(
+                      current,
+                      nextTemplate,
+                      nextProfile,
+                      botProfiles,
+                      longOvernightTestMode
+                    ) ?? {
                       ...current,
                       gameProfileId: event.target.value,
                       startupFlowId: ''
@@ -1029,6 +1183,177 @@ export function NewSessionPage() {
             <div className="inline-notice inline-notice--loading">
               <FieldLabel label="Disk usage warning" />
               <span>{diskUsageWarning}</span>
+            </div>
+          ) : null}
+        </section>
+
+        <section className="form-section session-observation-section">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Per-session choice</p>
+              <h2>Live Observation</h2>
+            </div>
+            <span className="status-pill">
+              {form.useGlobalObservationSettings ? 'Using global settings' : 'Session override'}
+            </span>
+          </div>
+
+          <div className="toggle-grid session-observation-toggle-grid">
+            <ToggleInput
+              id="use-global-observation-settings"
+              label="Use Global Observation Settings"
+              helpText="This makes this test use the choices from the Settings page. It keeps one normal default for every new test. Turning it off lets this session use different visibility settings without changing other tests. It does not add CPU, RAM, or windows by itself. Beginners should leave it on unless a smoke test needs to be watched."
+              checked={form.useGlobalObservationSettings}
+              onChange={(event) => {
+                const useGlobalObservationSettings = event.currentTarget.checked;
+                setForm((current) => ({
+                  ...current,
+                  useGlobalObservationSettings,
+                  ...(!useGlobalObservationSettings
+                    ? {
+                        showBotGameplay: runtimeObservation.showBotGameplay,
+                        observationMode: runtimeObservation.observationMode,
+                        selectedObservationBotId: runtimeObservation.selectedBotId ?? '',
+                        bringGameToFrontOnAction: runtimeObservation.bringGameToFrontOnAction,
+                        visibleActionDelayMs: runtimeObservation.visibleActionDelayMs,
+                        showActionInformation: runtimeObservation.showActionInformation,
+                        maxVisibleGameWindows: runtimeObservation.maxVisibleGameWindows
+                      }
+                    : {})
+                }));
+              }}
+            />
+            <ToggleInput
+              id="session-show-bot-gameplay"
+              label="Show Bot Gameplay"
+              helpText="This opens a visible game window for this test so you can watch a bot play. Visible windows use more CPU, RAM, and screen space. Browser and desktop adapters normally support them; instrumented or custom adapters may not own a window. If the adapter cannot show one, the test continues in the background. Beginners should turn this on for a one-bot smoke test and off for stress or overnight tests."
+              checked={effectiveObservation.showBotGameplay}
+              disabled={form.useGlobalObservationSettings}
+              onChange={(event) => {
+                const showBotGameplay = event.currentTarget.checked;
+                setForm((current) => ({
+                  ...current,
+                  showBotGameplay,
+                  observationMode: showBotGameplay
+                    ? current.observationMode === 'background'
+                      ? 'follow-first-bot'
+                      : current.observationMode
+                    : 'background',
+                  bringGameToFrontOnAction: showBotGameplay
+                    ? current.bringGameToFrontOnAction
+                    : false
+                }));
+              }}
+            />
+            <ToggleInput
+              id="session-bring-game-to-front"
+              label="Bring Game To Front On Action"
+              helpText="This asks the adapter to focus the watched game before each bot action. It can help keyboard and mouse input reach the right window. It uses little extra CPU or RAM and opens no extra window, but repeated focus changes can interrupt your computer use. Beginners should leave it off unless desktop input needs focus."
+              checked={effectiveObservation.bringGameToFrontOnAction}
+              disabled={form.useGlobalObservationSettings || !effectiveObservation.showBotGameplay}
+              onChange={(event) => update('bringGameToFrontOnAction', event.currentTarget.checked)}
+            />
+            <ToggleInput
+              id="session-show-action-information"
+              label="Show Action Information"
+              helpText="This shows the watched bot's action and reason. A visible browser can show a short test-only label with the click or key. Desktop games show the details only in Live Session, so the game itself is not changed. It uses a small amount of CPU and RAM and opens no extra window. If it is off, testing still works. Beginners should leave it on while learning how a bot behaves."
+              checked={effectiveObservation.showActionInformation}
+              disabled={form.useGlobalObservationSettings || !effectiveObservation.showBotGameplay}
+              onChange={(event) => update('showActionInformation', event.currentTarget.checked)}
+            />
+          </div>
+
+          <div className="field-grid session-observation-field-grid">
+            <SelectInput
+              id="session-observation-mode"
+              label="Observation Mode"
+              helpText="This chooses which game you watch during this test. Follow first bot shows one bot, Follow selected bot uses the bot ID below, and Show all instances shows as many windows as the limit allows. More windows use more CPU, RAM, and desktop space. Browser and desktop-style adapters support visible windows best. Beginners should choose Follow first bot."
+              value={effectiveObservation.observationMode}
+              disabled={form.useGlobalObservationSettings || !effectiveObservation.showBotGameplay}
+              onChange={(event) => update('observationMode', event.currentTarget.value as ObservationMode)}
+            >
+              {observationModes.map((mode) => (
+                <option key={mode.value} value={mode.value}>
+                  {mode.label}
+                </option>
+              ))}
+            </SelectInput>
+            <TextInput
+              id="session-selected-observation-bot"
+              label="Follow Bot"
+              helpText="This is the bot ID to watch in Follow selected bot mode. For example, ui-tester-bot-001 watches that one bot. It uses no extra CPU or RAM by itself and asks the adapter to show that bot's game instance. If the ID is wrong, the adapter may show the first bot instead. Beginners can leave it blank and use Follow first bot."
+              placeholder="ui-tester-bot-001"
+              value={effectiveObservation.selectedBotId ?? ''}
+              disabled={
+                form.useGlobalObservationSettings ||
+                !effectiveObservation.showBotGameplay ||
+                effectiveObservation.observationMode !== 'follow-selected-bot'
+              }
+              onChange={(event) => update('selectedObservationBotId', event.currentTarget.value)}
+            />
+            <TextInput
+              id="session-visible-action-delay"
+              label="Visible Action Delay"
+              helpText="This is the minimum wait between watched actions in milliseconds. For example, 500 is half a second. A longer delay is easier to follow and may reduce CPU use, but the test takes longer. It opens no extra windows and works through the bot runtime for every adapter. Beginners should use 500 to 750."
+              type="number"
+              min={0}
+              max={60_000}
+              step={50}
+              value={effectiveObservation.visibleActionDelayMs}
+              disabled={form.useGlobalObservationSettings || !effectiveObservation.showBotGameplay}
+              onChange={(event) => {
+                if (Number.isFinite(event.currentTarget.valueAsNumber)) {
+                  update(
+                    'visibleActionDelayMs',
+                    Math.min(60_000, Math.max(0, Math.round(event.currentTarget.valueAsNumber)))
+                  );
+                }
+              }}
+            />
+            <TextInput
+              id="session-max-visible-windows"
+              label="Maximum Visible Game Windows"
+              helpText="This limits how many game windows this test may show. For example, 1 lets you watch one game while other instances stay in the background. Larger values use more CPU, RAM, and screen space and can cover the desktop. The selected adapter must support visible windows. Beginners should use 1."
+              type="number"
+              min={1}
+              max={32}
+              step={1}
+              value={effectiveObservation.maxVisibleGameWindows}
+              disabled={form.useGlobalObservationSettings || !effectiveObservation.showBotGameplay}
+              onChange={(event) => {
+                if (Number.isFinite(event.currentTarget.valueAsNumber)) {
+                  update(
+                    'maxVisibleGameWindows',
+                    Math.min(32, Math.max(1, Math.round(event.currentTarget.valueAsNumber)))
+                  );
+                }
+              }}
+            />
+          </div>
+
+          <div className="notice-list observation-adapter-support">
+            <strong>
+              <FieldLabel
+                label="Session Adapter Support"
+                helpText="This tells you whether the selected adapter normally owns a visible window. Browser and desktop adapters can usually show gameplay. Unity, Godot, and Unreal desktop fallback can also show a window. Instrumented and custom adapters may control a game without owning its window. If visibility is unsupported, the session still runs in the background."
+              />
+            </strong>
+            <span>
+              {observationSupport}
+            </span>
+          </div>
+
+          {observationWarnings.length > 0 ? (
+            <div className="notice-list notice-list--warning" aria-label="Live observation warnings">
+              <strong>
+                <FieldLabel
+                  label="Live Observation Warnings"
+                  helpText="These warnings explain when visible gameplay may be too heavy or may show fewer windows than requested. They do not silently remove bots. Read them before starting. For a large or overnight test, choose Background."
+                />
+              </strong>
+              {observationWarnings.map((warning) => (
+                <span key={warning}>{warning}</span>
+              ))}
             </div>
           ) : null}
         </section>
@@ -1243,16 +1568,43 @@ export function NewSessionPage() {
                 <strong>{requestedBots}</strong>
               </div>
               <div className="metric-card">
-                <FieldLabel label="Recommended bots" />
-                <strong>{viabilityReport.recommendedTotalBots}</strong>
+                <FieldLabel
+                  label="Total bot count"
+                  helpText="This is the total number of bots the estimator recommends running. Visible-window limits do not lower this number. For example, 6 bots can run while only 1 game window is watched. More bots use more CPU and RAM. Beginners should start with 1 bot."
+                />
+                <strong>{viabilityReport.observation.totalBotCount}</strong>
               </div>
               <div className="metric-card">
                 <FieldLabel label="Final bots" />
                 <strong>{resolvedLaunchPlans.length}</strong>
               </div>
               <div className="metric-card">
-                <FieldLabel label="Game instances" />
-                <strong>{plannedGameInstances?.instances.length ?? 0}</strong>
+                <FieldLabel
+                  label="Total running instances"
+                  helpText="This is the total number of game copies planned to run, including visible and background copies. Each copy can use CPU and RAM. A browser copy can run without a visible window. Beginners should use 1 instance for a first test."
+                />
+                <strong>{viabilityReport.observation.totalRunningGameInstances}</strong>
+              </div>
+              <div className="metric-card">
+                <FieldLabel
+                  label="Visible instances"
+                  helpText="This is how many game copies the simulator recommends showing on screen. Visible browser windows use extra RAM and screen space. Other game copies can keep testing in the background. Beginners and laptop users should show only 1 window."
+                />
+                <strong>{viabilityReport.observation.recommendedVisibleGameInstances}</strong>
+              </div>
+              <div className="metric-card">
+                <FieldLabel
+                  label="Background instances"
+                  helpText="This is how many game copies can keep running without being watched. Their bots still test the game normally. Background browser instances use fewer display resources. If this number is wrong, check Observation Mode and the visible-window limit. Stress and overnight tests should usually run in the background."
+                />
+                <strong>{viabilityReport.observation.backgroundGameInstances}</strong>
+              </div>
+              <div className="metric-card">
+                <FieldLabel
+                  label="Observation RAM"
+                  helpText="This is the extra memory estimated for visible windows, action labels, and focus tracking. It is added on top of normal game and bot memory. For example, one headed browser may add a few hundred MB. If it is high, show fewer windows. Beginners should keep one visible window."
+                />
+                <strong>{viabilityReport.observation.estimatedRamMb} MB</strong>
               </div>
               <div className="metric-card">
                 <FieldLabel label="Estimated RAM" />
@@ -1262,6 +1614,17 @@ export function NewSessionPage() {
                 <FieldLabel label="Estimated CPU" />
                 <strong>{viabilityReport.estimatedCpuPercent}%</strong>
               </div>
+            </div>
+
+            <div className="notice-list">
+              <FieldLabel
+                label="Safe observation guidance"
+                helpText="These are simple starting choices that reduce computer load. They do not change game behavior or remove bots. A laptop should normally show one window, a first test should watch one bot, and stress or overnight tests should run in the background."
+              />
+              <span>Use 1 visible window on a laptop.</span>
+              <span>Watch 1 bot during a first test.</span>
+              <span>Use background mode for stress tests.</span>
+              <span>Use background mode for overnight tests.</span>
             </div>
 
             <div className="allocation-table">
@@ -1524,6 +1887,34 @@ export function NewSessionPage() {
             ))}
           </div>
         ) : null}
+      </section>
+
+      <section className="form-section session-confirmation" aria-label="Session confirmation">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Before start</p>
+            <h2>Session Confirmation</h2>
+          </div>
+          <span className="status-pill">
+            {effectiveObservation.showBotGameplay ? 'Visible gameplay' : 'Background testing'}
+          </span>
+        </div>
+        <div className="metric-grid">
+          <div className="metric-card">
+            <FieldLabel
+              label="Session Observation Mode"
+              helpText="This is the final visibility mode that will be saved with this test. It comes from the global setting or this session's override. Visible modes can use more CPU, RAM, and game windows. If the adapter cannot show a window, it continues in the background. Beginners should confirm Follow first bot for a smoke test or Background for a large test."
+            />
+            <strong>{effectiveObservation.observationMode}</strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel
+              label="Visible Window Limit"
+              helpText="This is the final number of game windows the session may show. Other game instances can keep running in the background. A larger limit uses more CPU, RAM, and desktop space and only works when the adapter supports visible windows. Beginners should confirm 1."
+            />
+            <strong>{effectiveObservation.maxVisibleGameWindows}</strong>
+          </div>
+        </div>
       </section>
 
       <section className="json-panel" aria-label="Run config preview">

@@ -26,6 +26,7 @@ import type {
   DesktopControlTestResult,
   GameProfileTestRequest,
   GameProfileTestResult,
+  LiveObservationState,
   PersistedSessionMetadata,
   SimulationBotStatus,
   SimulationSessionCreateResult,
@@ -34,11 +35,13 @@ import type {
   SimulationValidationResult
 } from '../main/services/simulationService';
 import type { DesktopAdapterDependencyReport } from '../../../../packages/adapters/src';
+import type { RuntimeObservationConfig } from '@core/config/runtimeObservationConfig';
 
 interface SimulationSessionPayload {
   runConfig: SimulationRunConfig;
   gameProfile: GameProfile;
   botProfiles?: BotProfile[];
+  runtimeObservation?: RuntimeObservationConfig;
 }
 
 const api = {
@@ -82,6 +85,16 @@ const api = {
       ipcRenderer.invoke('simulation:getSessionStatus', sessionId) as Promise<SimulationSessionStatusSnapshot>,
     getBotStatuses: (sessionId: string) =>
       ipcRenderer.invoke('simulation:getBotStatuses', sessionId) as Promise<SimulationBotStatus[]>,
+    getLiveObservationState: (sessionId: string) =>
+      ipcRenderer.invoke('simulation:getLiveObservationState', sessionId) as Promise<LiveObservationState>,
+    followBot: (sessionId: string, botId: string) =>
+      ipcRenderer.invoke('simulation:followBot', sessionId, botId) as Promise<LiveObservationState>,
+    stopFollowingBot: (sessionId: string) =>
+      ipcRenderer.invoke('simulation:stopFollowingBot', sessionId) as Promise<LiveObservationState>,
+    showAdjacentBot: (sessionId: string, direction: 'next' | 'previous') =>
+      ipcRenderer.invoke('simulation:showAdjacentBot', sessionId, direction) as Promise<LiveObservationState>,
+    focusObservedGameWindow: (sessionId: string) =>
+      ipcRenderer.invoke('simulation:focusObservedGameWindow', sessionId) as Promise<LiveObservationState>,
     stopBot: (sessionId: string, botId: string) =>
       ipcRenderer.invoke('simulation:stopBot', sessionId, botId) as Promise<SimulationBotStatus[]>,
     stopBotPool: (sessionId: string, profileId: string) =>

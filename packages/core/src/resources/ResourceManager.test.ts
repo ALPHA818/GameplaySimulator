@@ -110,6 +110,30 @@ function request(overrides: Partial<RuntimeViabilityRequest['runConfig']> = {}):
   };
 }
 
+function browserRequest(
+  overrides: Partial<RuntimeViabilityRequest['runConfig']> = {},
+  systemSnapshot: SystemResourceSnapshot = system
+): RuntimeViabilityRequest {
+  const value = request({
+    adapterType: 'browser',
+    ...overrides
+  });
+
+  return {
+    ...value,
+    systemSnapshot,
+    gameProfile: {
+      ...value.gameProfile,
+      engine: { type: 'browser' },
+      launch: { platform: 'browser', url: 'http://localhost:5173', arguments: [] },
+      adapter: {
+        ...value.gameProfile.adapter,
+        type: 'browser'
+      }
+    }
+  };
+}
+
 describe('ResourceManager', () => {
   it('recommends counts using the selected machine and run limits', () => {
     const report = new ResourceManager().estimateViabilitySync(request());
@@ -162,5 +186,83 @@ describe('ResourceManager', () => {
     expect(report.canRun).toBe(false);
     expect(report.blockers.length).toBeGreaterThan(0);
     expect(report.botAllocation[0].reason).toContain('Fixed');
+  });
+
+  it('reduces visible browser windows before reducing functional bots or instances', () => {
+    const manager = new ResourceManager();
+    const background = manager.estimateViabilitySync(browserRequest({
+      showBotGameplay: false,
+      observationMode: 'background'
+    }));
+    const visible = manager.estimateViabilitySync(browserRequest({
+      showBotGameplay: true,
+      observationMode: 'show-all-instances',
+      showActionInformation: true,
+      maxVisibleGameWindows: 4
+    }));
+
+    expect(visible.recommendedTotalBots).toBe(background.recommendedTotalBots);
+    expect(visible.recommendedGameInstances).toBe(background.recommendedGameInstances);
+    expect(visible.observation.totalBotCount).toBe(visible.recommendedTotalBots);
+    expect(visible.observation.totalRunningGameInstances).toBe(visible.recommendedGameInstances);
+    expect(visible.observation.requestedVisibleGameInstances).toBeGreaterThan(1);
+    expect(visible.observation.recommendedVisibleGameInstances).toBe(1);
+    expect(visible.observation.backgroundGameInstances).toBe(
+      visible.recommendedGameInstances - 1
+    );
+    expect(visible.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Visible mode may use more RAM'),
+        expect.stringContaining('Show All Instances may open several windows'),
+        expect.stringContaining('higher than the recommended'),
+        expect.stringContaining('without removing bots')
+      ])
+    );
+  });
+
+  it('prices headed browsers, action overlays, and focus tracking separately', () => {
+    const highCapacitySystem: SystemResourceSnapshot = {
+      ...system,
+      cpuCoreCount: 16,
+      totalRamMb: 65_536,
+      freeRamMb: 52_000,
+      currentCpuLoadPercent: 10,
+      currentRamUsagePercent: 20.6
+    };
+    const report = new ResourceManager().estimateViabilitySync(browserRequest({
+      showBotGameplay: true,
+      observationMode: 'show-all-instances',
+      bringGameToFrontOnAction: true,
+      showActionInformation: true,
+      maxVisibleGameWindows: 3
+    }, highCapacitySystem));
+
+    expect(report.observation.estimatedRamMb).toBeGreaterThan(0);
+    expect(report.observation.breakdown.headedBrowserWindow.ramMb).toBeGreaterThan(0);
+    expect(report.observation.breakdown.additionalVisibleWindows.ramMb).toBeGreaterThan(0);
+    expect(report.observation.breakdown.actionOverlays.cpuPercent).toBeGreaterThan(0);
+    expect(report.observation.breakdown.focusTracking.ramMb).toBeGreaterThan(0);
+    expect(report.estimatedRamMb).toBeGreaterThan(
+      report.observation.estimatedRamMb
+    );
+  });
+
+  it('warns when visible testing starts while system RAM use is already significant', () => {
+    const highRamSystem: SystemResourceSnapshot = {
+      ...system,
+      freeRamMb: 4000,
+      currentRamUsagePercent: 75
+    };
+    const report = new ResourceManager().estimateViabilitySync(browserRequest({
+      showBotGameplay: true,
+      observationMode: 'follow-first-bot',
+      maxVisibleGameWindows: 1
+    }, highRamSystem));
+
+    expect(report.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('already using significant RAM')
+      ])
+    );
   });
 });

@@ -635,6 +635,29 @@ export function BrowserGameWizardPanel(props: BrowserGameWizardPanelProps) {
   );
 }
 
+export function BrowserProfileTestWindowOption({
+  checked,
+  disabled = false,
+  onChange
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="toggle-grid profile-test-window-options">
+      <ToggleInput
+        id="show-test-window"
+        label="Show Test Window"
+        helpText="This opens a visible temporary browser while the profile test checks your game page. It helps you confirm that the correct URL loaded. The window uses extra CPU, RAM, and screen space, waits briefly, and then closes normally. It is supported only by the browser adapter. If the browser cannot open visibly, the test reports the error instead of silently hiding the window. Beginners should turn this on for the first browser profile test."
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+      />
+    </div>
+  );
+}
+
 export function GameProfileEditorPage() {
   const editingGameId = useConfigStore((state) => state.editingGameId);
   const existingProfile = useConfigStore((state) =>
@@ -664,6 +687,7 @@ export function GameProfileEditorPage() {
   const [profileTestResult, setProfileTestResult] = useState<GameProfileTestResult | null>(null);
   const [profileTestError, setProfileTestError] = useState<string | null>(null);
   const [profileTestRunning, setProfileTestRunning] = useState(false);
+  const [showTestWindow, setShowTestWindow] = useState(false);
   const title = existingProfile ? 'Edit Game Profile' : 'New Game Profile';
 
   const preview = useMemo(() => {
@@ -938,7 +962,8 @@ export function GameProfileEditorPage() {
 
     try {
       const result = await window.gameplaySimulator.simulation.testGameProfile({
-        gameProfile: profileResult.data
+        gameProfile: profileResult.data,
+        showTestWindow: wizardKind === 'browser' && showTestWindow
       });
       setProfileTestResult(result);
 
@@ -1444,6 +1469,14 @@ export function GameProfileEditorPage() {
             </button>
           </div>
 
+          {wizardKind === 'browser' ? (
+            <BrowserProfileTestWindowOption
+              checked={showTestWindow}
+              disabled={profileTestRunning}
+              onChange={setShowTestWindow}
+            />
+          ) : null}
+
           {profileTestError ? <div className="form-error">{profileTestError}</div> : null}
           {profileTestResult ? (
             <div className={profileTestResult.ok ? 'profile-test-result profile-test-result--ok' : 'profile-test-result profile-test-result--failed'}>
@@ -1464,8 +1497,22 @@ export function GameProfileEditorPage() {
                   <FieldLabel label="Instance health check" />
                   <strong>{profileTestResult.health?.status ?? (profileTestResult.ok ? 'ready' : 'failed')}</strong>
                 </div>
+                <div className="metric-card">
+                  <FieldLabel
+                    label="Observation Capability"
+                    helpText="This tells you how this adapter can show the game. Visible window means the simulator owns or launches a normal game window. External window means the game may be visible, but this adapter cannot focus it. Unavailable means you can use logs and screenshots only. Watching a window can use more CPU, RAM, and screen space. Beginners should test with one visible window when support is available."
+                  />
+                  <strong>{profileTestResult.observationCapability}</strong>
+                </div>
               </div>
               <p className={profileTestResult.ok ? 'success-text' : 'form-error'}>{profileTestResult.message}</p>
+              <div className="inline-notice">
+                <FieldLabel
+                  label="Live Observation Status"
+                  helpText="This explains whether you can watch this game during a bot test and whether the simulator can bring its window to the front. It opens no extra window by itself. If focus is unsupported, leave Bring Game To Front On Action off. The test can still run using logs and screenshots."
+                />
+                <span>{profileTestResult.observationMessage}</span>
+              </div>
               {profileTestResult.errors.length > 0 ? (
                 <div className="notice-list notice-list--blocker">
                   <FieldLabel label="Missing Fields" />

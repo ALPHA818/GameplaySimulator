@@ -23,9 +23,11 @@ class RecordingInputDriver implements DesktopInputDriver {
   readonly keyboard: KeyboardInputRequest[] = [];
   readonly mouse: MouseInputRequest[] = [];
   focused = false;
+  focusCount = 0;
 
   async focusWindow(processInfo: DesktopProcessInfo): Promise<DesktopWindowInfo> {
     this.focused = true;
+    this.focusCount += 1;
     return {
       windowId: `window-${processInfo.pid}`,
       title: 'Test Game',
@@ -125,6 +127,14 @@ describe('DesktopWindowAdapter', () => {
     const processInfo = await adapter.getProcessInfo(instance.instanceId);
 
     expect(instance.metadata.browserSpecific).toBe(false);
+    expect(instance.metadata).toMatchObject({
+      visible: true,
+      observationCapability: 'visible-window'
+    });
+    expect(adapter.capabilities).toMatchObject({
+      supportsLiveObservation: true,
+      supportsWindowFocus: true
+    });
     expect(instance.metadata.dependencyReport).toMatchObject({
       canSendKeyboardInput: true,
       canCaptureScreenshots: true
@@ -167,9 +177,45 @@ describe('DesktopWindowAdapter', () => {
 
     expect(moveResult.status).toBe('succeeded');
     expect(attackResult.status).toBe('succeeded');
-    expect(inputDriver.focused).toBe(true);
+    expect(inputDriver.focused).toBe(false);
+    expect(inputDriver.focusCount).toBe(0);
     expect(inputDriver.keyboard[0].binding).toBe('W');
     expect(inputDriver.mouse[0].binding).toBe('MouseLeft');
+  });
+
+  it('focuses the visible game before an action only when observation requests it', async () => {
+    const inputDriver = new RecordingInputDriver();
+    const adapter = new DesktopWindowAdapter({
+      controlBindings: controls,
+      inputDriver,
+      runtimeObservation: {
+        showBotGameplay: true,
+        observationMode: 'follow-first-bot',
+        bringGameToFrontOnAction: true,
+        visibleActionDelayMs: 250,
+        showActionInformation: true,
+        maxVisibleGameWindows: 1
+      },
+      processStopTimeoutMs: 300
+    });
+    adapters.push(adapter);
+
+    await adapter.launchInstance(instanceConfig);
+    const result = await adapter.performAction(
+      instanceConfig.instanceId,
+      'explorer-001',
+      action('move-up')
+    );
+    const focusResult = await adapter.openOrFocusGameWindow(instanceConfig.instanceId);
+
+    expect(result.status).toBe('succeeded');
+    expect(result.message).toContain('after focusing the game window');
+    expect(inputDriver.focusCount).toBe(2);
+    expect(focusResult).toMatchObject({
+      supported: true,
+      visible: true,
+      focused: true
+    });
   });
 
   it('returns limited desktop state when structured state is unavailable', async () => {

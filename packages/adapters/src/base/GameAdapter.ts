@@ -6,6 +6,7 @@ import type {
   GameStateSnapshot
 } from '@core/types';
 import type { LogEntry } from '@core/logging/LogEntry';
+import type { ObservationMode } from '@core/config/runtimeObservationConfig';
 
 export interface AdapterCapabilities {
   supportsMultipleInstances: boolean;
@@ -19,6 +20,32 @@ export interface AdapterCapabilities {
   supportsSaveIsolation: boolean;
   supportsReset: boolean;
   supportsCheckpointReload: boolean;
+  supportsLiveObservation: boolean;
+  supportsWindowFocus: boolean;
+  supportsMultipleVisibleWindows: boolean;
+  observationCapability: ObservationCapability;
+}
+
+export type ObservationCapability =
+  | 'visible-window'
+  | 'embedded-preview'
+  | 'external-window'
+  | 'unavailable';
+
+export interface WindowFocusResult {
+  instanceId: string;
+  supported: boolean;
+  visible: boolean;
+  focused: boolean;
+  message: string;
+  windowId?: string;
+  title?: string;
+}
+
+export interface ObservationTargetUpdate {
+  botId?: string;
+  instanceId?: string;
+  observationMode: ObservationMode;
 }
 
 export interface GameAdapterInstance {
@@ -82,6 +109,9 @@ export interface GameAdapter {
   startVideoCapture?(instanceId: string, botId: string): Promise<VideoCaptureHandle>;
   stopVideoCapture?(instanceId: string, botId: string): Promise<VideoCaptureHandle>;
   captureLogs?(instanceId: string): Promise<LogEntry[]>;
+  focusWindow?(instanceId: string): Promise<WindowFocusResult>;
+  openOrFocusGameWindow?(instanceId: string): Promise<WindowFocusResult>;
+  updateObservationTarget?(target: ObservationTargetUpdate): Promise<void> | void;
   isRunning(instanceId: string): Promise<boolean>;
   getHealth(instanceId: string): Promise<AdapterHealth>;
 }

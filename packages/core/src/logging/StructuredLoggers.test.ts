@@ -26,6 +26,12 @@ const runConfig: SimulationRunConfig = {
   saveVideo: false,
   saveActionTimeline: true,
   saveStateSnapshots: true,
+  showBotGameplay: true,
+  observationMode: 'follow-first-bot',
+  bringGameToFrontOnAction: false,
+  visibleActionDelayMs: 650,
+  showActionInformation: true,
+  maxVisibleGameWindows: 1,
   botPools: [],
   globalBotLimit: 2,
   perGameInstanceBotLimit: 1,
@@ -93,6 +99,23 @@ const viabilityReport: RuntimeViabilityReport = {
   blockers: [],
   estimatedCpuPercent: 20,
   estimatedRamMb: 1024,
+  observation: {
+    enabled: false,
+    totalBotCount: 0,
+    totalRunningGameInstances: 0,
+    requestedVisibleGameInstances: 0,
+    recommendedVisibleGameInstances: 0,
+    backgroundGameInstances: 0,
+    recommendedVisibleWindowLimit: 1,
+    estimatedCpuPercent: 0,
+    estimatedRamMb: 0,
+    breakdown: {
+      headedBrowserWindow: { cpuPercent: 0, ramMb: 0 },
+      additionalVisibleWindows: { cpuPercent: 0, ramMb: 0 },
+      actionOverlays: { cpuPercent: 0, ramMb: 0 },
+      focusTracking: { cpuPercent: 0, ramMb: 0 }
+    }
+  },
   botAllocation: []
 };
 
@@ -356,6 +379,9 @@ describe('StructuredRunLogger', () => {
       'Inspect raw state in this log entry.'
     );
     expect(summary).toContain('## Resource Viability');
+    expect(summary).toContain('## Live Observation');
+    expect(summary).toContain('Observation mode: follow-first-bot');
+    expect(summary).toContain('Visible action delay: 650 ms');
     expect(summary).toContain('## Content Coverage');
     expect(summary).toContain('Coverage: 50%');
     expect(summary).toContain('### Content Tested By Bot Type');

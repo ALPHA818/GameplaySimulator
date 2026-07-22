@@ -7,6 +7,7 @@ import { GodotAdapter } from './godot/GodotAdapter';
 import { InstrumentedAdapter } from './instrumented/InstrumentedAdapter';
 import { UnityAdapter } from './unity/UnityAdapter';
 import { UnrealAdapter } from './unreal/UnrealAdapter';
+import { CustomAdapter } from './custom/CustomAdapter';
 
 const instanceConfig: GameInstanceConfig = {
   instanceId: 'game-instance-001',
@@ -31,6 +32,29 @@ describe('AdapterFactory', () => {
     expect(AdapterFactory.createAdapter('unity')).toBeInstanceOf(UnityAdapter);
     expect(AdapterFactory.createAdapter('godot')).toBeInstanceOf(GodotAdapter);
     expect(AdapterFactory.createAdapter('unreal')).toBeInstanceOf(UnrealAdapter);
+  });
+
+  it('inherits desktop observation support through engine fallback wrappers', () => {
+    const adapter = AdapterFactory.createAdapter('godot');
+
+    expect(adapter.capabilities).toMatchObject({
+      supportsLiveObservation: true,
+      supportsWindowFocus: true,
+      observationCapability: 'visible-window'
+    });
+    expect(adapter.focusWindow).toBeTypeOf('function');
+  });
+
+  it('requires custom adapters to advertise their observation capability explicitly', () => {
+    const unavailable = new CustomAdapter();
+    const preview = new CustomAdapter({ observationCapability: 'embedded-preview' });
+
+    expect(unavailable.capabilities.supportsLiveObservation).toBe(false);
+    expect(unavailable.capabilities.observationCapability).toBe('unavailable');
+    expect(preview.capabilities).toMatchObject({
+      supportsLiveObservation: true,
+      observationCapability: 'embedded-preview'
+    });
   });
 
   it('uses instrumented capabilities for engine adapters when an instrumentation endpoint is provided', () => {

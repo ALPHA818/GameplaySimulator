@@ -6,6 +6,10 @@ import type {
   GameInstanceConfig,
   GameStateSnapshot
 } from '@core/types';
+import {
+  defaultRuntimeObservationConfig,
+  type RuntimeObservationConfig
+} from '@core/config/runtimeObservationConfig';
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
@@ -19,7 +23,9 @@ import type {
   AdapterHealth,
   AvailableGameAction,
   GameAdapterInstance,
-  ScreenshotCapture
+  ObservationTargetUpdate,
+  ScreenshotCapture,
+  WindowFocusResult
 } from '../base/GameAdapter';
 import {
   DesktopAdapterDependencyChecker,
@@ -101,6 +107,7 @@ export interface DesktopWindowAdapterOptions {
   dependencyChecker?: DesktopAdapterDependencyChecker;
   processStopTimeoutMs?: number;
   capabilities?: Partial<AdapterCapabilities>;
+  runtimeObservation?: RuntimeObservationConfig;
 }
 
 interface DesktopStopEvent {
@@ -295,6 +302,81 @@ class PlatformDesktopInputDriver implements DesktopInputDriver {
   }
 }
 
+async function findExternalDesktopProcess(executablePath: string): Promise<DesktopProcessInfo | null> {
+  const executableName = basename(executablePath);
+
+  try {
+    if (process.platform === 'win32') {
+      const { stdout } = await execFileAsync('tasklist.exe', [
+        '/fi',
+        `IMAGENAME eq ${executableName}`,
+        '/fo',
+        'csv',
+        '/nh'
+      ]);
+      const columns = stdout.trim().split('"').filter((value) => value && value !== ',');
+      const pid = Number(columns[1]);
+
+      return Number.isFinite(pid) && pid > 0
+        ? { pid, executablePath, command: executableName, alive: pidIsAlive(pid) }
+        : null;
+    }
+
+    const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,comm=,args=']);
+    const line = stdout
+      .split('\n')
+      .map((item) => item.trim())
+      .find((item) => item.includes(executablePath) || item.includes(executableName));
+
+    if (!line) {
+      return null;
+    }
+
+    const [pidText, command] = line.split(/\s+/, 2);
+    const pid = Number(pidText);
+
+    return Number.isFinite(pid) && pid > 0
+      ? { pid, executablePath, command, alive: pidIsAlive(pid) }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function createExternalDesktopWindowFocusHandler(
+  executablePath: string
+): (instanceId: string) => Promise<WindowFocusResult> {
+  const inputDriver = new PlatformDesktopInputDriver();
+
+  return async (instanceId) => {
+    const processInfo = await findExternalDesktopProcess(executablePath);
+
+    if (!processInfo?.alive) {
+      return {
+        instanceId,
+        supported: true,
+        visible: false,
+        focused: false,
+        message: 'The instrumented game process was not found, so its external window could not be focused.'
+      };
+    }
+
+    const windowInfo = await inputDriver.focusWindow(processInfo);
+
+    return {
+      instanceId,
+      supported: true,
+      visible: true,
+      focused: windowInfo.focused,
+      message: windowInfo.focused
+        ? 'The external instrumented game window was brought to the front.'
+        : 'The external instrumented game window is visible, but the operating system could not focus it.',
+      windowId: windowInfo.windowId,
+      title: windowInfo.title
+    };
+  };
+}
+
 class PlatformScreenshotDriver implements DesktopScreenshotDriver {
   async captureWindow(request: {
     processInfo: DesktopProcessInfo;
@@ -341,7 +423,9 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
   private readonly screenshotDriver: DesktopScreenshotDriver;
   private readonly dependencyChecker: DesktopAdapterDependencyChecker;
   private readonly processStopTimeoutMs: number;
+  private readonly runtimeObservation: RuntimeObservationConfig;
   private readonly desktopInstances = new Map<string, DesktopInstanceRuntime>();
+  private followedBotId?: string;
   private dependencyReport?: DesktopAdapterDependencyReport;
 
   constructor(options: DesktopWindowAdapterOptions = {}) {
@@ -361,6 +445,10 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
         supportsSaveIsolation: false,
         supportsReset: false,
         supportsCheckpointReload: false,
+        supportsLiveObservation: true,
+        supportsWindowFocus: true,
+        supportsMultipleVisibleWindows: false,
+        observationCapability: 'visible-window',
         ...options.capabilities
       }
     });
@@ -374,6 +462,7 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     this.screenshotDriver = options.screenshotDriver ?? new PlatformScreenshotDriver();
     this.dependencyChecker = options.dependencyChecker ?? new DesktopAdapterDependencyChecker();
     this.processStopTimeoutMs = options.processStopTimeoutMs ?? 2500;
+    this.runtimeObservation = options.runtimeObservation ?? defaultRuntimeObservationConfig;
   }
 
   async checkDependencies(): Promise<DesktopAdapterDependencyReport> {
@@ -416,6 +505,9 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
         executablePath,
         workingDirectory,
         dependencyReport,
+        visible: true,
+        observationCapability: this.capabilities.observationCapability,
+        observationMode: this.runtimeObservation.observationMode,
         browserSpecific: false
       }
     };
@@ -620,13 +712,43 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     return { ...runtime.processInfo };
   }
 
-  async focusWindow(instanceId: string): Promise<DesktopWindowInfo> {
+  async focusWindow(instanceId: string): Promise<WindowFocusResult> {
     const runtime = this.requireDesktopRuntime(instanceId);
     const processInfo = (await this.getProcessInfo(instanceId)) ?? runtime.processInfo;
     const windowInfo = await this.inputDriver.focusWindow(processInfo);
 
     runtime.windowInfo = windowInfo;
-    return windowInfo;
+    return {
+      instanceId,
+      supported: this.capabilities.supportsWindowFocus,
+      visible: true,
+      focused: windowInfo.focused,
+      message: windowInfo.focused
+        ? 'This game is already running in a visible desktop window and was brought to the front.'
+        : 'The desktop game is visible, but its window could not be focused.',
+      windowId: windowInfo.windowId,
+      title: windowInfo.title
+    };
+  }
+
+  async openOrFocusGameWindow(instanceId: string): Promise<WindowFocusResult> {
+    if (!(await this.isRunning(instanceId))) {
+      return {
+        instanceId,
+        supported: true,
+        visible: false,
+        focused: false,
+        message: 'The desktop game process is not running, so there is no game window to open or focus.'
+      };
+    }
+
+    return this.focusWindow(instanceId);
+  }
+
+  updateObservationTarget(target: ObservationTargetUpdate): void {
+    this.runtimeObservation.observationMode = target.observationMode;
+    this.runtimeObservation.selectedBotId = target.botId;
+    this.followedBotId = target.botId;
   }
 
   override async getAvailableActions(_instanceId: string, _botId: string): Promise<AvailableGameAction[]> {
@@ -663,16 +785,17 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
       );
     }
 
-    const windowInfo = await this.focusWindow(instanceId);
+    const shouldFocus = this.shouldFocusBeforeAction(botId);
+    const focusResult = shouldFocus ? await this.focusWindow(instanceId) : undefined;
 
-    if (!windowInfo.focused) {
+    if (shouldFocus && !focusResult?.focused) {
       return this.recordAction(
         runtime,
         action,
         botId,
         'failed',
         startedAt,
-        `Could not focus the game window (${windowInfo.focusMethod ?? 'unknown focus method'}).`,
+        focusResult?.message ?? 'Could not focus the game window.',
         binding.binding
       );
     }
@@ -695,14 +818,13 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
         );
       }
 
-      runtime.windowInfo = windowInfo;
       return this.recordAction(
         runtime,
         action,
         botId,
         'succeeded',
         startedAt,
-        `Sent ${binding.inputType} input "${binding.binding}".`,
+        `Sent ${binding.inputType} input "${binding.binding}"${shouldFocus ? ' after focusing the game window' : ' without changing window focus'}.`,
         binding.binding
       );
     } catch (error) {
@@ -715,7 +837,7 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
   override async captureScreenshot(instanceId: string, botId: string): Promise<ScreenshotCapture> {
     const runtime = this.requireDesktopRuntime(instanceId);
     const processInfo = (await this.getProcessInfo(instanceId)) ?? runtime.processInfo;
-    const windowInfo = runtime.windowInfo ?? (await this.focusWindow(instanceId));
+    const windowInfo = runtime.windowInfo;
     const outputPath = join(this.screenshotDirectory, `${instanceId}-${botId}-${Date.now()}.png`);
     const result = await this.screenshotDriver.captureWindow({
       instanceId,
@@ -809,6 +931,9 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
         dependencyWarnings: dependencyReport.warnings,
         processInfo,
         windowInfo: runtime.windowInfo,
+        visible: true,
+        observationCapability: this.capabilities.observationCapability,
+        observationMode: this.runtimeObservation.observationMode,
         lastKnownAction: runtime.lastKnownAction,
         lastHeartbeatAt: runtime.lastHeartbeatAt,
         lastSuccessfulInputAt: runtime.lastSuccessfulInputAt,
@@ -843,6 +968,27 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     }
 
     return runtime;
+  }
+
+  private shouldFocusBeforeAction(botId: string): boolean {
+    if (
+      !this.runtimeObservation.showBotGameplay ||
+      !this.runtimeObservation.bringGameToFrontOnAction ||
+      this.runtimeObservation.observationMode === 'background'
+    ) {
+      return false;
+    }
+
+    if (this.runtimeObservation.observationMode === 'follow-selected-bot') {
+      return this.runtimeObservation.selectedBotId === botId;
+    }
+
+    if (this.runtimeObservation.observationMode === 'follow-first-bot') {
+      this.followedBotId ??= botId;
+      return this.followedBotId === botId;
+    }
+
+    return true;
   }
 
   private resolveControlBinding(action: GameAction): ControlBinding | undefined {

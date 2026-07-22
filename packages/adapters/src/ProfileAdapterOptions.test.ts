@@ -112,8 +112,17 @@ describe('createAdapterOptionsFromGameProfile', () => {
     });
     expect(result.options.unity).toMatchObject({
       unityVersion: '2022.3',
-      instrumentationEndpoint: 'http://127.0.0.1:4555'
+      instrumentationEndpoint: 'http://127.0.0.1:4555',
+      instrumentedOptions: {
+        observationCapability: 'external-window',
+        capabilities: {
+          supportsLiveObservation: true,
+          supportsWindowFocus: true
+        }
+      }
     });
+    expect(result.options.unity?.instrumentedOptions?.windowFocusHandler).toBeTypeOf('function');
+    expect(result.observationMessage).toContain('external game window');
     expect(result.errors).toHaveLength(0);
   });
 
@@ -136,6 +145,8 @@ describe('createAdapterOptionsFromGameProfile', () => {
       workingDirectory: '/games',
       launchArguments: ['--qa']
     });
+    expect(result.options.unity?.desktopOptions?.runtimeObservation).toBeDefined();
+    expect(result.observationCapability).toBe('visible-window');
     expect(result.errors).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -166,6 +177,32 @@ describe('createAdapterOptionsFromGameProfile', () => {
         expect.objectContaining({ path: 'adapter.supportsScreenshots' }),
         expect.objectContaining({ path: 'adapter.supportsVideo' })
       ])
+    );
+  });
+
+  it('reports unavailable observation for a custom adapter without a window', () => {
+    const profile: GameProfile = {
+      ...unityProfile,
+      engine: { type: 'custom' },
+      launch: { platform: 'linux', arguments: [] },
+      adapter: {
+        ...unityProfile.adapter,
+        type: 'custom',
+        instrumentationEndpoint: undefined,
+        supportsMultipleInstances: false,
+        supportsStateRead: false,
+        supportsDirectActions: false
+      }
+    };
+    const result = createAdapterOptionsFromGameProfile(profile, {
+      ...runConfig,
+      adapterType: 'custom'
+    });
+
+    expect(result.observationCapability).toBe('unavailable');
+    expect(result.options.custom).toMatchObject({ observationCapability: 'unavailable' });
+    expect(result.observationMessage).toBe(
+      'The test is running, but only logs and screenshots can be viewed.'
     );
   });
 
@@ -250,5 +287,54 @@ describe('createAdapterOptionsFromGameProfile', () => {
       browserName: 'chromium',
       domScanMode: 'always'
     });
+  });
+
+  it('passes live observation preferences to the browser adapter boundary', () => {
+    const profile: GameProfile = {
+      ...unityProfile,
+      engine: { type: 'browser' },
+      launch: {
+        platform: 'browser',
+        url: 'http://localhost:5173',
+        arguments: []
+      },
+      adapter: {
+        ...unityProfile.adapter,
+        type: 'browser'
+      }
+    };
+    const runtimeObservation = {
+      showBotGameplay: true,
+      observationMode: 'show-all-instances' as const,
+      bringGameToFrontOnAction: false,
+      visibleActionDelayMs: 400,
+      showActionInformation: true,
+      maxVisibleGameWindows: 2
+    };
+
+    const result = createAdapterOptionsFromGameProfile(
+      profile,
+      { ...runConfig, adapterType: 'browser' },
+      runtimeObservation
+    );
+
+    expect(result.options.browser?.runtimeObservation).toEqual(runtimeObservation);
+    expect(result.options.browser?.headless).toBe(false);
+  });
+
+  it('keeps browser profile options headless when gameplay observation is disabled', () => {
+    const profile: GameProfile = {
+      ...unityProfile,
+      engine: { type: 'browser' },
+      launch: { platform: 'browser', url: 'http://localhost:5173', arguments: [] },
+      adapter: { ...unityProfile.adapter, type: 'browser' }
+    };
+
+    const result = createAdapterOptionsFromGameProfile(profile, {
+      ...runConfig,
+      adapterType: 'browser'
+    });
+
+    expect(result.options.browser?.headless).toBe(true);
   });
 });

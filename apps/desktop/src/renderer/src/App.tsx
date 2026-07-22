@@ -36,16 +36,17 @@ export function App() {
           return;
         }
 
-        const [botStatuses, instanceStatuses, issues, logs, coverage] = await Promise.all([
+        const [botStatuses, instanceStatuses, issues, logs, coverage, liveObservation] = await Promise.all([
           window.gameplaySimulator.simulation.getBotStatuses(status.activeSessionId),
           window.gameplaySimulator.simulation.getInstanceStatuses(status.activeSessionId),
           window.gameplaySimulator.simulation.getIssues(status.activeSessionId),
           window.gameplaySimulator.simulation.getLogs(status.activeSessionId),
-          window.gameplaySimulator.simulation.getCoverage(status.activeSessionId)
+          window.gameplaySimulator.simulation.getCoverage(status.activeSessionId),
+          window.gameplaySimulator.simulation.getLiveObservationState(status.activeSessionId)
         ]);
 
         if (!cancelled) {
-          applyRuntimeDetails({ botStatuses, instanceStatuses, issues, logs, coverage });
+          applyRuntimeDetails({ botStatuses, instanceStatuses, issues, logs, coverage, liveObservation });
         }
       } catch {
         if (!cancelled) {

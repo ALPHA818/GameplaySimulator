@@ -22,7 +22,11 @@ class ScreenshotAdapter implements GameAdapter {
     supportsGameLogs: false,
     supportsSaveIsolation: true,
     supportsReset: false,
-    supportsCheckpointReload: false
+    supportsCheckpointReload: false,
+    supportsLiveObservation: true,
+    supportsWindowFocus: true,
+    supportsMultipleVisibleWindows: true,
+    observationCapability: 'visible-window' as const
   };
 
   constructor(private readonly sourcePath: string, private readonly shouldFail = false) {}

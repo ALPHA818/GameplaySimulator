@@ -88,4 +88,23 @@ describe('browser UI awareness', () => {
     expect(result.message).toContain('Create World');
     expect(clicks).toBe(1);
   });
+
+  it('ignores simulator overlays while scanning and choosing DOM click targets', () => {
+    installDom(`
+      <h1>Main Menu</h1>
+      <button id="play-game">Play Game</button>
+      <div data-gameplay-simulator-overlay>
+        <h2>Action: choose-create-game</h2>
+        <button id="overlay-button">Simulator-only Button</button>
+      </div>
+    `);
+
+    const state = normalizeBrowserUIState(scanBrowserDom(), 'dom');
+    const overlayClick = clickBrowserDomTarget({ label: 'Simulator-only Button' });
+
+    expect(state?.dom?.headings).toEqual(['Main Menu']);
+    expect(state?.dom?.visibleText.join(' ')).not.toContain('choose-create-game');
+    expect(state?.visibleButtons.map((button) => button.label)).toEqual(['Play Game']);
+    expect(overlayClick.succeeded).toBe(false);
+  });
 });

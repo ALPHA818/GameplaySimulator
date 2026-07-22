@@ -11,6 +11,7 @@ export * from './bot/ProgressTracker';
 export * from './bot/RecoveryManager';
 export * from './config/advancedIntelligenceConfig';
 export * from './config/firstTestTemplates';
+export * from './config/runtimeObservationConfig';
 export * from './config/runConfig';
 export * from './coverage/CoverageTracker';
 export * from './detection/Issue';

@@ -1,4 +1,9 @@
 import type { LogEntry } from '@core/logging/LogEntry';
+import {
+  defaultRuntimeObservationConfig,
+  type RuntimeObservationConfig
+} from '@core/config/runtimeObservationConfig';
+import { actionInsightFromAction } from '@core/bot/ActionExplanation';
 import type {
   ActionResult,
   BrowserDomScanMode,
@@ -17,7 +22,9 @@ import type {
   AdapterHealth,
   AvailableGameAction,
   GameAdapterInstance,
-  ScreenshotCapture
+  ObservationTargetUpdate,
+  ScreenshotCapture,
+  WindowFocusResult
 } from '../base/GameAdapter';
 import {
   clickBrowserDomTarget,
@@ -28,6 +35,11 @@ import {
   normalizeBrowserUIState,
   scanBrowserDom
 } from './BrowserUIAwareness';
+import {
+  renderBrowserActionIndicator,
+  setBrowserActionIndicatorsHidden,
+  type BrowserActionIndicatorPayload
+} from './BrowserActionIndicator';
 
 type BrowserActionStatus = ActionResult['status'];
 type BrowserKind = 'chromium' | 'firefox' | 'webkit';
@@ -83,6 +95,7 @@ interface PageLike {
   close(): Promise<void>;
   isClosed(): boolean;
   viewportSize?(): { width: number; height: number } | null;
+  bringToFront?(): Promise<void>;
   on(event: 'console', listener: (message: ConsoleMessageLike) => void): void;
   on(event: 'pageerror', listener: (error: Error) => void): void;
   on(event: 'crash' | 'close', listener: () => void): void;
@@ -111,6 +124,11 @@ interface BrowserRuntime {
   openedAt: string;
   lastHeartbeatAt?: string;
   lastUIState?: BrowserUIState;
+  visible: boolean;
+  headless: boolean;
+  visibleWindowNumber?: number;
+  watchedBotId?: string;
+  adapterLogs: LogEntry[];
 }
 
 export interface BrowserAdapterOptions {
@@ -125,6 +143,8 @@ export interface BrowserAdapterOptions {
   launchOptions?: Record<string, unknown>;
   browserLauncher?: BrowserLauncherLike;
   domScanMode?: BrowserDomScanMode;
+  runtimeObservation?: RuntimeObservationConfig;
+  includeActionIndicatorsInScreenshots?: boolean;
   capabilities?: Partial<AdapterCapabilities>;
 }
 
@@ -188,6 +208,28 @@ function buttonForBinding(binding: string | undefined): 'left' | 'middle' | 'rig
 
 function numericValue(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function readableBotName(botId: string, payload: Record<string, unknown>): string {
+  const configuredName =
+    stringValue(payload.botName) ??
+    stringValue(payload.botDisplayName) ??
+    stringValue(payload.profileName);
+
+  if (configuredName) {
+    return configuredName;
+  }
+
+  return botId
+    .replace(/-\d+$/, '')
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.toLowerCase() === 'ui' ? 'UI' : `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(' ');
 }
 
 function numericMetricsFrom(value: unknown): Record<string, number> {
@@ -314,6 +356,8 @@ export class BrowserAdapter extends BaseGameAdapter {
   private readonly headless: boolean;
   private readonly contextOptions: Record<string, unknown>;
   private readonly launchOptions: Record<string, unknown>;
+  private readonly runtimeObservation: RuntimeObservationConfig;
+  private readonly includeActionIndicatorsInScreenshots: boolean;
   private readonly browserInstances = new Map<string, BrowserRuntime>();
 
   constructor(options: BrowserAdapterOptions = {}) {
@@ -333,6 +377,10 @@ export class BrowserAdapter extends BaseGameAdapter {
         supportsSaveIsolation: true,
         supportsReset: true,
         supportsCheckpointReload: false,
+        supportsLiveObservation: true,
+        supportsWindowFocus: true,
+        supportsMultipleVisibleWindows: true,
+        observationCapability: 'visible-window',
         ...options.capabilities
       }
     });
@@ -347,6 +395,30 @@ export class BrowserAdapter extends BaseGameAdapter {
     this.headless = options.headless ?? true;
     this.contextOptions = options.contextOptions ?? {};
     this.launchOptions = options.launchOptions ?? {};
+    this.runtimeObservation = options.runtimeObservation ?? defaultRuntimeObservationConfig;
+    this.includeActionIndicatorsInScreenshots = options.includeActionIndicatorsInScreenshots ?? true;
+  }
+
+  private shouldLaunchVisibleInstance(): boolean {
+    if (!this.runtimeObservation.showBotGameplay) {
+      return !this.headless;
+    }
+
+    if (this.runtimeObservation.observationMode === 'background') {
+      return false;
+    }
+
+    const visibleCount = [...this.browserInstances.values()].filter(
+      (runtime) => runtime.visible && !runtime.closed
+    ).length;
+
+    return visibleCount < this.visibleWindowLimit();
+  }
+
+  private visibleWindowLimit(): number {
+    return this.runtimeObservation.observationMode === 'show-all-instances'
+      ? this.runtimeObservation.maxVisibleGameWindows
+      : 1;
   }
 
   override async launchInstance(config: GameInstanceConfig): Promise<GameAdapterInstance> {
@@ -356,12 +428,47 @@ export class BrowserAdapter extends BaseGameAdapter {
       throw new Error('BrowserAdapter requires a URL to launch a browser game instance.');
     }
 
-    const browser = await this.browserLauncher.launch({
-      headless: this.headless,
-      ...this.launchOptions
-    });
-    const context = await browser.newContext(this.contextOptions);
-    const page = await context.newPage();
+    const visible = this.shouldLaunchVisibleInstance();
+    const visibleWindowNumber = visible
+      ? [...this.browserInstances.values()].filter((runtime) => runtime.visible && !runtime.closed).length + 1
+      : undefined;
+    let browser: BrowserLike;
+
+    try {
+      browser = await this.browserLauncher.launch({
+        ...this.launchOptions,
+        headless: !visible,
+        ...(visible && this.runtimeObservation.visibleActionDelayMs > 0
+          ? { slowMo: this.runtimeObservation.visibleActionDelayMs }
+          : {})
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown Playwright launch error.';
+
+      if (visible) {
+        throw new Error(
+          `Visible browser window failed to open: ${message} Turn off Show Bot Gameplay to continue headlessly, or stop and fix the browser installation.`
+        );
+      }
+
+      throw error;
+    }
+    let context!: BrowserContextLike;
+    let page!: PageLike;
+
+    try {
+      context = await browser.newContext(this.contextOptions);
+      page = await context.newPage();
+    } catch (error) {
+      await context?.close().catch(() => undefined);
+      await browser.close().catch(() => undefined);
+      const message = error instanceof Error ? error.message : 'Browser context creation failed.';
+      throw new Error(
+        visible
+          ? `Visible browser window failed to open: ${message} Turn off Show Bot Gameplay to continue headlessly, or stop and fix the browser installation.`
+          : message
+      );
+    }
     const openedAt = now();
     const runtime: BrowserRuntime = {
       browser,
@@ -371,12 +478,49 @@ export class BrowserAdapter extends BaseGameAdapter {
       pageErrors: [],
       crashed: false,
       closed: false,
+      visible,
+      headless: !visible,
+      visibleWindowNumber,
+      adapterLogs: [],
       openedAt,
       lastHeartbeatAt: openedAt
     };
 
+    if (visible) {
+      this.pushAdapterLog(
+        runtime,
+        config.instanceId,
+        'visible_window_started',
+        `Visible browser window ${visibleWindowNumber} started for ${config.instanceId}.`
+      );
+    } else if (
+      this.runtimeObservation.showBotGameplay &&
+      this.runtimeObservation.observationMode !== 'background'
+    ) {
+      this.pushAdapterLog(
+        runtime,
+        config.instanceId,
+        'observation_limit_reached',
+        `Visible window limit ${this.visibleWindowLimit()} reached; ${config.instanceId} started headlessly.`,
+        'warn'
+      );
+    }
+
     this.attachPageListeners(runtime);
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+    try {
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+    } catch (error) {
+      await page.close().catch(() => undefined);
+      await context.close().catch(() => undefined);
+      await browser.close().catch(() => undefined);
+      runtime.closed = true;
+      const message = error instanceof Error ? error.message : 'Browser page navigation failed.';
+      throw new Error(
+        visible
+          ? `Visible browser window failed to open: ${message} Turn off Show Bot Gameplay to continue headlessly, or stop and check the Game URL.`
+          : message
+      );
+    }
 
     const instance: GameAdapterInstance = {
       instanceId: config.instanceId,
@@ -389,6 +533,12 @@ export class BrowserAdapter extends BaseGameAdapter {
         browserSpecific: true,
         browserType: this.browserKind,
         targetUrl,
+        visible,
+        headless: !visible,
+        visibleWindowNumber,
+        observationMode: this.runtimeObservation.observationMode,
+        watchedBotId: this.runtimeObservation.selectedBotId,
+        showActionInformation: this.runtimeObservation.showActionInformation,
         contextPerInstance: true,
         domScanMode: this.domScanMode
       }
@@ -403,6 +553,14 @@ export class BrowserAdapter extends BaseGameAdapter {
     const runtime = this.browserInstances.get(instanceId);
 
     if (runtime) {
+      if (runtime.visible && !runtime.closed) {
+        this.pushAdapterLog(
+          runtime,
+          instanceId,
+          'visible_window_stopped',
+          `Visible browser window ${runtime.visibleWindowNumber ?? 1} stopped for ${instanceId}.`
+        );
+      }
       await runtime.page.close().catch(() => undefined);
       await runtime.context.close().catch(() => undefined);
       await runtime.browser.close().catch(() => undefined);
@@ -555,12 +713,40 @@ export class BrowserAdapter extends BaseGameAdapter {
       return this.recordAction(runtime, action, botId, 'failed', startedAt, 'Browser page is not running.');
     }
 
-    const hookResult = await this.tryDirectActionHook(runtime, action, botId, startedAt);
+    this.updateWatchedBot(runtime, instanceId, botId);
+
+    if (
+      runtime.visible &&
+      runtime.watchedBotId === botId &&
+      this.runtimeObservation.bringGameToFrontOnAction &&
+      runtime.page.bringToFront
+    ) {
+      await runtime.page.bringToFront().catch(() => undefined);
+    }
+
+    let indicatorShown = false;
+    const showIndicator = async (inputOverride?: string): Promise<void> => {
+      if (indicatorShown) {
+        return;
+      }
+
+      indicatorShown = true;
+      await this.showActionIndicator(runtime, botId, action, inputOverride);
+    };
+    const hookResult = await this.tryDirectActionHook(
+      runtime,
+      action,
+      botId,
+      startedAt,
+      () => showIndicator('Direct game action')
+    );
 
     if (hookResult) {
       this.recordRuntimeAction(runtime, action, hookResult.status, hookResult.message);
       return hookResult;
     }
+
+    await showIndicator();
 
     try {
       const binding = this.resolveControlBinding(action);
@@ -637,7 +823,17 @@ export class BrowserAdapter extends BaseGameAdapter {
     const runtime = this.requireRuntime(instanceId);
     const outputPath = join(this.screenshotDirectory, `${instanceId}-${botId}-${Date.now()}.png`);
     await mkdir(dirname(outputPath), { recursive: true });
-    await runtime.page.screenshot({ path: outputPath, fullPage: true });
+    if (!this.includeActionIndicatorsInScreenshots) {
+      await runtime.page.evaluate(setBrowserActionIndicatorsHidden, true).catch(() => undefined);
+    }
+
+    try {
+      await runtime.page.screenshot({ path: outputPath, fullPage: true });
+    } finally {
+      if (!this.includeActionIndicatorsInScreenshots) {
+        await runtime.page.evaluate(setBrowserActionIndicatorsHidden, false).catch(() => undefined);
+      }
+    }
     runtime.lastScreenshotPath = outputPath;
 
     return {
@@ -647,6 +843,69 @@ export class BrowserAdapter extends BaseGameAdapter {
       path: outputPath,
       mimeType: 'image/png'
     };
+  }
+
+  async focusWindow(instanceId: string): Promise<WindowFocusResult> {
+    const runtime = this.requireRuntime(instanceId);
+
+    if (!runtime.visible) {
+      return {
+        instanceId,
+        supported: true,
+        visible: false,
+        focused: false,
+        message: 'This browser instance is running in the background and has no visible window to focus.'
+      };
+    }
+
+    if (!runtime.page.bringToFront) {
+      return {
+        instanceId,
+        supported: false,
+        visible: true,
+        focused: false,
+        message: 'Window focus is not supported by this browser runtime.'
+      };
+    }
+
+    await runtime.page.bringToFront();
+    return {
+      instanceId,
+      supported: true,
+      visible: true,
+      focused: true,
+      message: 'The visible browser game window was brought to the front.'
+    };
+  }
+
+  openOrFocusGameWindow(instanceId: string): Promise<WindowFocusResult> {
+    return this.focusWindow(instanceId);
+  }
+
+  updateObservationTarget(target: ObservationTargetUpdate): void {
+    this.runtimeObservation.observationMode = target.observationMode;
+    this.runtimeObservation.selectedBotId = target.botId;
+
+    for (const [instanceId, runtime] of this.browserInstances) {
+      if (!runtime.visible) {
+        continue;
+      }
+
+      const previousBotId = runtime.watchedBotId;
+      const nextBotId = !target.instanceId || target.instanceId === instanceId ? target.botId : undefined;
+      runtime.watchedBotId = nextBotId;
+
+      if (previousBotId !== nextBotId) {
+        this.pushAdapterLog(
+          runtime,
+          instanceId,
+          'observation_bot_changed',
+          nextBotId
+            ? `Observed bot changed from ${previousBotId ?? 'none'} to ${nextBotId}.`
+            : 'Visible browser window stopped following a bot.'
+        );
+      }
+    }
   }
 
   override async captureLogs(instanceId: string): Promise<LogEntry[]> {
@@ -666,7 +925,7 @@ export class BrowserAdapter extends BaseGameAdapter {
       source: `${this.id}:pageerror`
     }));
 
-    return [...consoleLogs, ...pageErrors];
+    return [...runtime.adapterLogs, ...consoleLogs, ...pageErrors];
   }
 
   override async getHealth(instanceId: string): Promise<AdapterHealth> {
@@ -697,11 +956,17 @@ export class BrowserAdapter extends BaseGameAdapter {
         consoleErrorCount: runtime.consoleLogs.filter((log) => log.type === 'error').length,
         consoleWarningCount: runtime.consoleLogs.filter((log) => log.type === 'warning' || log.type === 'warn').length,
         pageErrorCount: runtime.pageErrors.length,
+        visible: runtime.visible,
+        headless: runtime.headless,
+        visibleWindowNumber: runtime.visibleWindowNumber,
+        observationMode: this.runtimeObservation.observationMode,
+        watchedBotId: runtime.watchedBotId,
         lastAction: runtime.lastAction,
         lastHeartbeatAt: runtime.lastHeartbeatAt,
         screenshotPath: runtime.lastScreenshotPath,
         domScanMode: this.domScanMode,
         uiState: runtime.lastUIState,
+        observationCapability: this.capabilities.observationCapability,
         browserSpecific: true
       }
     };
@@ -729,6 +994,56 @@ export class BrowserAdapter extends BaseGameAdapter {
     });
     runtime.page.on('close', () => {
       runtime.closed = true;
+    });
+  }
+
+  private updateWatchedBot(runtime: BrowserRuntime, instanceId: string, botId: string): void {
+    if (!runtime.visible) {
+      return;
+    }
+
+    const nextBotId = this.runtimeObservation.observationMode === 'follow-selected-bot'
+      ? this.runtimeObservation.selectedBotId ?? botId
+      : runtime.watchedBotId ?? botId;
+
+    if (runtime.watchedBotId === nextBotId) {
+      return;
+    }
+
+    const previousBotId = runtime.watchedBotId;
+    runtime.watchedBotId = nextBotId;
+    const tracked = this.instances.get(instanceId);
+
+    if (tracked) {
+      tracked.instance.metadata = {
+        ...tracked.instance.metadata,
+        watchedBotId: nextBotId
+      };
+    }
+
+    this.pushAdapterLog(
+      runtime,
+      instanceId,
+      'observation_bot_changed',
+      previousBotId
+        ? `Observed bot changed from ${previousBotId} to ${nextBotId}.`
+        : `Visible browser window is now observing ${nextBotId}.`
+    );
+  }
+
+  private pushAdapterLog(
+    runtime: BrowserRuntime,
+    instanceId: string,
+    eventType: 'visible_window_started' | 'visible_window_stopped' | 'observation_bot_changed' | 'observation_limit_reached',
+    message: string,
+    level: LogEntry['level'] = 'info'
+  ): void {
+    runtime.adapterLogs.push({
+      id: `${instanceId}-${eventType}-${runtime.adapterLogs.length + 1}`,
+      level,
+      message: `${eventType}: ${message}`,
+      timestamp: now(),
+      source: `${this.id}:observation`
     });
   }
 
@@ -887,7 +1202,8 @@ export class BrowserAdapter extends BaseGameAdapter {
     runtime: BrowserRuntime,
     action: GameAction,
     botId: string,
-    startedAt: string
+    startedAt: string,
+    beforePerform?: () => Promise<void>
   ): Promise<ActionResult | null> {
     const hookExists = await runtime.page
       .evaluate(() => typeof (window as unknown as { __GAMEPLAY_SIM_PERFORM_ACTION__?: unknown }).__GAMEPLAY_SIM_PERFORM_ACTION__ === 'function')
@@ -898,6 +1214,7 @@ export class BrowserAdapter extends BaseGameAdapter {
     }
 
     try {
+      await beforePerform?.();
       const value = await runtime.page.evaluate(
         (browserAction) => {
           const hook = (window as unknown as {
@@ -956,6 +1273,63 @@ export class BrowserAdapter extends BaseGameAdapter {
           (bindingAction === payloadControlId || bindingControlId === payloadControlId))
       );
     });
+  }
+
+  private async showActionIndicator(
+    runtime: BrowserRuntime,
+    botId: string,
+    action: GameAction,
+    inputOverride?: string
+  ): Promise<void> {
+    if (
+      !runtime.visible ||
+      !this.runtimeObservation.showActionInformation ||
+      (runtime.watchedBotId !== undefined && runtime.watchedBotId !== botId)
+    ) {
+      return;
+    }
+
+    const binding = this.resolveControlBinding(action);
+    const actionType = normalize(action.type);
+    const domTarget = domTargetFromActionPayload(action.payload);
+    const mappedMouse = binding?.inputType === 'mouse' || bindingIsMouse(binding?.binding);
+    const isMouseAction = actionType === 'mouse-click' || Boolean(domTarget) || mappedMouse;
+    const key = !isMouseAction
+      ? stringValue(action.payload.key) ??
+        (!bindingIsMouse(binding?.binding) ? stringValue(binding?.binding) : undefined) ??
+        ((actionType === 'open-menu' || actionType === 'close-menu') ? 'Escape' : undefined)
+      : undefined;
+    const configuredDomPoint = domTarget?.x !== undefined && domTarget.y !== undefined
+      ? { x: domTarget.x, y: domTarget.y }
+      : undefined;
+    const clickPosition = configuredDomPoint ?? (
+      isMouseAction && !domTarget ? this.clickPoint(runtime, action) : undefined
+    );
+    const input = inputOverride ?? (
+      isMouseAction
+        ? 'Mouse click'
+        : key
+          ? 'Keyboard input'
+          : actionType === 'wait'
+            ? 'Wait'
+            : actionType === 'reload'
+              ? 'Reload page'
+              : 'Game action'
+    );
+    const actionInsight = actionInsightFromAction(action);
+    const payload: BrowserActionIndicatorPayload = {
+      actionId: action.actionId,
+      actionName: stringValue(action.payload.actionName) ?? stringValue(action.payload.label) ?? action.type,
+      botId,
+      botName: readableBotName(botId, action.payload),
+      reason: actionInsight?.explanation ?? 'The bot selected this action for the current game state.',
+      input,
+      key,
+      clickPosition,
+      durationMs: 1600
+    };
+
+    await runtime.page.evaluate(renderBrowserActionIndicator, payload).catch(() => undefined);
   }
 
   private async performMappedInput(runtime: BrowserRuntime, binding: ControlBinding): Promise<void> {

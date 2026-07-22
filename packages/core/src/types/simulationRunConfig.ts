@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { AdapterTypeSchema } from './adapter';
 import { BotPoolConfigSchema } from './bot';
 import { SessionLabelSchema } from './sessionBundle';
+import { ObservationModeSchema } from '../config/runtimeObservationConfig';
 
 export const RunModeSchema = z.enum(['parallel', 'sequential', 'hybrid']);
 
@@ -29,6 +30,13 @@ export const SimulationRunConfigSchema = z
     screenshotEveryNActions: z.number().int().positive().optional(),
     saveActionTimeline: z.boolean(),
     saveStateSnapshots: z.boolean(),
+    showBotGameplay: z.boolean().optional(),
+    observationMode: ObservationModeSchema.optional(),
+    selectedObservationBotId: z.string().trim().min(1).optional(),
+    bringGameToFrontOnAction: z.boolean().optional(),
+    visibleActionDelayMs: z.number().int().min(0).max(60_000).optional(),
+    showActionInformation: z.boolean().optional(),
+    maxVisibleGameWindows: z.number().int().min(1).max(32).optional(),
     useMockRuntime: z.boolean().optional(),
     startupFlowId: z.string().min(1).optional(),
     continueOnStartupFlowFailure: z.boolean().optional(),

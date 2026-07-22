@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { RuntimeObservationConfigSchema } from '../config/runtimeObservationConfig';
 
 export const SessionLabelSchema = z.enum([
   'Smoke Test',
@@ -41,6 +42,7 @@ export const SessionBundleSchema = z.object({
   version: z.string().min(1).optional(),
   buildId: z.string().min(1).optional(),
   adapterType: z.string().min(1).optional(),
+  runtimeObservation: RuntimeObservationConfigSchema.optional(),
   status: z.string().min(1),
   createdAt: z.string().min(1),
   startedAt: z.string().min(1).optional(),

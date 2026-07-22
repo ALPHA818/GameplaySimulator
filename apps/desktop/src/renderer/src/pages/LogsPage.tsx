@@ -1108,7 +1108,7 @@ export function LogsPage() {
   }
 
   return (
-    <section className="page-stack log-page">
+    <section className="page-stack log-page logs-page">
       <div className="page-header">
         <div>
           <p className="eyebrow">Inspect</p>
@@ -1130,7 +1130,7 @@ export function LogsPage() {
       </div>
 
       <section className="filter-surface filter-surface--logs" aria-label="Log filters">
-        <div className="filter-field">
+        <div className="filter-field filter-field--session">
           <FieldLabel
             label="Session"
             htmlFor="log-session-filter"

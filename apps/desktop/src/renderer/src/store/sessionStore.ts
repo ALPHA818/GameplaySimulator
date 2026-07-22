@@ -2,6 +2,7 @@ import type { DetectedIssue, GameInstanceStatus } from '@core/types';
 import type { LogEntry } from '@core/logging/LogEntry';
 import type {
   ContentCoverageSummary,
+  LiveObservationState,
   SimulationBotStatus,
   SimulationSessionStatusSnapshot
 } from '../../../main/services/simulationService';
@@ -27,6 +28,7 @@ interface SessionState {
   issues: DetectedIssue[];
   logs: LogEntry[];
   coverage: ContentCoverageSummary | null;
+  liveObservation: LiveObservationState | null;
   reviewSessionId: string | null;
   reviewIssueId: string | null;
   reviewedIssueIds: string[];
@@ -41,6 +43,7 @@ interface SessionState {
     issues?: DetectedIssue[];
     logs?: LogEntry[];
     coverage?: ContentCoverageSummary;
+    liveObservation?: LiveObservationState;
   }) => void;
   markIssueReviewed: (issueId: string) => void;
   markIssueFalsePositive: (issueId: string) => void;
@@ -56,6 +59,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   issues: [],
   logs: [],
   coverage: null,
+  liveObservation: null,
   reviewSessionId: null,
   reviewIssueId: null,
   reviewedIssueIds: [],
@@ -76,7 +80,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       instanceStatuses: details.instanceStatuses ?? state.instanceStatuses,
       issues: details.issues ?? state.issues,
       logs: details.logs ?? state.logs,
-      coverage: details.coverage ?? state.coverage
+      coverage: details.coverage ?? state.coverage,
+      liveObservation: details.liveObservation ?? state.liveObservation
     })),
   markIssueReviewed: (issueId) =>
     set((state) => ({

@@ -55,7 +55,12 @@ describe('first test templates', () => {
       expect(template.limitations.length).toBeGreaterThan(20);
       expect(template.expectedResult.length).toBeGreaterThan(20);
       expect(template.beginnerRecommendation.length).toBeGreaterThan(20);
+      expect(template.observationPreference).not.toBe('background');
     }
+
+    expect(firstTestTemplates.find((template) => template.id === 'browser-smoke-test')?.observationPreference).toBe('visible');
+    expect(firstTestTemplates.find((template) => template.id === 'desktop-smoke-test')?.observationPreference).toBe('visible');
+    expect(firstTestTemplates.find((template) => template.id === 'unity-instrumented-smoke-test')?.observationPreference).toBe('visible-if-supported');
   });
 
   it('distinguishes instrumented engine profiles from desktop fallbacks', () => {

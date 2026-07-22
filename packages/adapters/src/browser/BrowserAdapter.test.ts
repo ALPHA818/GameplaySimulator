@@ -46,6 +46,11 @@ class FakePage {
   actions: Array<Record<string, unknown>> | null = null;
   performedActions: string[] = [];
   clickedDomTargets: string[] = [];
+  actionIndicators: Array<Record<string, unknown>> = [];
+  indicatorVisibilityChanges: boolean[] = [];
+  screenshotIndicatorVisibility: boolean[] = [];
+  indicatorsHidden = false;
+  bringToFrontCount = 0;
   directHookEnabled = true;
 
   async goto(url: string) {
@@ -63,6 +68,17 @@ class FakePage {
 
   async evaluate<T>(_pageFunction: unknown, arg?: unknown): Promise<T> {
     const source = String(_pageFunction);
+
+    if (source.includes('__GAMEPLAY_SIM_ACTION_INDICATOR_VISIBILITY__')) {
+      this.indicatorsHidden = Boolean(arg);
+      this.indicatorVisibilityChanges.push(Boolean(arg));
+      return undefined as T;
+    }
+
+    if (source.includes('__GAMEPLAY_SIM_ACTION_INDICATOR__')) {
+      this.actionIndicators.push(arg as Record<string, unknown>);
+      return undefined as T;
+    }
 
     if (source.includes('__GAMEPLAY_SIM_STATE__')) {
       return this.state as T;
@@ -113,6 +129,7 @@ class FakePage {
   }
 
   async screenshot(options: { path: string }) {
+    this.screenshotIndicatorVisibility.push(this.indicatorsHidden);
     await mkdir(dirname(options.path), { recursive: true });
     await writeFile(options.path, 'fake browser screenshot');
     return Buffer.from('fake browser screenshot');
@@ -135,6 +152,10 @@ class FakePage {
 
   viewportSize() {
     return { width: 1000, height: 800 };
+  }
+
+  async bringToFront() {
+    this.bringToFrontCount += 1;
   }
 
   on(event: 'console', listener: (message: FakeConsoleMessage) => void): void;
@@ -177,12 +198,20 @@ class FakeBrowser {
 
 class FakeLauncher {
   readonly page = new FakePage();
+  readonly launchHistory: Array<Record<string, unknown> | undefined> = [];
   launchOptions: Record<string, unknown> | undefined;
   browser = new FakeBrowser(this.page);
 
   async launch(options?: Record<string, unknown>) {
     this.launchOptions = options;
+    this.launchHistory.push(options);
     return this.browser;
+  }
+}
+
+class FailingLauncher {
+  async launch(): Promise<never> {
+    throw new Error('No display server is available.');
   }
 }
 
@@ -230,6 +259,184 @@ function action(type: string, payload: Record<string, unknown> = {}): GameAction
 }
 
 describe('BrowserAdapter', () => {
+  it('launches a visible browser and brings it forward when observation is enabled', async () => {
+    const launcher = new FakeLauncher();
+    const adapter = new BrowserAdapter({
+      browserLauncher: launcher,
+      targetUrl: instanceConfig.launch.url,
+      runtimeObservation: {
+        showBotGameplay: true,
+        observationMode: 'follow-first-bot',
+        bringGameToFrontOnAction: true,
+        visibleActionDelayMs: 250,
+        showActionInformation: true,
+        maxVisibleGameWindows: 1
+      }
+    });
+
+    const instance = await adapter.launchInstance(instanceConfig);
+    await adapter.performAction(instanceConfig.instanceId, 'browser-bot-001', action('reload'));
+    const runningLogs = await adapter.captureLogs(instanceConfig.instanceId);
+
+    expect(launcher.launchOptions).toMatchObject({ headless: false, slowMo: 250 });
+    expect(instance.metadata).toMatchObject({
+      visible: true,
+      headless: false,
+      visibleWindowNumber: 1,
+      observationMode: 'follow-first-bot',
+      watchedBotId: 'browser-bot-001',
+      showActionInformation: true
+    });
+    expect(launcher.page.bringToFrontCount).toBe(1);
+    expect(launcher.page.actionIndicators).toEqual([
+      expect.objectContaining({
+        actionName: 'reload',
+        botId: 'browser-bot-001',
+        botName: 'Browser Bot',
+        input: 'Direct game action'
+      })
+    ]);
+    expect(runningLogs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringContaining('visible_window_started:') }),
+        expect.objectContaining({ message: expect.stringContaining('observation_bot_changed:') })
+      ])
+    );
+
+    await adapter.stopAll();
+    expect(launcher.page.closed).toBe(true);
+    expect(launcher.browser.closed).toBe(true);
+    expect(await adapter.captureLogs(instanceConfig.instanceId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringContaining('visible_window_stopped:') })
+      ])
+    );
+  });
+
+  it('keeps browser instances above the visible-window limit in the background', async () => {
+    const launcher = new FakeLauncher();
+    const adapter = new BrowserAdapter({
+      browserLauncher: launcher,
+      runtimeObservation: {
+        showBotGameplay: true,
+        observationMode: 'show-all-instances',
+        bringGameToFrontOnAction: false,
+        visibleActionDelayMs: 250,
+        showActionInformation: true,
+        maxVisibleGameWindows: 1
+      }
+    });
+
+    const first = await adapter.launchInstance(instanceConfig);
+    const second = await adapter.launchInstance({
+      ...instanceConfig,
+      instanceId: 'browser-instance-002'
+    });
+
+    expect(launcher.launchHistory).toEqual([
+      expect.objectContaining({ headless: false }),
+      expect.objectContaining({ headless: true })
+    ]);
+    expect(first.metadata.visible).toBe(true);
+    expect(second.metadata.visible).toBe(false);
+    expect(second.metadata).toMatchObject({ headless: true, visibleWindowNumber: undefined });
+    expect(await adapter.captureLogs(second.instanceId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          level: 'warn',
+          message: expect.stringContaining('observation_limit_reached:')
+        })
+      ])
+    );
+  });
+
+  it('shows mapped key details for the watched bot and can disable action information', async () => {
+    const visibleLauncher = new FakeLauncher();
+    visibleLauncher.page.directHookEnabled = false;
+    const visibleAdapter = new BrowserAdapter({
+      browserLauncher: visibleLauncher,
+      controlBindings: controls,
+      runtimeObservation: {
+        showBotGameplay: true,
+        observationMode: 'follow-first-bot',
+        bringGameToFrontOnAction: false,
+        visibleActionDelayMs: 250,
+        showActionInformation: true,
+        maxVisibleGameWindows: 1
+      }
+    });
+    await visibleAdapter.launchInstance(instanceConfig);
+    await visibleAdapter.performAction(
+      instanceConfig.instanceId,
+      'ui-tester-bot-001',
+      action('jump', {
+        botName: 'UI Tester Bot',
+        explanation: 'UI Tester Bot chose jump to check the focused game control.'
+      })
+    );
+
+    expect(visibleLauncher.page.actionIndicators).toEqual([
+      expect.objectContaining({
+        actionName: 'jump',
+        botName: 'UI Tester Bot',
+        input: 'Keyboard input',
+        key: 'Space',
+        reason: 'UI Tester Bot chose jump to check the focused game control.'
+      })
+    ]);
+
+    const hiddenLauncher = new FakeLauncher();
+    const hiddenAdapter = new BrowserAdapter({
+      browserLauncher: hiddenLauncher,
+      runtimeObservation: {
+        showBotGameplay: true,
+        observationMode: 'follow-first-bot',
+        bringGameToFrontOnAction: false,
+        visibleActionDelayMs: 250,
+        showActionInformation: false,
+        maxVisibleGameWindows: 1
+      }
+    });
+    await hiddenAdapter.launchInstance(instanceConfig);
+    await hiddenAdapter.performAction(instanceConfig.instanceId, 'browser-bot-001', action('reload'));
+
+    expect(hiddenLauncher.page.actionIndicators).toEqual([]);
+  });
+
+  it('can exclude action indicators from screenshots and always restores them', async () => {
+    const launcher = new FakeLauncher();
+    const adapter = new BrowserAdapter({
+      browserLauncher: launcher,
+      includeActionIndicatorsInScreenshots: false,
+      screenshotDirectory: '/tmp/gameplay-simulator-browser-indicator-test'
+    });
+    await adapter.launchInstance(instanceConfig);
+
+    await adapter.captureScreenshot(instanceConfig.instanceId, 'browser-bot-001');
+
+    expect(launcher.page.indicatorVisibilityChanges).toEqual([true, false]);
+    expect(launcher.page.screenshotIndicatorVisibility).toEqual([true]);
+    expect(launcher.page.indicatorsHidden).toBe(false);
+  });
+
+  it('reports visible launch failures instead of silently falling back to headless mode', async () => {
+    const adapter = new BrowserAdapter({
+      browserLauncher: new FailingLauncher(),
+      runtimeObservation: {
+        showBotGameplay: true,
+        observationMode: 'follow-first-bot',
+        bringGameToFrontOnAction: false,
+        visibleActionDelayMs: 250,
+        showActionInformation: true,
+        maxVisibleGameWindows: 1
+      }
+    });
+
+    await expect(adapter.launchInstance(instanceConfig)).rejects.toThrow(
+      /Visible browser window failed to open.*Turn off Show Bot Gameplay to continue headlessly/
+    );
+  });
+
   it('launches a browser context, captures console/page errors, and returns basic state', async () => {
     const launcher = new FakeLauncher();
     const adapter = new BrowserAdapter({ browserLauncher: launcher, targetUrl: instanceConfig.launch.url });
@@ -244,7 +451,9 @@ describe('BrowserAdapter', () => {
     expect(instance.metadata).toMatchObject({
       browserSpecific: true,
       browserType: 'chromium',
-      targetUrl: instanceConfig.launch.url
+      targetUrl: instanceConfig.launch.url,
+      visible: false,
+      headless: true
     });
     expect(launcher.launchOptions).toMatchObject({ headless: true });
     expect(state.state).toMatchObject({
