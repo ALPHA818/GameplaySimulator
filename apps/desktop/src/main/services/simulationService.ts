@@ -17,8 +17,13 @@ import type {
 } from '../../../../../packages/adapters/src';
 import { type BotAdapter, type BotMemory } from '@core/bot/Bot';
 import { BotManager } from '@core/bot/BotManager';
+import {
+  BotDirectiveManager,
+  type BotDirectiveManagerSnapshot
+} from '@core/bot/BotDirectiveManager';
 import { resolveBotPools } from '@core/bot/BotPoolResolver';
 import { defaultBotProfiles } from '@core/bot/defaultBotProfiles';
+import { evaluateBotProfileCompatibility } from '@core/bot/BotProfileCompatibility';
 import type { AvailableGameActionLike, CoverageData } from '@core/bot/ActionPlanner';
 import { actionInsightFromAction, plannerMetadataForLog } from '@core/bot/ActionExplanation';
 import {
@@ -46,6 +51,8 @@ import {
 } from '@core/sessions/GameInstanceManager';
 import type {
   BotLaunchPlan,
+  BotDirectiveEvent,
+  BotTestDirective,
   BotProfile,
   ControlBinding,
   GameAction,
@@ -62,7 +69,9 @@ import type {
 } from '@core/types';
 import {
   BotProfileSchema,
+  BotTestDirectiveSchema,
   GameProfileSchema,
+  resolveDirectiveActionAvailability,
   RuntimeViabilityReportSchema,
   SeveritySchema,
   SimulationRunConfigSchema
@@ -171,6 +180,27 @@ export interface SimulationBotStatus extends RuntimeBotSnapshot {
   actionCount?: number;
   actionStartedAt?: string;
   currentScreen?: string;
+}
+
+export type LiveDirectiveBehavior = 'apply' | 'queue' | 'replace';
+
+export interface GuideBotDirectiveRequest {
+  sessionId: string;
+  botId: string;
+  behavior: LiveDirectiveBehavior;
+  directive: BotTestDirective;
+}
+
+export interface LiveDirectiveMutationResult {
+  snapshot: BotDirectiveManagerSnapshot;
+  message: string;
+  activeDirectiveId?: string;
+}
+
+export interface ReorderBotDirectivesRequest {
+  sessionId: string;
+  botId: string;
+  directiveIds: string[];
 }
 
 export type LiveObservationBadge =
@@ -403,6 +433,19 @@ const SessionCleanupOptionsSchema = z.object({
   archiveSessionBundle: z.boolean().default(false)
 });
 
+const GuideBotDirectiveRequestSchema = z.object({
+  sessionId: z.string().min(1),
+  botId: z.string().min(1),
+  behavior: z.enum(['apply', 'queue', 'replace']),
+  directive: BotTestDirectiveSchema
+});
+
+const ReorderBotDirectivesRequestSchema = z.object({
+  sessionId: z.string().min(1),
+  botId: z.string().min(1),
+  directiveIds: z.array(z.string().min(1))
+});
+
 interface SimulationSessionRecord {
   request: Required<SimulationSessionRequest>;
   viabilityReport: RuntimeViabilityReport;
@@ -417,6 +460,7 @@ interface SimulationSessionRecord {
   logs: LogEntry[];
   tick: number;
   botManager: BotManager;
+  directiveManager: BotDirectiveManager;
   issueDetectionRunner: IssueDetectionRunner;
   coverageTracker: CoverageTracker;
   structuredLogger: StructuredRunLogger;
@@ -1409,12 +1453,67 @@ export class SimulationService {
           ]
         : [];
     const adapterErrors = useMockRuntime ? [] : adapterOptions.errors;
-    const errors = [...adapterErrors, ...startupFlowMissing, ...startupFlowEmpty];
+    const profileById = new Map(defaultBotProfiles.map((profile) => [profile.profileId, profile]));
+    for (const profile of result.data.botProfiles) profileById.set(profile.profileId, profile);
+    const compatibility = result.data.runConfig.botPools
+      .filter((pool) => pool.enabled && pool.desiredCount > 0)
+      .map((pool) => ({
+        pool,
+        profile: profileById.get(pool.profileId)
+      }))
+      .filter((entry): entry is { pool: SimulationRunConfig['botPools'][number]; profile: BotProfile } => Boolean(entry.profile))
+      .map((entry) => ({
+        pool: entry.pool,
+        profile: entry.profile,
+        report: evaluateBotProfileCompatibility(entry.profile, result.data.gameProfile, result.data.runConfig)
+      }));
+    const compatibilityErrors = useMockRuntime
+      ? []
+      : compatibility.flatMap(({ pool, profile, report }) => report.blockers.map((message) => ({
+          path: `botPools.${pool.profileId}`,
+          message: `${profile.displayName}: ${message}`
+        })));
+    const compatibilityWarnings = useMockRuntime
+      ? []
+      : compatibility.flatMap(({ pool, profile, report }) => report.warnings.map((message) => ({
+          path: `botPools.${pool.profileId}`,
+          message: `${profile.displayName}: ${message}`
+        })));
+    const enabledProfileIds = new Set(
+      result.data.runConfig.botPools
+        .filter((pool) => pool.enabled && pool.desiredCount > 0)
+        .map((pool) => pool.profileId)
+    );
+    const technicalSafetyErrors = [
+      ...((enabledProfileIds.has('network-resilience-tester-bot') || enabledProfileIds.has('multiplayer-session-tester-bot')) &&
+      result.data.runConfig.technicalTesting?.controlledNetworkTestConfirmed !== true
+        ? [{
+            path: 'technicalTesting.controlledNetworkTestConfirmed',
+            message: 'Controlled network test confirmation is required for network and multiplayer specialist bots.'
+          }]
+        : []),
+      ...(enabledProfileIds.has('save-migration-tester-bot') &&
+      (result.data.runConfig.technicalTesting?.saveMigrationTestPaths.length ?? 0) === 0
+        ? [{
+            path: 'technicalTesting.saveMigrationTestPaths',
+            message: 'Save Migration Tester Bot requires at least one user-provided permitted test save.'
+          }]
+        : []),
+      ...(enabledProfileIds.has('file-permission-tester-bot') &&
+      (result.data.runConfig.technicalTesting?.approvedFileTestDirectories.length ?? 0) === 0
+        ? [{
+            path: 'technicalTesting.approvedFileTestDirectories',
+            message: 'File And Permission Tester Bot requires at least one explicitly approved disposable test or session directory.'
+          }]
+        : [])
+    ];
+    const errors = [...adapterErrors, ...startupFlowMissing, ...startupFlowEmpty, ...compatibilityErrors, ...technicalSafetyErrors]
+      .filter((error, index, all) => all.findIndex((candidate) => candidate.path === error.path && candidate.message === error.message) === index);
 
     return {
       valid: errors.length === 0,
       errors,
-      warnings: useMockRuntime ? [] : adapterOptions.warnings
+      warnings: useMockRuntime ? [] : [...adapterOptions.warnings, ...compatibilityWarnings]
     };
   }
 
@@ -1786,6 +1885,11 @@ export class SimulationService {
   }
 
   createSession(payload: unknown): SimulationSessionCreateResult {
+    const validation = this.validateSessionConfig(payload);
+    if (!validation.valid) {
+      throw new Error(formatSimulationValidationErrors(validation.errors));
+    }
+
     const parsedRequest = SimulationSessionRequestSchema.parse(payload);
     const runtimeObservation = resolveRuntimeObservationConfig(
       parsedRequest.runConfig,
@@ -1872,6 +1976,35 @@ export class SimulationService {
       now: this.now
     });
     let record!: SimulationSessionRecord;
+    const pendingDirectiveEvents: BotDirectiveEvent[] = [];
+    const directiveManager = new BotDirectiveManager({
+      sessionId,
+      bots: launchPlans
+        .filter((plan) => plan.botId !== STARTUP_FLOW_BOT_ID)
+        .map((plan) => ({
+          botId: plan.botId,
+          profileId: plan.profileId,
+          instanceId: plan.assignedGameInstanceId ?? 'game-instance-001'
+        })),
+      now: this.now,
+      onEvent: (event) => {
+        if (record) {
+          this.logDirectiveEvent(record, event);
+        } else {
+          pendingDirectiveEvents.push(event);
+        }
+      }
+    });
+    for (const configuredDirective of request.runConfig.directives ?? []) {
+      const queuedDirective = directiveManager.createDirective({
+        ...configuredDirective,
+        status: 'queued',
+        activatedAt: undefined,
+        completedAt: undefined
+      });
+      directiveManager.queueDirective(queuedDirective.directiveId);
+      directiveManager.assignDirective(queuedDirective.directiveId);
+    }
     const botManager = new BotManager({
       sessionId,
       runConfig: request.runConfig,
@@ -1881,6 +2014,9 @@ export class SimulationService {
       maxConcurrentBots: maxConcurrentBotsForHybrid(request.runConfig, viabilityReport, launchPlans.length),
       getCoverageData: () => this.coverageForRecord(record),
       getRecentIssues: () => this.getIssues(sessionId),
+      getActiveDirective: (botId) => directiveManager.getActiveDirectiveForBot(botId),
+      getDirectiveProgress: (directiveId, botId) =>
+        directiveManager.getProgress(directiveId, botId)[0],
       uiFlows: startupFlow ? [startupFlow] : request.gameProfile.uiFlows,
       getInstanceHeartbeat: (instanceId) =>
         record.instanceStatuses.find((instance) => instance.instanceId === instanceId)?.lastHeartbeat,
@@ -1894,6 +2030,15 @@ export class SimulationService {
       },
       onLog: ({ entry }) => {
         record.logs.push(entry);
+      },
+      onDirectiveActionSelected: (botId, action) => {
+        this.handleDirectiveActionSelected(record, botId, action);
+      },
+      onDirectiveActionResult: (botId, action, result) => {
+        this.handleDirectiveActionResult(record, botId, action, result);
+      },
+      onDirectiveStateObserved: (botId, directive, previousState, currentState) => {
+        this.handleDirectiveStateObserved(record, botId, directive, previousState, currentState);
       },
       onIdle: () => {
         this.completeSessionIfNoActiveBots(record);
@@ -1950,6 +2095,7 @@ export class SimulationService {
       ],
       tick: 0,
       botManager,
+      directiveManager,
       issueDetectionRunner: new IssueDetectionRunner(),
       coverageTracker,
       structuredLogger,
@@ -1992,6 +2138,10 @@ export class SimulationService {
       useMockRuntime,
       persisted: false
     };
+
+    for (const event of pendingDirectiveEvents) {
+      this.logDirectiveEvent(record, event);
+    }
 
     record.structuredLogger.writeConfig({
       runConfig: request.runConfig,
@@ -2115,6 +2265,9 @@ export class SimulationService {
       this.startVideoEvidence(record);
       this.writeStructuredReports(record);
       this.startStartupFlowTimeout(record);
+      if (!record.startupFlow) {
+        this.activateQueuedDirectives(record);
+      }
       record.botManager.startAll();
     } catch (error) {
       await this.failAdapterStartup(record, error);
@@ -2233,6 +2386,181 @@ export class SimulationService {
 
   getBotStatuses(sessionId: string): SimulationBotStatus[] {
     return this.requireSession(sessionId).botStatuses.map((bot) => ({ ...bot }));
+  }
+
+  getDirectiveState(sessionId: string): BotDirectiveManagerSnapshot {
+    return this.requireSession(sessionId).directiveManager.getSnapshot();
+  }
+
+  async getBotAvailableActions(
+    sessionId: string,
+    botId: string
+  ): Promise<AvailableGameActionLike[]> {
+    const record = this.requireSession(sessionId);
+    const bot = record.botStatuses.find((item) => item.botId === botId);
+
+    if (!bot) {
+      throw new Error(`Bot ${botId} does not exist in session ${sessionId}.`);
+    }
+    if (!bot.gameInstanceId) {
+      return [];
+    }
+
+    const actions = await record.botAdapter.getAvailableActions(bot.gameInstanceId, botId);
+    return actions.map((action) => ({
+      ...action,
+      payloadSchema: action.payloadSchema ? { ...action.payloadSchema } : undefined
+    }));
+  }
+
+  async guideBot(input: unknown): Promise<LiveDirectiveMutationResult> {
+    const request = GuideBotDirectiveRequestSchema.parse(input);
+    const record = this.requireSession(request.sessionId);
+    const bot = record.botStatuses.find((item) => item.botId === request.botId);
+
+    if (!bot || !bot.gameInstanceId) {
+      throw new Error(`Bot ${request.botId} is not assigned to a running game instance.`);
+    }
+    if (!['running', 'waiting', 'blocked'].includes(bot.status)) {
+      throw new Error(`Bot ${request.botId} is not running and cannot receive a direction.`);
+    }
+
+    const directive = BotTestDirectiveSchema.parse({
+      ...request.directive,
+      sessionId: request.sessionId,
+      status: 'queued',
+      target: {
+        allBots: false,
+        botIds: [request.botId],
+        profileIds: [],
+        gameInstanceIds: []
+      },
+      activatedAt: undefined,
+      completedAt: undefined
+    });
+
+    if (directive.directiveMode === 'force-next-valid-action') {
+      const availableActions = await this.getBotAvailableActions(request.sessionId, request.botId);
+      const availability = resolveDirectiveActionAvailability(directive, availableActions);
+      if (!availability.available) {
+        record.directiveManager.createDirective(directive);
+        record.directiveManager.queueDirective(directive.directiveId);
+        record.directiveManager.assignDirective(directive.directiveId, [
+          {
+            botId: bot.botId,
+            profileId: bot.profileId,
+            instanceId: bot.gameInstanceId
+          }
+        ]);
+        record.directiveManager.markDirectiveUnavailable(
+          directive.directiveId,
+          request.botId,
+          availability.reason
+        );
+        this.persistRuntimeDirectiveState(record);
+        return {
+          snapshot: record.directiveManager.getSnapshot(),
+          message: availability.reason,
+          activeDirectiveId: record.directiveManager.getActiveDirectiveForBot(request.botId)?.directiveId
+        };
+      }
+    }
+
+    const current = record.directiveManager.getActiveDirectiveForBot(request.botId);
+    if (request.behavior === 'apply' && current) {
+      throw new Error(
+        `Bot ${request.botId} already has an active direction. Queue this direction or replace the current one.`
+      );
+    }
+    if (request.behavior === 'replace' && current) {
+      record.directiveManager.cancelDirectiveForBot(
+        current.directiveId,
+        request.botId,
+        `Replaced by user direction ${directive.name}.`
+      );
+    }
+
+    record.directiveManager.createDirective(directive);
+    record.directiveManager.queueDirective(directive.directiveId);
+    record.directiveManager.assignDirective(directive.directiveId, [
+      {
+        botId: bot.botId,
+        profileId: bot.profileId,
+        instanceId: bot.gameInstanceId
+      }
+    ]);
+
+    if (request.behavior !== 'queue') {
+      this.activateQueuedDirectives(record);
+    }
+
+    this.persistRuntimeDirectiveState(record);
+    const active = record.directiveManager.getActiveDirectiveForBot(request.botId);
+    const becameActive = active?.directiveId === directive.directiveId;
+    const message = request.behavior === 'queue'
+      ? `${directive.name} was queued for ${request.botId}.`
+      : becameActive
+        ? `${request.botId} changed direction to ${directive.name}.`
+        : `${directive.name} was queued because another higher-priority direction must run first.`;
+
+    return {
+      snapshot: record.directiveManager.getSnapshot(),
+      message,
+      activeDirectiveId: active?.directiveId
+    };
+  }
+
+  cancelBotDirective(
+    sessionId: string,
+    botId: string,
+    directiveId: string
+  ): LiveDirectiveMutationResult {
+    const record = this.requireSession(sessionId);
+    const progress = record.directiveManager.getProgress(directiveId, botId)[0];
+    if (!progress) {
+      throw new Error(`Directive ${directiveId} is not assigned to bot ${botId}.`);
+    }
+
+    record.directiveManager.cancelDirectiveForBot(directiveId, botId);
+    this.activateQueuedDirectives(record);
+    this.persistRuntimeDirectiveState(record);
+    const active = record.directiveManager.getActiveDirectiveForBot(botId);
+
+    return {
+      snapshot: record.directiveManager.getSnapshot(),
+      message: active
+        ? `${directiveId} was cancelled. ${botId} is now following ${active.name}.`
+        : `${directiveId} was cancelled. ${botId} returned to normal profile behavior.`,
+      activeDirectiveId: active?.directiveId
+    };
+  }
+
+  reorderBotDirectives(input: unknown): LiveDirectiveMutationResult {
+    const request = ReorderBotDirectivesRequestSchema.parse(input);
+    const record = this.requireSession(request.sessionId);
+    const queuedForBot = record.directiveManager.getQueuedDirectives(request.botId);
+    const expected = new Set(queuedForBot.map((directive) => directive.directiveId));
+
+    if (
+      request.directiveIds.length !== expected.size ||
+      request.directiveIds.some((directiveId) => !expected.has(directiveId))
+    ) {
+      throw new Error('The requested order must include every queued direction for this bot exactly once.');
+    }
+
+    const requestedIds = new Set(request.directiveIds);
+    const remainingQueuedIds = record.directiveManager
+      .getQueuedDirectives()
+      .map((directive) => directive.directiveId)
+      .filter((directiveId) => !requestedIds.has(directiveId));
+    record.directiveManager.reorderDirectives([...request.directiveIds, ...remainingQueuedIds]);
+    this.persistRuntimeDirectiveState(record);
+
+    return {
+      snapshot: record.directiveManager.getSnapshot(),
+      message: `Queued directions were reordered for ${request.botId}.`,
+      activeDirectiveId: record.directiveManager.getActiveDirectiveForBot(request.botId)?.directiveId
+    };
   }
 
   async getLiveObservationState(sessionId: string): Promise<LiveObservationState> {
@@ -3478,6 +3806,19 @@ export class SimulationService {
       uiFlows: artifacts.gameProfile.uiFlows,
       now: this.now
     });
+    const directiveManager = new BotDirectiveManager({
+      sessionId,
+      bots: launchPlans.map((plan) => ({
+        botId: plan.botId,
+        profileId: plan.profileId,
+        instanceId: plan.assignedGameInstanceId ?? 'game-instance-001'
+      })),
+      now: this.now
+    });
+    for (const directive of artifacts.runConfig.directives ?? []) {
+      directiveManager.createDirective(directive);
+      directiveManager.assignDirective(directive.directiveId);
+    }
     const coverageTracker = new CoverageTracker(artifacts.gameProfile);
 
     for (const bot of artifacts.botStatuses) {
@@ -3538,6 +3879,7 @@ export class SimulationService {
       logs: artifacts.logs,
       tick: artifacts.botStatuses.reduce((total, bot) => total + (bot.actionCount ?? 0), 0),
       botManager,
+      directiveManager,
       issueDetectionRunner: new IssueDetectionRunner(),
       coverageTracker,
       structuredLogger,
@@ -3707,6 +4049,9 @@ export class SimulationService {
       }
       this.writeStructuredReports(current);
       this.startStartupFlowTimeout(current);
+      if (!current.startupFlow) {
+        this.activateQueuedDirectives(current);
+      }
       current.botManager.startAll();
     }, 300);
 
@@ -4161,6 +4506,8 @@ export class SimulationService {
         record.startupFlowTimeoutTimer = undefined;
       }
 
+      this.activateQueuedDirectives(record);
+
       return false;
     }
 
@@ -4227,6 +4574,7 @@ export class SimulationService {
       });
       record.logs.push(this.createLog(record.request.runConfig.sessionId, 'warn', startupFlow.message));
       record.botManager.stopBot(startupFlow.botId);
+      this.activateQueuedDirectives(record);
       record.label = statusLabel(record);
       return;
     }
@@ -4362,9 +4710,11 @@ export class SimulationService {
       memory?: BotMemory;
       issueId?: string;
       evidenceKey?: string;
+      directiveId?: string;
+      force?: boolean;
     }
   ): Promise<EvidenceCaptureResult | undefined> {
-    if (!record.request.runConfig.saveScreenshots || !input.botId) {
+    if ((!record.request.runConfig.saveScreenshots && !input.force) || !input.botId) {
       return undefined;
     }
 
@@ -4404,6 +4754,7 @@ export class SimulationService {
             screenshotPath: result.path,
             sourcePath: result.sourcePath,
             issueId: input.issueId,
+            directiveId: input.directiveId,
             fallback: result.fallback,
             message: result.message
           },
@@ -5381,6 +5732,7 @@ export class SimulationService {
 
     const bots = this.botReportInputsForRecord(record);
     const coverage = this.contentCoverageForRecord(record);
+    const directiveState = record.directiveManager.getSnapshot();
 
     record.structuredLogger.writeSummary({
       status: record.status,
@@ -5397,7 +5749,10 @@ export class SimulationService {
 	      contentByBotType: coverage.contentByBotType,
 	      createdAt: record.createdAt,
 	      startedAt: record.startedAt,
-	      stoppedAt: record.stoppedAt,
+      stoppedAt: record.stoppedAt,
+	      directives: directiveState.directives,
+	      directiveProgress: directiveState.progress,
+	      directiveEvents: directiveState.events,
 	      startupFlow: record.startupFlow
 	        ? {
 	            flowId: record.startupFlow.flowId,
@@ -5666,6 +6021,34 @@ export class SimulationService {
     this.addEvidencePath(issue, issue.screenshotPath);
     this.addEvidencePath(issue, issue.videoPath);
 
+    if (issue.botId) {
+      const actionDirectiveId = memory?.lastAction?.payload.directiveId;
+      const activeDirectiveId = record.directiveManager.getActiveDirectiveForBot(issue.botId)?.directiveId;
+      const directiveId = typeof actionDirectiveId === 'string' ? actionDirectiveId : activeDirectiveId;
+      const progress = directiveId
+        ? record.directiveManager.getProgress(directiveId, issue.botId)[0]
+        : undefined;
+      if (directiveId && progress) {
+        record.directiveManager.recordIssue(directiveId, issue.botId, issue.issueId);
+        if (issue.screenshotPath) {
+          record.directiveManager.recordEvidence(
+            directiveId,
+            issue.botId,
+            'screenshot',
+            issue.screenshotPath
+          );
+        }
+        if (issue.videoPath) {
+          record.directiveManager.recordEvidence(
+            directiveId,
+            issue.botId,
+            'video',
+            issue.videoPath
+          );
+        }
+      }
+    }
+
     record.issues.push(issue);
     record.coverageTracker.recordIssue(issue);
     this.logDetectedIssue(record, issue, isRepeated);
@@ -5753,6 +6136,328 @@ export class SimulationService {
     };
 
     await this.recordDetectedIssue(record, issue);
+  }
+
+  private logDirectiveEvent(record: SimulationSessionRecord, event: BotDirectiveEvent): void {
+    const message = [event.eventType, event.directiveId, event.botId].filter(Boolean).join(': ');
+    record.logs.push(this.createLog(event.sessionId, 'info', message));
+    record.structuredLogger.logSession(
+      event.eventType,
+      {
+        directiveId: event.directiveId,
+        ...event.payload
+      },
+      {
+        botId: event.botId,
+        gameInstanceId: event.instanceId,
+        timestamp: event.timestamp
+      }
+    );
+
+    if (
+      event.botId &&
+      [
+        'directive_activated',
+        'directive_succeeded',
+        'directive_failed',
+        'directive_unavailable',
+        'directive_step_failed'
+      ].includes(event.eventType)
+    ) {
+      void this.captureDirectiveLifecycleEvidence(record, event);
+    }
+  }
+
+  private async captureDirectiveLifecycleEvidence(
+    record: SimulationSessionRecord,
+    event: BotDirectiveEvent
+  ): Promise<void> {
+    if (!event.botId) {
+      return;
+    }
+
+    const progress = record.directiveManager.getProgress(event.directiveId, event.botId)[0];
+    if (!progress) {
+      return;
+    }
+
+    const videoPath = record.videoPathsByBot.get(event.botId);
+    if (videoPath && !(progress.videoPaths ?? []).includes(videoPath)) {
+      record.directiveManager.recordEvidence(event.directiveId, event.botId, 'video', videoPath);
+    }
+
+    const memory = record.botManager.getMemory(event.botId);
+    const screenshot = await this.captureScreenshotEvidence(record, {
+      botId: event.botId,
+      instanceId: event.instanceId ?? progress.instanceId,
+      reason: event.eventType.replace(/^directive_/, 'directive-').replaceAll('_', '-'),
+      memory,
+      directiveId: event.directiveId,
+      force: true,
+      evidenceKey: `${event.botId}:directive:${event.directiveId}:${event.eventType}:${String(event.payload.stepId ?? '')}`
+    });
+
+    if (screenshot?.path) {
+      record.directiveManager.recordEvidence(
+        event.directiveId,
+        event.botId,
+        'screenshot',
+        screenshot.path
+      );
+      this.writeStructuredReports(record);
+    }
+  }
+
+  private persistRuntimeDirectiveState(record: SimulationSessionRecord): void {
+    record.request.runConfig = {
+      ...record.request.runConfig,
+      directives: record.directiveManager.getSnapshot().directives
+    };
+    record.structuredLogger.writeConfig({
+      runConfig: record.request.runConfig,
+      gameProfile: record.request.gameProfile
+    });
+  }
+
+  private activateQueuedDirectives(record: SimulationSessionRecord): void {
+    for (const bot of record.botStatuses) {
+      if (
+        bot.botId === STARTUP_FLOW_BOT_ID ||
+        ['blocked', 'completed', 'failed', 'stopped'].includes(bot.status) ||
+        record.directiveManager.getActiveDirectiveForBot(bot.botId)
+      ) {
+        continue;
+      }
+
+      const next = record.directiveManager.getQueuedDirectives(bot.botId)[0];
+      if (next) {
+        record.directiveManager.activateDirective(next.directiveId, bot.botId);
+      }
+    }
+  }
+
+  private handleDirectiveActionSelected(
+    record: SimulationSessionRecord,
+    botId: string,
+    action: GameAction
+  ): void {
+    const directiveId = typeof action.payload.directiveId === 'string'
+      ? action.payload.directiveId
+      : undefined;
+    if (!directiveId) {
+      return;
+    }
+
+    const directive = record.directiveManager.getDirective(directiveId);
+    const progress = record.directiveManager.getProgress(directiveId, botId)[0];
+    if (!directive || !progress || progress.status !== 'active') {
+      return;
+    }
+
+    const payloadKeywords = Array.isArray(action.payload.matchedKeywords)
+      ? action.payload.matchedKeywords.filter(
+          (value): value is string => typeof value === 'string' && value.trim().length > 0
+        )
+      : [];
+    const matched =
+      payloadKeywords.length > 0 ||
+      directive.actionKeywords.includes(action.type) ||
+      (directive.directiveMode === 'guided-sequence' && action.payload.directiveStepId !== undefined);
+    record.directiveManager.updateDirectiveProgress(directiveId, botId, {
+      currentStepId:
+        typeof action.payload.directiveStepId === 'string'
+          ? action.payload.directiveStepId
+          : progress.currentStepId,
+      actionsAttempted: progress.actionsAttempted + 1,
+      attempts: progress.attempts + 1,
+      matchedActions: matched
+        ? [...new Set([...progress.matchedActions, action.type, ...payloadKeywords])]
+        : progress.matchedActions,
+      unrelatedActions: matched
+        ? progress.unrelatedActions
+        : [...new Set([...(progress.unrelatedActions ?? []), action.type])],
+      lastAction: action.type,
+      lastResult: 'selected',
+      progressMessage:
+        typeof action.payload.directiveReason === 'string'
+          ? action.payload.directiveReason
+          : `Selected ${action.type} for the active directive.`
+    });
+
+    if (action.payload.directiveUnavailable === true) {
+      record.directiveManager.markDirectiveUnavailable(
+        directiveId,
+        botId,
+        typeof action.payload.directiveReason === 'string'
+          ? action.payload.directiveReason
+          : 'The requested action is not currently available.'
+      );
+    }
+  }
+
+  private handleDirectiveActionResult(
+    record: SimulationSessionRecord,
+    botId: string,
+    action: GameAction,
+    result: ActionResult
+  ): void {
+    const directiveId = typeof action.payload.directiveId === 'string'
+      ? action.payload.directiveId
+      : undefined;
+    if (!directiveId) {
+      return;
+    }
+
+    const directive = record.directiveManager.getDirective(directiveId);
+    const progress = record.directiveManager.getProgress(directiveId, botId)[0];
+    if (!directive || !progress || progress.status !== 'active') {
+      return;
+    }
+
+    const resultMessage = result.message ? `${result.status}: ${result.message}` : result.status;
+    const updated = record.directiveManager.updateDirectiveProgress(directiveId, botId, {
+      lastResult: resultMessage,
+      successfulActions: (progress.successfulActions ?? 0) + (result.status === 'succeeded' ? 1 : 0),
+      failedActions:
+        (progress.failedActions ?? 0) +
+        (result.status === 'failed' || result.status === 'timed_out' ? 1 : 0),
+      progressMessage: `Directive action ${action.type} ${result.status}.`
+    });
+
+    if (directive.directiveMode === 'force-next-valid-action' && result.status === 'succeeded') {
+      record.directiveManager.recordConditionCheck(
+        directiveId,
+        botId,
+        directive.successConditions[0] ?? `${action.type} succeeds`,
+        true,
+        `The requested action ${action.type} succeeded.`
+      );
+      record.directiveManager.markDirectiveSucceeded(
+        directiveId,
+        botId,
+        `The requested action ${action.type} succeeded.`
+      );
+      return;
+    }
+
+    const actionLimitReached =
+      directive.maxActions !== undefined && updated.actionsAttempted >= directive.maxActions;
+    const attemptLimitReached =
+      directive.maxAttempts !== undefined && updated.attempts >= directive.maxAttempts;
+    if (
+      (result.status === 'failed' || result.status === 'timed_out') &&
+      (actionLimitReached || attemptLimitReached)
+    ) {
+      const condition = directive.successConditions[0] ?? 'The requested test succeeds';
+      record.directiveManager.recordConditionCheck(
+        directiveId,
+        botId,
+        condition,
+        false,
+        `The limit was reached before this condition was met: ${condition}`
+      );
+      if (directive.directiveMode === 'guided-sequence' && updated.currentStepId) {
+        record.directiveManager.markDirectiveStepFailed(
+          directiveId,
+          botId,
+          updated.currentStepId,
+          resultMessage
+        );
+      }
+      record.directiveManager.markDirectiveFailed(
+        directiveId,
+        botId,
+        `Directive stopped after ${updated.attempts} unsuccessful attempt(s).`
+      );
+    }
+  }
+
+  private handleDirectiveStateObserved(
+    record: SimulationSessionRecord,
+    botId: string,
+    directive: BotTestDirective,
+    previousState: GameStateSnapshot | null,
+    currentState: GameStateSnapshot | null
+  ): void {
+    const progress = record.directiveManager.getProgress(directive.directiveId, botId)[0];
+    if (!progress || progress.status !== 'active' || !currentState) {
+      return;
+    }
+
+    const scene = currentState.scene ?? this.stringStateValue(currentState.state, 'scene');
+    const area =
+      this.stringStateValue(currentState.state, 'area') ??
+      this.stringStateValue(currentState.state, 'currentArea');
+    const changedKeys = previousState
+      ? [...new Set([...Object.keys(previousState.state), ...Object.keys(currentState.state)])]
+          .filter((key) => JSON.stringify(previousState.state[key]) !== JSON.stringify(currentState.state[key]))
+          .slice(0, 8)
+      : Object.keys(currentState.state).slice(0, 8);
+    const sceneChanged = previousState?.scene !== currentState.scene;
+
+    if (!previousState || sceneChanged || changedKeys.length > 0) {
+      const locationChange = sceneChanged && previousState
+        ? `Scene changed from ${previousState.scene ?? 'unknown'} to ${scene ?? 'unknown'}`
+        : scene
+          ? `Observed state in ${scene}`
+          : 'Observed game state';
+      const stateChange = changedKeys.length > 0
+        ? `${locationChange}; changed ${changedKeys.join(', ')}.`
+        : `${locationChange}.`;
+      record.directiveManager.recordStateChange(directive.directiveId, botId, stateChange, {
+        scene,
+        area
+      });
+    }
+
+    const conditions: Array<{ label: string; met: boolean }> = [];
+    if (directive.targetScene) {
+      conditions.push({
+        label: `Reach scene ${directive.targetScene}`,
+        met: scene?.trim().toLowerCase() === directive.targetScene.trim().toLowerCase()
+      });
+    }
+    if (directive.targetArea) {
+      conditions.push({
+        label: `Reach area ${directive.targetArea}`,
+        met: area?.trim().toLowerCase() === directive.targetArea.trim().toLowerCase()
+      });
+    }
+    if (directive.expectedState) {
+      conditions.push({
+        label: 'Expected game state is present',
+        met: Object.entries(directive.expectedState).every(
+          ([key, expected]) => JSON.stringify(currentState.state[key]) === JSON.stringify(expected)
+        )
+      });
+    }
+
+    for (const condition of conditions) {
+      if (condition.met && !(progress.conditionsMet ?? []).includes(condition.label)) {
+        record.directiveManager.recordConditionCheck(
+          directive.directiveId,
+          botId,
+          condition.label,
+          true
+        );
+      }
+    }
+
+    if (conditions.length > 0 && conditions.every((condition) => condition.met)) {
+      const latest = record.directiveManager.getProgress(directive.directiveId, botId)[0];
+      if (latest?.status === 'active') {
+        record.directiveManager.markDirectiveSucceeded(
+          directive.directiveId,
+          botId,
+          'The requested scene, area, or game-state condition was reached.'
+        );
+      }
+    }
+  }
+
+  private stringStateValue(state: Record<string, unknown>, key: string): string | undefined {
+    const value = state[key];
+    return typeof value === 'string' && value.trim() ? value : undefined;
   }
 
   private createLog(sessionId: string, level: LogEntry['level'], message: string): LogEntry {

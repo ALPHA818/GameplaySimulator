@@ -2,6 +2,16 @@
   "profileId": "explorer",
   "displayName": "Explorer Bot",
   "botType": "explorer",
+  "profileGroup": "general",
+  "specializationCategory": "world-simulation",
+  "requiredCapabilities": ["movement actions"],
+  "recommendedGameTypes": ["desktop", "browser", "unity", "godot", "unreal", "custom"],
+  "incompatibleGameTypes": [],
+  "bestUsedFor": ["map coverage", "navigation and traversal checks"],
+  "limitations": ["Black-box adapters may only infer areas from screenshots or weak state."],
+  "beginnerRecommended": true,
+  "defaultEnabled": true,
+  "estimatedComplexity": "low",
   "description": "General-purpose bot profile for navigation, menu, and interaction coverage.",
   "goals": [
     {

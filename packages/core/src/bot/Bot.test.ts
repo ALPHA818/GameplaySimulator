@@ -1,4 +1,11 @@
-import type { ActionResult, BotProfile, GameAction, GameStateSnapshot, RuntimeBotSnapshot } from '../types';
+import type {
+  ActionResult,
+  BotProfile,
+  BotTestDirective,
+  GameAction,
+  GameStateSnapshot,
+  RuntimeBotSnapshot
+} from '../types';
 import type { LogEntry } from '../logging/LogEntry';
 import { describe, expect, it } from 'vitest';
 import { Bot, type BotAdapter } from './Bot';
@@ -248,10 +255,35 @@ describe('Bot', () => {
     expect(logs.some((log) => log.message.includes('Recovery failed'))).toBe(true);
   });
 
-  it('recovers from a stuck state before giving up', async () => {
+  it('runs recovery ahead of an urgent user directive and resumes safely', async () => {
     const adapter = new RecoveringAdapter();
     const logs: LogEntry[] = [];
     const statuses: RuntimeBotSnapshot[] = [];
+    const directive: BotTestDirective = {
+      directiveId: 'urgent-menu-direction',
+      sessionId: 'session',
+      name: 'Open inventory now',
+      description: 'Open inventory before doing anything else.',
+      directiveType: 'action',
+      directiveMode: 'force-next-valid-action',
+      priority: 'urgent',
+      status: 'active',
+      target: {
+        allBots: false,
+        botIds: ['explorer-bot-001'],
+        profileIds: [],
+        gameInstanceIds: []
+      },
+      actionKeywords: ['open-inventory'],
+      avoidedActionKeywords: [],
+      successConditions: ['Inventory opens.'],
+      failureConditions: [],
+      steps: [],
+      repeatUntilSuccess: false,
+      createdAt: '2026-07-04T09:59:00.000Z',
+      activatedAt: '2026-07-04T10:00:00.000Z',
+      createdBy: 'test'
+    };
     const bot = new Bot({
       botId: 'explorer-bot-001',
       sessionId: 'session',
@@ -267,6 +299,7 @@ describe('Bot', () => {
       maxActionsPerBot: 1,
       now: () => '2026-07-04T10:00:00.000Z',
       sleep: async () => {},
+      getActiveDirective: () => directive,
       onStatusChange: (status) => {
         statuses.push(status);
       }
@@ -275,6 +308,8 @@ describe('Bot', () => {
     await bot.start();
 
     expect(adapter.actions.some((action) => action.payload.recovery === true)).toBe(true);
+    expect(adapter.actions[0].payload.planner).toBe('recovery');
+    expect(adapter.actions.some((action) => action.type === 'open-inventory')).toBe(false);
     expect(adapter.recovered).toBe(true);
     expect(bot.memory.recoveredFromStuckReason).toContain('No available actions');
     expect(bot.status).toBe('completed');

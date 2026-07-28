@@ -300,6 +300,151 @@ describe('StructuredRunLogger', () => {
 	      untestedContent: ['No known content catalog configured'],
 	      contentWithIssues: ['scenes: Start (1 issue)'],
 	      contentByBotType: ['explorer: 1 content item'],
+	      directives: [
+	        {
+	          directiveId: 'directive-001',
+	          sessionId: 'session-test',
+	          name: 'Explore the forest',
+	          description: 'Look for new paths in the forest.',
+	          directiveType: 'area',
+	          directiveMode: 'focus',
+	          priority: 'high',
+	          status: 'succeeded',
+	          target: {
+	            allBots: false,
+	            botIds: ['explorer-001'],
+	            profileIds: [],
+	            gameInstanceIds: []
+	          },
+	          actionKeywords: ['explore'],
+	          avoidedActionKeywords: [],
+	          targetArea: 'Forest',
+	          successConditions: ['A new path is found.'],
+	          failureConditions: [],
+	          steps: [],
+	          repeatUntilSuccess: false,
+	          createdAt: '2026-07-04T10:11:12.000Z',
+	          activatedAt: '2026-07-04T10:11:12.000Z',
+	          completedAt: '2026-07-04T10:11:14.000Z',
+	          createdBy: 'user'
+	        },
+	        {
+	          directiveId: 'directive-reproduce-001',
+	          sessionId: 'session-test',
+	          name: 'Reproduce inventory loss',
+	          description: 'Repeat the actions that previously caused an item to disappear.',
+	          directiveType: 'issue-reproduction',
+	          directiveMode: 'focus',
+	          priority: 'high',
+	          status: 'failed',
+	          target: {
+	            allBots: false,
+	            botIds: ['explorer-001'],
+	            profileIds: [],
+	            gameInstanceIds: []
+	          },
+	          actionKeywords: ['open-inventory', 'move-item'],
+	          avoidedActionKeywords: [],
+	          targetIssueId: 'issue-001',
+	          successConditions: ['The inventory loss is detected again.'],
+	          failureConditions: [],
+	          steps: [],
+	          repeatUntilSuccess: false,
+	          createdAt: '2026-07-04T10:11:12.000Z',
+	          activatedAt: '2026-07-04T10:11:13.000Z',
+	          completedAt: '2026-07-04T10:11:15.000Z',
+	          createdBy: 'user'
+	        }
+	      ],
+	      directiveProgress: [
+	        {
+	          directiveId: 'directive-001',
+	          botId: 'explorer-001',
+	          instanceId: 'instance-001',
+	          status: 'succeeded',
+	          actionsAttempted: 1,
+	          attempts: 1,
+	          matchedActions: ['move-forward'],
+	          unrelatedActions: ['wait'],
+	          successfulActions: 1,
+	          failedActions: 0,
+	          reachedScenes: ['Forest'],
+	          reachedAreas: ['Forest path'],
+	          observedStateChanges: ['Scene changed from Start to Forest.'],
+	          conditionsMet: ['A new path is found.'],
+	          issueIds: ['issue-001'],
+	          screenshotPaths: ['/runs/forest.png'],
+	          videoPaths: [],
+	          progressMessage: 'Exploring the forest.',
+	          startedAt: '2026-07-04T10:11:12.000Z',
+	          updatedAt: '2026-07-04T10:11:14.000Z',
+	          completedAt: '2026-07-04T10:11:14.000Z'
+	        },
+	        {
+	          directiveId: 'directive-reproduce-001',
+	          botId: 'explorer-001',
+	          instanceId: 'instance-001',
+	          status: 'failed',
+	          actionsAttempted: 2,
+	          attempts: 2,
+	          matchedActions: ['open-inventory', 'move-item'],
+	          unrelatedActions: [],
+	          successfulActions: 1,
+	          failedActions: 1,
+	          reachedScenes: ['Forest'],
+	          reachedAreas: ['Forest path'],
+	          observedStateChanges: ['Inventory stayed unchanged.'],
+	          conditionsMet: [],
+	          issueIds: [],
+	          screenshotPaths: ['/runs/reproduction-failed.png'],
+	          videoPaths: [],
+	          failureReason: 'The issue did not happen again within the attempt limit.',
+	          progressMessage: 'Reproduction attempt ended without a match.',
+	          startedAt: '2026-07-04T10:11:13.000Z',
+	          updatedAt: '2026-07-04T10:11:15.000Z',
+	          completedAt: '2026-07-04T10:11:15.000Z'
+	        }
+	      ],
+	      directiveEvents: [
+	        {
+	          eventId: 'directive-event-001',
+	          eventType: 'directive_created',
+	          sessionId: 'session-test',
+	          directiveId: 'directive-001',
+	          timestamp: '2026-07-04T10:11:12.000Z',
+	          payload: { message: 'User created directive.' }
+	        },
+	        {
+	          eventId: 'directive-event-002',
+	          eventType: 'directive_state_changed',
+	          sessionId: 'session-test',
+	          directiveId: 'directive-001',
+	          botId: 'explorer-001',
+	          instanceId: 'instance-001',
+	          timestamp: '2026-07-04T10:11:13.000Z',
+	          payload: { summary: 'Scene changed from Start to Forest.' }
+	        },
+	        {
+	          eventId: 'directive-event-003',
+	          eventType: 'directive_succeeded',
+	          sessionId: 'session-test',
+	          directiveId: 'directive-001',
+	          botId: 'explorer-001',
+	          instanceId: 'instance-001',
+	          timestamp: '2026-07-04T10:11:14.000Z',
+	          payload: { message: 'The requested path was found.' }
+	        },
+	        {
+	          eventId: 'directive-event-004',
+	          eventType: 'directive_failed',
+	          sessionId: 'session-test',
+	          directiveId: 'directive-reproduce-001',
+	          botId: 'explorer-001',
+	          instanceId: 'instance-001',
+	          timestamp: '2026-07-04T10:11:15.000Z',
+	          payload: { message: 'The issue did not happen again.' }
+	        }
+	      ],
 	      createdAt: '2026-07-04T10:11:12.000Z',
 	      startedAt: '2026-07-04T10:11:12.000Z'
 	    });
@@ -331,10 +476,49 @@ describe('StructuredRunLogger', () => {
 	    const fullLogs = await readJsonl(join(logger.sessionDir, 'full-structured-logs.jsonl'));
 	    const importantEvents = await readJsonl(join(logger.sessionDir, 'important-events.jsonl'));
 	    const summary = await readFile(logger.summaryPath, 'utf8');
+	    const directedTests = JSON.parse(
+	      await readFile(join(logger.sessionDir, 'user-directed-tests.json'), 'utf8')
+	    ) as Array<Record<string, unknown>>;
+	    const directiveTimeline = JSON.parse(
+	      await readFile(join(logger.sessionDir, 'directive-timeline.json'), 'utf8')
+	    ) as Array<{ eventType: string; directiveId: string }>;
     const botReport = await readFile(join(logger.sessionDir, 'bots', 'explorer-001', 'bot-report.md'), 'utf8');
     const issueReport = await readFile(join(logger.sessionDir, 'issues', 'issue-001.md'), 'utf8');
 
     expect(sessionEvents).toHaveLength(5);
+	    expect(summary).toContain('## User-Directed Tests');
+	    expect(summary).toContain('Actions Used');
+	    expect(summary).toContain('Scene changed from Start to Forest.');
+	    expect(summary).toContain('Explore the forest');
+	    expect(summary).toContain('Exploring the forest.');
+	    expect(summary).toContain('Reproduce inventory loss');
+	    expect(summary).toContain('The issue did not happen again within the attempt limit.');
+	    expect(summary).toContain('/runs/forest.png');
+	    expect(summary).toContain('issue-001');
+	    expect(existsSync(join(logger.sessionDir, 'user-directed-tests.json'))).toBe(true);
+	    expect(existsSync(join(logger.sessionDir, 'directive-timeline.json'))).toBe(true);
+	    expect(directedTests).toEqual(expect.arrayContaining([
+	      expect.objectContaining({
+	        finalResult: 'succeeded',
+	        issuesDiscovered: ['issue-001'],
+	        screenshots: ['/runs/forest.png']
+	      }),
+	      expect.objectContaining({
+	        directive: expect.objectContaining({
+	          directiveType: 'issue-reproduction',
+	          targetIssueId: 'issue-001'
+	        }),
+	        finalResult: 'failed',
+	        screenshots: ['/runs/reproduction-failed.png']
+	      })
+	    ]));
+	    expect(directiveTimeline).toEqual(expect.arrayContaining([
+	      expect.objectContaining({ eventType: 'directive_succeeded', directiveId: 'directive-001' }),
+	      expect.objectContaining({
+	        eventType: 'directive_failed',
+	        directiveId: 'directive-reproduce-001'
+	      })
+	    ]));
     expect(sessionEvents).toContainEqual(sessionStart);
     expect(stateEvents).toHaveLength(1);
     expect(actionEvents).toHaveLength(1);
@@ -400,5 +584,60 @@ describe('StructuredRunLogger', () => {
     expect(issueReport).toContain('## Why This Was Flagged');
     expect(issueReport).toContain('## Issue Timeline');
     expect(issueReport).toContain('## What To Check Next');
+  });
+
+  it('reports unsupported and incomplete technical tests explicitly', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'gameplay-simulator-technical-report-'));
+    const logger = new StructuredRunLogger({
+      rootDir,
+      sessionId: 'technical-report',
+      createdAt: '2026-07-22T10:00:00.000Z'
+    });
+    const technicalRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'technical-report',
+      botPools: [{
+        profileId: 'network-resilience-tester-bot',
+        enabled: true,
+        minCount: 1,
+        desiredCount: 1,
+        maxCount: 1,
+        scalingMode: 'fixed',
+        priority: 10,
+        resourceWeight: 'heavy'
+      }],
+      technicalTesting: {
+        controlledNetworkTestConfirmed: false,
+        saveMigrationTestPaths: [],
+        approvedFileTestDirectories: []
+      }
+    };
+
+    logger.writeSummary({
+      status: 'failed',
+      runConfig: technicalRunConfig,
+      gameProfile,
+      viabilityReport,
+      bots: [],
+      instances: [],
+      issues: [],
+      contentCoveragePercent: 0,
+      testedContent: [],
+      untestedContent: [],
+      contentWithIssues: [],
+      contentByBotType: []
+    });
+
+    const markdown = await readFile(logger.summaryPath, 'utf8');
+    const summaryJson = JSON.parse(
+      await readFile(join(logger.sessionDir, 'session-summary.json'), 'utf8')
+    ) as { technicalTesting: { readiness: Array<{ status: string; details: string[] }> } };
+
+    expect(markdown).toContain('## Technical Test Readiness');
+    expect(markdown).toContain('Network Resilience Tester Bot');
+    expect(markdown).toContain('Unsupported');
+    expect(markdown).toContain('Controlled network test confirmation is required');
+    expect(summaryJson.technicalTesting.readiness[0].status).toBe('Unsupported');
+    expect(summaryJson.technicalTesting.readiness[0].details.join(' ')).toContain('No bot from this technical profile launched');
   });
 });

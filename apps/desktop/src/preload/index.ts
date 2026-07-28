@@ -26,8 +26,11 @@ import type {
   DesktopControlTestResult,
   GameProfileTestRequest,
   GameProfileTestResult,
+  GuideBotDirectiveRequest,
+  LiveDirectiveMutationResult,
   LiveObservationState,
   PersistedSessionMetadata,
+  ReorderBotDirectivesRequest,
   SimulationBotStatus,
   SimulationSessionCreateResult,
   SimulationSessionStatusSnapshot,
@@ -36,6 +39,8 @@ import type {
 } from '../main/services/simulationService';
 import type { DesktopAdapterDependencyReport } from '../../../../packages/adapters/src';
 import type { RuntimeObservationConfig } from '@core/config/runtimeObservationConfig';
+import type { BotDirectiveManagerSnapshot } from '@core/bot/BotDirectiveManager';
+import type { AvailableGameActionLike } from '@core/bot/ActionPlanner';
 
 interface SimulationSessionPayload {
   runConfig: SimulationRunConfig;
@@ -85,6 +90,16 @@ const api = {
       ipcRenderer.invoke('simulation:getSessionStatus', sessionId) as Promise<SimulationSessionStatusSnapshot>,
     getBotStatuses: (sessionId: string) =>
       ipcRenderer.invoke('simulation:getBotStatuses', sessionId) as Promise<SimulationBotStatus[]>,
+    getDirectiveState: (sessionId: string) =>
+      ipcRenderer.invoke('simulation:getDirectiveState', sessionId) as Promise<BotDirectiveManagerSnapshot>,
+    getBotAvailableActions: (sessionId: string, botId: string) =>
+      ipcRenderer.invoke('simulation:getBotAvailableActions', sessionId, botId) as Promise<AvailableGameActionLike[]>,
+    guideBot: (payload: GuideBotDirectiveRequest) =>
+      ipcRenderer.invoke('simulation:guideBot', payload) as Promise<LiveDirectiveMutationResult>,
+    cancelBotDirective: (sessionId: string, botId: string, directiveId: string) =>
+      ipcRenderer.invoke('simulation:cancelBotDirective', sessionId, botId, directiveId) as Promise<LiveDirectiveMutationResult>,
+    reorderBotDirectives: (payload: ReorderBotDirectivesRequest) =>
+      ipcRenderer.invoke('simulation:reorderBotDirectives', payload) as Promise<LiveDirectiveMutationResult>,
     getLiveObservationState: (sessionId: string) =>
       ipcRenderer.invoke('simulation:getLiveObservationState', sessionId) as Promise<LiveObservationState>,
     followBot: (sessionId: string, botId: string) =>

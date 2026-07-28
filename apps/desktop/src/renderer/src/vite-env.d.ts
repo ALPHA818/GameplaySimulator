@@ -27,8 +27,11 @@ import type {
   DesktopControlTestResult,
   GameProfileTestRequest,
   GameProfileTestResult,
+  GuideBotDirectiveRequest,
+  LiveDirectiveMutationResult,
   LiveObservationState,
   PersistedSessionMetadata,
+  ReorderBotDirectivesRequest,
   SimulationBotStatus,
   SimulationSessionCreateResult,
   SimulationSessionStatusSnapshot,
@@ -37,6 +40,8 @@ import type {
 } from '../../main/services/simulationService';
 import type { DesktopAdapterDependencyReport } from '../../../../../packages/adapters/src';
 import type { RuntimeObservationConfig } from '@core/config/runtimeObservationConfig';
+import type { BotDirectiveManagerSnapshot } from '@core/bot/BotDirectiveManager';
+import type { AvailableGameActionLike } from '@core/bot/ActionPlanner';
 
 interface SimulationSessionPayload {
   runConfig: SimulationRunConfig;
@@ -72,6 +77,11 @@ declare global {
         resumeSession: (sessionId: string) => Promise<SimulationSessionStatusSnapshot>;
         getSessionStatus: (sessionId?: string) => Promise<SimulationSessionStatusSnapshot>;
         getBotStatuses: (sessionId: string) => Promise<SimulationBotStatus[]>;
+        getDirectiveState: (sessionId: string) => Promise<BotDirectiveManagerSnapshot>;
+        getBotAvailableActions: (sessionId: string, botId: string) => Promise<AvailableGameActionLike[]>;
+        guideBot: (payload: GuideBotDirectiveRequest) => Promise<LiveDirectiveMutationResult>;
+        cancelBotDirective: (sessionId: string, botId: string, directiveId: string) => Promise<LiveDirectiveMutationResult>;
+        reorderBotDirectives: (payload: ReorderBotDirectivesRequest) => Promise<LiveDirectiveMutationResult>;
         getLiveObservationState: (sessionId: string) => Promise<LiveObservationState>;
         followBot: (sessionId: string, botId: string) => Promise<LiveObservationState>;
         stopFollowingBot: (sessionId: string) => Promise<LiveObservationState>;

@@ -1,4 +1,15 @@
-import type { ActionQuality, BotProfile, DetectedIssue, GameAction, GameStateSnapshot, UIFlow } from '../types';
+import type {
+  ActionQuality,
+  BotDirectiveProgress,
+  BotDirectiveStep,
+  BotProfile,
+  BotTestDirective,
+  DetectedIssue,
+  GameAction,
+  GameStateSnapshot,
+  UIFlow
+} from '../types';
+import { resolveAvailableActionType, resolveDirectiveActionAvailability } from '../types';
 import { buildPlannerExplanation } from './ActionExplanation';
 import { UIJourneyPlanner } from './UIJourneyPlanner';
 
@@ -39,6 +50,8 @@ export interface ActionPlannerInput {
   coverageData?: CoverageData;
   recentIssues?: DetectedIssue[];
   uiFlows?: UIFlow[];
+  activeDirective?: BotTestDirective;
+  directiveProgress?: BotDirectiveProgress;
 }
 
 interface RuleSet {
@@ -65,6 +78,14 @@ interface ScoredAction {
   random: number;
   reason: string;
   repetitionCount: number;
+}
+
+interface DirectiveActionScore {
+  scored: ScoredAction;
+  originalProfilePlannerScore: number;
+  matchedKeywords: string[];
+  matchKind: 'exact' | 'strong' | 'related' | 'partial' | 'avoided' | 'unrelated';
+  directiveReason: string;
 }
 
 const defaultRuleSet: RuleSet = {
@@ -187,6 +208,162 @@ const ruleSets: Record<string, RuleSet> = {
     avoid: ['stay-on-path'],
     weights: { ...defaultRuleSet.weights, exploration: 2.4, risk: 2.4 },
     randomWeight: 9
+  },
+  crafting: {
+    include: ['craft', 'recipe', 'ingredient', 'output', 'quantity', 'cancel-craft', 'recursive'],
+    avoid: ['ignore-recipe', 'discard-output', 'combat-only'],
+    weights: { ...defaultRuleSet.weights, economy: 2.6, ui: 1.4, risk: 1.3 },
+    randomWeight: 5
+  },
+  building: {
+    include: ['build', 'place', 'placement', 'overlap', 'rotate', 'remove', 'destroy', 'structure', 'limit'],
+    avoid: ['ignore-building', 'leave-test-world'],
+    weights: { ...defaultRuleSet.weights, exploration: 1.8, risk: 2, persistence: 1.6, performance: 1.4 },
+    randomWeight: 6
+  },
+  physics: {
+    include: ['physics', 'push', 'pull', 'fall', 'jump', 'stack', 'slope', 'collision', 'high-speed'],
+    avoid: ['stand-still', 'avoid-physics'],
+    weights: { ...defaultRuleSet.weights, risk: 2.8, exploration: 2, performance: 1.5 },
+    randomWeight: 8
+  },
+  camera: {
+    include: ['camera', 'view', 'rotate', 'zoom', 'first-person', 'third-person', 'clip', 'obstruction', 'field-of-view', 'fov'],
+    avoid: ['lock-camera', 'skip-visual'],
+    weights: { ...defaultRuleSet.weights, ui: 2.6, exploration: 1.8, risk: 1.2 },
+    randomWeight: 6
+  },
+  loot: {
+    include: ['loot', 'drop', 'reward', 'rarity', 'pickup', 'overflow', 'claim'],
+    avoid: ['discard-loot', 'skip-reward', 'single-sample'],
+    weights: { ...defaultRuleSet.weights, economy: 2.7, persistence: 1.3, risk: 1.2 },
+    randomWeight: 7
+  },
+  death: {
+    include: ['death', 'die', 'respawn', 'checkpoint', 'retry', 'retention', 'death-transition'],
+    avoid: ['avoid-danger', 'quit-after-death'],
+    weights: { ...defaultRuleSet.weights, combat: 2.2, persistence: 2.2, risk: 2.5 },
+    randomWeight: 5
+  },
+  npc: {
+    include: ['npc', 'follow', 'flee', 'schedule', 'blocked-path', 'interaction', 'state-reset'],
+    avoid: ['ignore-npc', 'leave-npc-area'],
+    weights: { ...defaultRuleSet.weights, exploration: 2.3, goal: 1.5, idle: 1.4 },
+    randomWeight: 6
+  },
+  boss: {
+    include: ['boss', 'encounter', 'phase', 'arena', 'pattern', 'retry', 'reward', 'skip'],
+    avoid: ['avoid-boss', 'leave-encounter', 'skip-reward-check'],
+    weights: { ...defaultRuleSet.weights, combat: 3, risk: 2.4, goal: 2.3 },
+    randomWeight: 7
+  },
+  procedural: {
+    include: ['generate', 'generation', 'seed', 'terrain', 'required-resource', 'structure', 'world-load'],
+    avoid: ['reuse-single-world', 'skip-seed', 'ignore-unreachable'],
+    weights: { ...defaultRuleSet.weights, exploration: 2.8, performance: 2, goal: 1.5 },
+    randomWeight: 8
+  },
+  environment: {
+    include: ['environment', 'day', 'night', 'weather', 'temperature', 'timed-event', 'lighting', 'advance-time'],
+    avoid: ['freeze-time', 'skip-environment'],
+    weights: { ...defaultRuleSet.weights, exploration: 1.8, persistence: 1.8, performance: 1.4, idle: 1.5 },
+    randomWeight: 6
+  },
+  'keyboard-input': {
+    include: ['keyboard', 'mapped-key', 'key-combination', 'hold-key', 'rapid-key', 'remap-key', 'key-mapping'],
+    avoid: ['unmapped-key', 'system-shortcut', 'text-entry-spam'],
+    weights: { ...defaultRuleSet.weights, ui: 2.8, performance: 1.3, risk: 1.2 },
+    randomWeight: 5
+  },
+  controller: {
+    include: ['controller', 'gamepad', 'stick', 'trigger', 'gamepad-button', 'dead-zone', 'reconnect-controller', 'switch-controller'],
+    avoid: ['keyboard-fallback', 'unmapped-controller', 'system-device'],
+    weights: { ...defaultRuleSet.weights, ui: 2.5, risk: 1.6, performance: 1.2 },
+    randomWeight: 6
+  },
+  touch: {
+    include: ['touch', 'tap', 'long-press', 'swipe', 'multi-touch', 'virtual-stick', 'orientation', 'overlapping-controls'],
+    avoid: ['mouse-fallback', 'unsupported-touch', 'system-gesture'],
+    weights: { ...defaultRuleSet.weights, ui: 2.8, risk: 1.5, exploration: 1.2 },
+    randomWeight: 6
+  },
+  display: {
+    include: ['display', 'resolution', 'aspect-ratio', 'fullscreen', 'windowed', 'resize-window', 'ui-scale', 'safe-area'],
+    avoid: ['unsupported-resolution', 'hide-ui', 'skip-screenshot'],
+    weights: { ...defaultRuleSet.weights, ui: 2.7, performance: 1.5, risk: 1.2 },
+    randomWeight: 5
+  },
+  localization: {
+    include: ['localization', 'language', 'translation', 'long-text', 'special-character', 'rtl', 'text-clipping', 'text-wrapping'],
+    avoid: ['skip-text', 'single-language', 'hide-subtitles'],
+    weights: { ...defaultRuleSet.weights, ui: 3, exploration: 1.2 },
+    randomWeight: 5
+  },
+  audio: {
+    include: ['audio', 'volume', 'mute', 'sound', 'subtitle', 'timing', 'speaker-label'],
+    avoid: ['claim-audio-verified', 'disable-evidence', 'skip-subtitles'],
+    weights: { ...defaultRuleSet.weights, ui: 2.7, idle: 1.3, performance: 1.2 },
+    randomWeight: 5
+  },
+  accessibility: {
+    include: ['accessibility', 'keyboard-only', 'readable-label', 'contrast', 'text-size', 'subtitle', 'input-alternative', 'reduced-motion'],
+    avoid: ['accessibility-certification', 'mouse-only', 'skip-readable-label'],
+    weights: { ...defaultRuleSet.weights, ui: 3, performance: 1.2 },
+    randomWeight: 4
+  },
+  settings: {
+    include: ['settings', 'configuration', 'change-setting', 'apply-setting', 'cancel-setting', 'reset-setting', 'restart-after-setting', 'settings-persistence'],
+    avoid: ['unsafe-system-setting', 'unconfirmed-setting', 'delete-user-profile'],
+    weights: { ...defaultRuleSet.weights, ui: 3, persistence: 2.4 },
+    randomWeight: 4
+  },
+  transition: {
+    include: ['loading', 'transition', 'scene', 'fast-travel', 'cancel-transition', 'retry-transition'],
+    avoid: ['skip-loading', 'force-close-during-save', 'unmapped-transition'],
+    weights: { ...defaultRuleSet.weights, performance: 2.8, goal: 1.7, persistence: 1.2 },
+    randomWeight: 5
+  },
+  'network-resilience': {
+    include: ['latency', 'packet-loss', 'disconnect-test', 'reconnect-test', 'network-timeout', 'restore-test-network'],
+    avoid: ['public-matchmaking', 'anti-cheat', 'unapproved-server'],
+    weights: { ...defaultRuleSet.weights, performance: 2.4, risk: 2, persistence: 1.4 },
+    randomWeight: 4
+  },
+  multiplayer: {
+    include: ['private-session', 'private-lobby', 'lobby-ready', 'test-host', 'reconnect-private', 'synchronized-objective', 'cleanup-test-session'],
+    avoid: ['public-matchmaking', 'public-lobby', 'anti-cheat'],
+    weights: { ...defaultRuleSet.weights, goal: 2.3, persistence: 1.6, risk: 1.5 },
+    randomWeight: 5
+  },
+  endurance: {
+    include: ['endurance', 'repeat-safe-loop', 'sample-memory', 'sample-performance', 'degradation', 'scene-loop'],
+    avoid: ['many-visible-windows', 'ignore-resource-limit', 'unbounded'],
+    weights: { ...defaultRuleSet.weights, performance: 3.4, idle: 1.7 },
+    randomWeight: 3
+  },
+  'save-migration': {
+    include: ['test-save', 'old-save', 'save-migration', 'migrated-state', 'migrated-copy'],
+    avoid: ['discover-user-save', 'overwrite-source', 'unapproved-save'],
+    weights: { ...defaultRuleSet.weights, persistence: 3.5, goal: 1.8, risk: 0.4 },
+    randomWeight: 3
+  },
+  'world-persistence': {
+    include: ['world-state', 'persistent-object', 'save-world', 'reload-world', 'verify-world'],
+    avoid: ['untracked-world', 'delete-world-save', 'skip-state-comparison'],
+    weights: { ...defaultRuleSet.weights, persistence: 3.2, exploration: 1.5, goal: 1.5 },
+    randomWeight: 4
+  },
+  achievement: {
+    include: ['achievement', 'unlock', 'unlock-state', 'sandbox-achievement', 'achievement-condition'],
+    avoid: ['production-achievement', 'real-player-account', 'without-condition'],
+    weights: { ...defaultRuleSet.weights, goal: 2.7, persistence: 2.1, ui: 1.2 },
+    randomWeight: 4
+  },
+  'file-permission': {
+    include: ['approved-test-file', 'read-only-test-folder', 'missing-test-folder', 'test-disk-write', 'file-error-message'],
+    avoid: ['unapproved-directory', 'system-file', 'user-file'],
+    weights: { ...defaultRuleSet.weights, persistence: 3.2, risk: 0.3, ui: 1.4 },
+    randomWeight: 3
   }
 };
 
@@ -215,6 +392,21 @@ function containsAny(text: string, keywords: string[]): boolean {
   return keywords.some((keyword) => text.includes(normalize(keyword)));
 }
 
+function keywordTokens(value: string): string[] {
+  return normalize(value)
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3);
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function partiallyMatches(text: string, keyword: string): boolean {
+  const actionTokens = new Set(keywordTokens(text));
+  return keywordTokens(keyword).some((token) => actionTokens.has(token));
+}
+
 function matchesPreference(action: AvailableGameActionLike, preference: string): boolean {
   return containsAny(actionText(action), [preference]);
 }
@@ -227,6 +419,32 @@ function profileKey(profile: BotProfile): string {
   if (text.includes('explorer')) return 'explorer';
   if (text.includes('speedrunner')) return 'speedrunner';
   if (text.includes('chaos')) return 'chaos';
+  if (text.includes('crafting-recipe') || text.includes('recipe-tester')) return 'crafting';
+  if (text.includes('building-destruction')) return 'building';
+  if (text.includes('physics-interaction')) return 'physics';
+  if (text.includes('camera-view')) return 'camera';
+  if (text.includes('loot-random-drop')) return 'loot';
+  if (text.includes('death-respawn')) return 'death';
+  if (text.includes('npc-behaviour')) return 'npc';
+  if (text.includes('boss-encounter')) return 'boss';
+  if (text.includes('procedural-generation')) return 'procedural';
+  if (text.includes('environment-cycle')) return 'environment';
+  if (text.includes('keyboard-input-mapping')) return 'keyboard-input';
+  if (text.includes('controller-gamepad')) return 'controller';
+  if (text.includes('touch-mobile-controls')) return 'touch';
+  if (text.includes('display-resolution')) return 'display';
+  if (text.includes('localization-text-overflow')) return 'localization';
+  if (text.includes('audio-subtitle')) return 'audio';
+  if (text.includes('accessibility-tester')) return 'accessibility';
+  if (text.includes('settings-configuration')) return 'settings';
+  if (text.includes('loading-transition')) return 'transition';
+  if (text.includes('network-resilience')) return 'network-resilience';
+  if (text.includes('multiplayer-session')) return 'multiplayer';
+  if (text.includes('memory-leak-endurance')) return 'endurance';
+  if (text.includes('save-migration')) return 'save-migration';
+  if (text.includes('world-persistence')) return 'world-persistence';
+  if (text.includes('achievement-unlock')) return 'achievement';
+  if (text.includes('file-permission')) return 'file-permission';
   if (text.includes('ui-journey') || text.includes('journey')) return 'ui-journey';
   if (text.includes('ui')) return 'ui';
   if (text.includes('economy')) return 'economy';
@@ -240,7 +458,6 @@ function profileKey(profile: BotProfile): string {
   if (text.includes('performance')) return 'performance';
   if (text.includes('save-load') || text.includes('save')) return 'save';
   if (text.includes('boundary')) return 'boundary';
-
   return 'default';
 }
 
@@ -283,7 +500,7 @@ function scoreAction(input: ActionPlannerInput, action: AvailableGameActionLike,
     reasons.push('profile avoid');
   }
 
-  if (key !== 'chaos' && containsAny(text, ['random', 'spam', 'weird'])) {
+  if (key !== 'chaos' && containsAny(text, ['random-input', 'random-menu', 'spam', 'weird'])) {
     score -= 14;
     reasons.push('non-chaos random penalty');
   }
@@ -342,6 +559,215 @@ function scoreAction(input: ActionPlannerInput, action: AvailableGameActionLike,
     random,
     reason: reasons.join(', ') || 'weighted score',
     repetitionCount
+  };
+}
+
+function currentDirective(input: ActionPlannerInput): BotTestDirective | undefined {
+  const directive = input.activeDirective;
+
+  if (!directive || directive.status !== 'active') {
+    return undefined;
+  }
+  if (input.directiveProgress) {
+    if (
+      input.directiveProgress.directiveId !== directive.directiveId ||
+      input.directiveProgress.botId !== input.botId ||
+      input.directiveProgress.status !== 'active'
+    ) {
+      return undefined;
+    }
+  }
+
+  return directive;
+}
+
+function directiveStep(
+  directive: BotTestDirective,
+  progress: BotDirectiveProgress | undefined
+): BotDirectiveStep | undefined {
+  if (directive.directiveMode !== 'guided-sequence') {
+    return undefined;
+  }
+
+  if (progress?.currentStepId) {
+    return directive.steps.find((step) => step.stepId === progress.currentStepId);
+  }
+
+  return directive.steps[0];
+}
+
+function directiveRelatedKeywords(
+  directive: BotTestDirective,
+  step: BotDirectiveStep | undefined
+): string[] {
+  return unique(
+    [
+      directive.targetFeature,
+      directive.targetScene,
+      directive.targetArea,
+      directive.name,
+      directive.description,
+      step?.name,
+      step?.description,
+      step?.targetScene,
+      step?.targetArea
+    ]
+      .filter((value): value is string => Boolean(value))
+      .flatMap(keywordTokens)
+      .filter((keyword) => !['test', 'user', 'game', 'action', 'feature', 'with', 'from'].includes(keyword))
+  );
+}
+
+function scoreForDirective(
+  directive: BotTestDirective,
+  step: BotDirectiveStep | undefined,
+  selected: ScoredAction
+): DirectiveActionScore {
+  const text = actionText(selected.action);
+  const exactActionType = normalize(selected.action.actionType);
+  const requestedKeywords = unique([
+    ...directive.actionKeywords,
+    ...(step?.actionKeywords ?? []),
+    ...(step?.actionType ? [step.actionType] : [])
+  ]);
+  const exact = requestedKeywords.filter((keyword) => normalize(keyword) === exactActionType);
+  const strong = requestedKeywords.filter(
+    (keyword) => !exact.includes(keyword) && text.includes(normalize(keyword))
+  );
+  const partial = requestedKeywords.filter(
+    (keyword) => !exact.includes(keyword) && !strong.includes(keyword) && partiallyMatches(text, keyword)
+  );
+  const related = directiveRelatedKeywords(directive, step).filter((keyword) => text.includes(keyword));
+  const avoided = directive.avoidedActionKeywords.filter((keyword) => text.includes(normalize(keyword)));
+  let adjustment = 0;
+  let matchKind: DirectiveActionScore['matchKind'] = 'unrelated';
+  let matchedKeywords: string[] = [];
+
+  if (directive.directiveMode === 'influence') {
+    if (exact.length > 0 || strong.length > 0) {
+      adjustment += 30;
+      matchKind = exact.length > 0 ? 'exact' : 'strong';
+      matchedKeywords = [...exact, ...strong];
+    } else if (partial.length > 0 || related.length > 0) {
+      adjustment += 12;
+      matchKind = partial.length > 0 ? 'partial' : 'related';
+      matchedKeywords = [...partial, ...related];
+    }
+  } else {
+    if (exact.length > 0) {
+      adjustment += 100;
+      matchKind = 'exact';
+      matchedKeywords = exact;
+    } else if (strong.length > 0) {
+      adjustment += 65;
+      matchKind = 'strong';
+      matchedKeywords = strong;
+    } else if (partial.length > 0 || related.length > 0) {
+      adjustment += 30;
+      matchKind = partial.length > 0 ? 'partial' : 'related';
+      matchedKeywords = [...partial, ...related];
+    } else {
+      adjustment -= 30;
+    }
+  }
+
+  if (avoided.length > 0) {
+    adjustment -= 20;
+    matchKind = 'avoided';
+    matchedKeywords = unique([...matchedKeywords, ...avoided]);
+  }
+
+  const reason =
+    matchKind === 'unrelated'
+      ? `Action was unrelated to the active ${directive.priority}-priority directive.`
+      : matchKind === 'avoided'
+        ? `Action matched something the directive asked the bot to avoid.`
+        : `Action ${matchKind === 'exact' ? 'exactly' : 'closely'} matched the active ${directive.priority}-priority directive.`;
+
+  return {
+    scored: {
+      ...selected,
+      score: selected.score + adjustment,
+      reason: `${selected.reason}, user directive ${matchKind}`
+    },
+    originalProfilePlannerScore: selected.score,
+    matchedKeywords: unique(matchedKeywords),
+    matchKind,
+    directiveReason: reason
+  };
+}
+
+function directiveExplanation(input: {
+  profile: BotProfile;
+  actionType: string;
+  directive: BotTestDirective;
+  directiveReason: string;
+  fallbackUsed: boolean;
+}): string {
+  if (input.fallbackUsed) {
+    return `${input.profile.displayName} selected ${input.actionType} as a valid fallback because the action requested by "${input.directive.name}" is not currently available.`;
+  }
+
+  return `${input.profile.displayName} selected ${input.actionType} because the user asked it to ${input.directive.name.toLowerCase()}. ${input.directiveReason}`;
+}
+
+function buildDirectiveAction(input: {
+  plannerInput: ActionPlannerInput;
+  selected: ScoredAction;
+  directive: BotTestDirective;
+  step?: BotDirectiveStep;
+  directiveReason: string;
+  matchedKeywords: string[];
+  originalProfilePlannerScore: number;
+  fallbackUsed: boolean;
+  unavailable?: boolean;
+  quality: Extract<ActionQuality, 'user-directed' | 'directive-sequence' | 'directive-retry'>;
+  nextLikelyAction?: string;
+}): GameAction {
+  const key = profileKey(input.plannerInput.profile);
+  const explanation = directiveExplanation({
+    profile: input.plannerInput.profile,
+    actionType: input.selected.action.actionType,
+    directive: input.directive,
+    directiveReason: input.directiveReason,
+    fallbackUsed: input.fallbackUsed
+  });
+
+  return {
+    actionId: `${input.plannerInput.botId}-action-${String(input.plannerInput.actionIndex + 1).padStart(4, '0')}`,
+    sessionId: input.plannerInput.sessionId,
+    gameInstanceId: input.plannerInput.gameInstanceId,
+    botId: input.plannerInput.botId,
+    type: input.selected.action.actionType,
+    payload: {
+      planner: 'user-directive',
+      label: input.selected.action.label,
+      stateScene: input.plannerInput.state?.scene,
+      score: Math.round(input.selected.score * 100) / 100,
+      random: input.selected.random,
+      reason: input.directiveReason,
+      profileKey: key,
+      seed: input.plannerInput.seed ?? hashString(`${input.plannerInput.sessionId}:${input.plannerInput.botId}`),
+      quality: input.quality,
+      explanation,
+      nextLikelyAction: input.nextLikelyAction,
+      directiveId: input.directive.directiveId,
+      directiveName: input.directive.name,
+      directiveType: input.directive.directiveType,
+      directiveMode: input.directive.directiveMode,
+      directivePriority: input.directive.priority,
+      directiveStepId: input.step?.stepId,
+      directiveReason: input.directiveReason,
+      matchedKeywords: input.matchedKeywords,
+      expectedCondition:
+        input.step?.successCondition ?? (input.directive.successConditions.join('; ') || undefined),
+      fallbackUsed: input.fallbackUsed,
+      directiveUnavailable: input.unavailable === true,
+      directiveOutcome: input.unavailable ? 'unavailable' : 'selected',
+      originalProfilePlannerScore: Math.round(input.originalProfilePlannerScore * 100) / 100,
+      adapterPayload: input.selected.action.payloadSchema
+    },
+    requestedAt: input.plannerInput.now
   };
 }
 
@@ -421,6 +847,132 @@ export class ActionPlanner {
     }
 
     const scored = input.availableActions.map((action, index) => scoreAction(input, action, index));
+    const directive = currentDirective(input);
+
+    if (directive) {
+      const step = directiveStep(directive, input.directiveProgress);
+      const profileSelected = chooseScored(scored, seed, input.actionIndex, key);
+
+      if (directive.directiveMode === 'force-next-valid-action') {
+        const availability = resolveDirectiveActionAvailability(directive, input.availableActions);
+
+        if (availability.available) {
+          const selected = scored.find((item) => item.action.actionType === availability.actionType)!;
+          const nextLikelyAction = scored.find((item) => item !== selected)?.action.actionType;
+          return buildDirectiveAction({
+            plannerInput: input,
+            selected: { ...selected, score: selected.score + 100 },
+            directive,
+            directiveReason: `The exact action requested by the active ${directive.priority}-priority directive is available.`,
+            matchedKeywords: [availability.actionType],
+            originalProfilePlannerScore: selected.score,
+            fallbackUsed: false,
+            quality: 'user-directed',
+            nextLikelyAction
+          });
+        }
+
+        return buildDirectiveAction({
+          plannerInput: input,
+          selected: profileSelected,
+          directive,
+          directiveReason: availability.reason,
+          matchedKeywords: [],
+          originalProfilePlannerScore: profileSelected.score,
+          fallbackUsed: true,
+          unavailable: true,
+          quality: 'directive-retry',
+          nextLikelyAction: scored.find((item) => item !== profileSelected)?.action.actionType
+        });
+      }
+
+      if (directive.directiveMode === 'guided-sequence' && step) {
+        const exactStepAction = resolveAvailableActionType(step.actionType, input.availableActions);
+        const directiveScores = scored.map((item) => scoreForDirective(directive, step, item));
+        let selectedScore = exactStepAction.available
+          ? directiveScores.find((item) => item.scored.action.actionType === exactStepAction.actionType)
+          : directiveScores
+              .filter((item) => ['exact', 'strong', 'partial', 'related'].includes(item.matchKind))
+              .sort((left, right) => right.scored.score - left.scored.score)[0];
+        let fallbackUsed = false;
+        let unavailable = false;
+
+        if (!selectedScore && step.fallbackAction) {
+          const fallback = resolveAvailableActionType(step.fallbackAction, input.availableActions);
+          if (fallback.available) {
+            const fallbackScored = scored.find((item) => item.action.actionType === fallback.actionType)!;
+            selectedScore = {
+              scored: fallbackScored,
+              originalProfilePlannerScore: fallbackScored.score,
+              matchedKeywords: [step.fallbackAction],
+              matchKind: 'related',
+              directiveReason: `The current sequence step action is unavailable, so its configured fallback action was selected.`
+            };
+            fallbackUsed = true;
+          }
+        }
+
+        if (!selectedScore) {
+          selectedScore = {
+            scored: profileSelected,
+            originalProfilePlannerScore: profileSelected.score,
+            matchedKeywords: [],
+            matchKind: 'unrelated',
+            directiveReason: `No action reported by the adapter matches sequence step "${step.name}". A valid profile action was selected instead.`
+          };
+          fallbackUsed = true;
+          unavailable = true;
+        }
+
+        return buildDirectiveAction({
+          plannerInput: input,
+          selected: selectedScore.scored,
+          directive,
+          step,
+          directiveReason: selectedScore.directiveReason,
+          matchedKeywords: selectedScore.matchedKeywords,
+          originalProfilePlannerScore: selectedScore.originalProfilePlannerScore,
+          fallbackUsed,
+          unavailable,
+          quality: fallbackUsed ? 'directive-retry' : 'directive-sequence',
+          nextLikelyAction: directiveScores
+            .map((item) => item.scored)
+            .sort((left, right) => right.score - left.score)
+            .find((item) => item.action.actionType !== selectedScore.scored.action.actionType)?.action.actionType
+        });
+      }
+
+      const directiveScores = scored.map((item) => scoreForDirective(directive, step, item));
+      const selected = chooseScored(
+        directiveScores.map((item) => item.scored),
+        seed,
+        input.actionIndex,
+        'directive'
+      );
+      const selectedDirectiveScore = directiveScores.find(
+        (item) => item.scored.action.actionType === selected.action.actionType
+      )!;
+      const sortedDirectiveScores = directiveScores
+        .map((item) => item.scored)
+        .sort((left, right) => right.score - left.score);
+      const isRetry =
+        directive.directiveMode === 'repeat-until-condition' &&
+        (input.directiveProgress?.attempts ?? 0) > 0;
+
+      return buildDirectiveAction({
+        plannerInput: input,
+        selected,
+        directive,
+        step,
+        directiveReason: selectedDirectiveScore.directiveReason,
+        matchedKeywords: selectedDirectiveScore.matchedKeywords,
+        originalProfilePlannerScore: selectedDirectiveScore.originalProfilePlannerScore,
+        fallbackUsed: false,
+        quality: isRetry ? 'directive-retry' : 'user-directed',
+        nextLikelyAction: sortedDirectiveScores.find((item) => item !== selected)?.action.actionType
+      });
+    }
+
     const selected = chooseScored(scored, seed, input.actionIndex, key);
     const quality = actionQuality(selected, key);
     const explanation = buildPlannerExplanation({

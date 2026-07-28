@@ -1,9 +1,9 @@
-import type { DetectedIssue, Severity } from '@core/types';
+import type { BotTestDirective, DetectedIssue, Severity } from '@core/types';
 import type {
   GitHubIssueExportPreviewResult,
   PersistedSessionMetadata
 } from '../../../main/services/simulationService';
-import { CheckCircle2, Copy, Download, ExternalLink, Eye, Filter, Search, Send, XCircle } from 'lucide-react';
+import { CheckCircle2, Copy, Download, ExternalLink, Eye, Filter, RotateCcw, Search, Send, XCircle } from 'lucide-react';
 import { type ChangeEvent, useEffect, useMemo, useState } from 'react';
 import { FieldLabel } from '../components/FormFields';
 import { useConfigStore } from '../store/configStore';
@@ -144,6 +144,7 @@ function EvidenceList({ issue, sessionId }: { issue: DetectedIssue; sessionId: s
 export function IssuesPage() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const activeIssues = useSessionStore((state) => state.issues);
+  const activeBotStatuses = useSessionStore((state) => state.botStatuses);
   const preferredReviewSessionId = useSessionStore((state) => state.reviewSessionId);
   const preferredReviewIssueId = useSessionStore((state) => state.reviewIssueId);
   const setPreferredReviewSessionId = useSessionStore((state) => state.setReviewSessionId);
@@ -176,6 +177,14 @@ export function IssuesPage() {
   const [reviewIssues, setReviewIssues] = useState<DetectedIssue[]>(activeIssues);
   const [reviewLoadMessage, setReviewLoadMessage] = useState('');
   const [reviewLoadState, setReviewLoadState] = useState<'ready' | 'loading' | 'error'>('ready');
+  const [retestBotId, setRetestBotId] = useState('');
+  const [retestState, setRetestState] = useState<'ready' | 'loading' | 'error'>('ready');
+  const [retestMessage, setRetestMessage] = useState('');
+
+  const retestBots = useMemo(
+    () => activeBotStatuses.filter((bot) => ['running', 'waiting', 'blocked'].includes(bot.status)),
+    [activeBotStatuses]
+  );
 
   const severities = unique(reviewIssues.map((issue) => issue.severity));
   const botIds = unique(reviewIssues.map((issue) => issue.botId));
@@ -292,6 +301,12 @@ export function IssuesPage() {
   }, [preferredReviewIssueId]);
 
   useEffect(() => {
+    if (!retestBots.some((bot) => bot.botId === retestBotId)) {
+      setRetestBotId(retestBots[0]?.botId ?? '');
+    }
+  }, [retestBotId, retestBots]);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function loadReviewIssues() {
@@ -397,6 +412,69 @@ export function IssuesPage() {
     await navigator.clipboard.writeText(reproductionSteps(issue));
     setCopyState('Copied');
     window.setTimeout(() => setCopyState('Copy'), 1400);
+  }
+
+  async function askBotToRetest(issue: DetectedIssue) {
+    if (!activeSessionId || !retestBotId) {
+      setRetestState('error');
+      setRetestMessage('Start a session with a running bot before asking for a retest.');
+      return;
+    }
+
+    const lastActions = unique(issue.lastActions ?? []);
+    const evidence = unique([issue.screenshotPath, issue.videoPath, ...(issue.evidencePaths ?? [])]);
+    const directive: BotTestDirective = {
+      directiveId: `${issueId(issue).replace(/[^a-zA-Z0-9_-]+/g, '-')}-retest-${Date.now()}`,
+      sessionId: activeSessionId,
+      name: `Retest: ${issue.title}`,
+      description: `Try to reproduce ${issue.title} in ${issueScene(issue)}. Follow the captured actions and watch for the same state or behavior.`,
+      directiveType: 'issue-reproduction',
+      directiveMode: 'focus',
+      priority: issue.severity === 'critical' ? 'urgent' : 'high',
+      status: 'queued',
+      target: {
+        allBots: false,
+        botIds: [retestBotId],
+        profileIds: [],
+        gameInstanceIds: []
+      },
+      actionKeywords: lastActions,
+      avoidedActionKeywords: [],
+      targetArea: issue.area ?? issue.scene,
+      targetIssueId: issueId(issue),
+      successConditions: [`The behavior from issue ${issueId(issue)} happens again.`],
+      failureConditions: ['The attempt limit is reached without reproducing the issue.'],
+      steps: [],
+      maxActions: 30,
+      maxAttempts: 3,
+      timeoutMs: 120_000,
+      repeatUntilSuccess: true,
+      createdAt: new Date().toISOString(),
+      createdBy: 'user',
+      notes: [
+        `Category: ${issue.category}`,
+        `Scene/area: ${issueScene(issue)}`,
+        `State summary: ${issue.stateSummary ?? 'Not captured'}`,
+        `Reproduction steps: ${reproductionSteps(issue)}`,
+        `Related evidence: ${evidence.join(', ') || 'None'}`
+      ].join('\n')
+    };
+
+    setRetestState('loading');
+    setRetestMessage('Queueing issue reproduction test...');
+    try {
+      const result = await window.gameplaySimulator.simulation.guideBot({
+        sessionId: activeSessionId,
+        botId: retestBotId,
+        behavior: 'queue',
+        directive
+      });
+      setRetestState('ready');
+      setRetestMessage(result.message);
+    } catch (error) {
+      setRetestState('error');
+      setRetestMessage(error instanceof Error ? error.message : 'The retest direction could not be created.');
+    }
   }
 
   function githubExportPayload() {
@@ -912,6 +990,51 @@ export function IssuesPage() {
               <section className="detail-section">
                 <h2>Evidence</h2>
                 <EvidenceList issue={selectedIssue} sessionId={reviewSessionId || activeSessionId} />
+              </section>
+
+              <section className="detail-section issue-retest-panel">
+                <h2><FieldLabel label="Ask Bot To Retest" /></h2>
+                <p className="section-copy">
+                  Queue a focused reproduction test using this issue's area, recent actions, state summary, and evidence.
+                </p>
+                <div className="field-grid">
+                  <label className="field">
+                    <FieldLabel
+                      label="Retest Bot"
+                      htmlFor="issue-retest-bot"
+                      helpText="This is the running bot that will try the issue again. The simulator gives it the issue area, recent actions, and evidence. Choose a bot that can use the same game features. If no bot is running, start a session first. For beginners, choose the first running bot."
+                    />
+                    <select
+                      id="issue-retest-bot"
+                      value={retestBotId}
+                      onChange={(event) => setRetestBotId(event.target.value)}
+                      disabled={retestBots.length === 0 || retestState === 'loading'}
+                    >
+                      {retestBots.length === 0 ? <option value="">No running bots</option> : null}
+                      {retestBots.map((bot) => (
+                        <option value={bot.botId} key={bot.botId}>
+                          {bot.botId} ({bot.profileId})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="form-actions">
+                  <button
+                    className="primary-button"
+                    type="button"
+                    disabled={!activeSessionId || !retestBotId || retestState === 'loading'}
+                    onClick={() => void askBotToRetest(selectedIssue)}
+                  >
+                    <RotateCcw size={16} aria-hidden="true" />
+                    <span>{retestState === 'loading' ? 'Queueing Retest...' : 'Ask Bot To Retest'}</span>
+                  </button>
+                </div>
+                {retestMessage ? (
+                  <p className={retestState === 'error' ? 'form-error' : 'inline-notice'} role="status">
+                    {retestMessage}
+                  </p>
+                ) : null}
               </section>
 
               <section className="detail-section">

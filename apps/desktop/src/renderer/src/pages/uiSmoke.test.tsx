@@ -241,6 +241,8 @@ describe('renderer workflow smoke tests', () => {
     expect(html).toContain('Follow This Bot');
     expect(html).toContain('Show Next Bot');
     expect(html).toContain('Show Previous Bot');
+    expect(html).toContain('Guide This Bot');
+    expect(html).toContain('Active Test Direction');
   });
 
   it('renders the issue viewer with GitHub export preview controls', () => {

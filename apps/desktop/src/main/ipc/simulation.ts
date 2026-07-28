@@ -41,6 +41,25 @@ export function registerSimulationIpc(service: SimulationService): void {
   ipcMain.handle('simulation:getBotStatuses', (_event, sessionId: unknown) =>
     service.getBotStatuses(SessionIdSchema.parse(sessionId))
   );
+  ipcMain.handle('simulation:getDirectiveState', (_event, sessionId: unknown) =>
+    service.getDirectiveState(SessionIdSchema.parse(sessionId))
+  );
+  ipcMain.handle('simulation:getBotAvailableActions', (_event, sessionId: unknown, botId: unknown) =>
+    service.getBotAvailableActions(SessionIdSchema.parse(sessionId), SessionIdSchema.parse(botId))
+  );
+  ipcMain.handle('simulation:guideBot', (_event, payload: unknown) => service.guideBot(payload));
+  ipcMain.handle(
+    'simulation:cancelBotDirective',
+    (_event, sessionId: unknown, botId: unknown, directiveId: unknown) =>
+      service.cancelBotDirective(
+        SessionIdSchema.parse(sessionId),
+        SessionIdSchema.parse(botId),
+        SessionIdSchema.parse(directiveId)
+      )
+  );
+  ipcMain.handle('simulation:reorderBotDirectives', (_event, payload: unknown) =>
+    service.reorderBotDirectives(payload)
+  );
   ipcMain.handle('simulation:getLiveObservationState', (_event, sessionId: unknown) =>
     service.getLiveObservationState(SessionIdSchema.parse(sessionId))
   );

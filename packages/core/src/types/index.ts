@@ -1,5 +1,6 @@
 export * from './adapter';
 export * from './bot';
+export * from './botTestDirective';
 export * from './gameProfile';
 export * from './issue';
 export * from './runtime';

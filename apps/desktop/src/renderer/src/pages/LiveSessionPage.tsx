@@ -1,3 +1,5 @@
+import type { AvailableGameActionLike } from '@core/bot/ActionPlanner';
+import type { BotDirectiveManagerSnapshot } from '@core/bot/BotDirectiveManager';
 import type { BotPoolConfig } from '@core/types';
 import {
   BookOpen,
@@ -14,8 +16,9 @@ import {
   UserX,
   UsersRound
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { FieldLabel, SelectInput } from '../components/FormFields';
+import { LiveBotGuidancePanel } from '../components/LiveBotGuidancePanel';
 import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
 
@@ -64,10 +67,15 @@ export function LiveSessionPage() {
   const logs = useSessionStore((state) => state.logs);
   const coverage = useSessionStore((state) => state.coverage);
   const liveObservation = useSessionStore((state) => state.liveObservation);
+  const selectedIssueId = useSessionStore((state) => state.reviewIssueId);
   const applySessionSnapshot = useSessionStore((state) => state.applySessionSnapshot);
   const applyRuntimeDetails = useSessionStore((state) => state.applyRuntimeDetails);
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
   const [selectedPoolId, setSelectedPoolId] = useState<string | null>(null);
+  const [directiveState, setDirectiveState] = useState<BotDirectiveManagerSnapshot | null>(null);
+  const [availableActions, setAvailableActions] = useState<AvailableGameActionLike[]>([]);
+  const [directionChangeMessage, setDirectionChangeMessage] = useState<string | null>(null);
+  const previousActiveDirectiveId = useRef<string | undefined | null>(null);
 
   const activeConfig =
     runConfigs.find((config) => config.sessionId === activeSessionId) ??
@@ -115,6 +123,30 @@ export function LiveSessionPage() {
     selectedBotProfile?.goals.find((goal) => goal.goalId === actionBot?.currentGoalId)?.name ??
     selectedBotProfile?.goals[0]?.name ??
     'No active goal';
+  const selectedDirectiveProgress = directiveState?.progress.filter(
+    (progress) => progress.botId === selectedBot?.botId
+  ) ?? [];
+  const activeDirectiveProgress = selectedDirectiveProgress.find(
+    (progress) => progress.status === 'active'
+  );
+  const activeDirective = directiveState?.directives.find(
+    (directive) => directive.directiveId === activeDirectiveProgress?.directiveId
+  );
+  const queuedDirectives = selectedDirectiveProgress
+    .filter((progress) => progress.status === 'queued')
+    .map((progress) => ({
+      progress,
+      directive: directiveState?.directives.find(
+        (directive) => directive.directiveId === progress.directiveId
+      )
+    }))
+    .filter(
+      (item): item is {
+        progress: (typeof selectedDirectiveProgress)[number];
+        directive: NonNullable<typeof item.directive>;
+      } => Boolean(item.directive)
+    );
+  const selectedIssue = issues.find((issue) => issue.issueId === selectedIssueId);
   const selectedPool = selectedPoolId ?? selectedBot?.profileId ?? botPools[0]?.profileId ?? null;
   const canStart = activeSessionId !== null && !['starting', 'running', 'paused'].includes(status);
   const canPause = activeSessionId !== null && status === 'running';
@@ -131,6 +163,66 @@ export function LiveSessionPage() {
       setSelectedBotId(activeBots[0]?.botId ?? botStatuses[0]?.botId ?? null);
     }
   }, [activeBots, botStatuses, liveObservation?.watchedBotId, selectedBotId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!activeSessionId || !selectedBot) {
+      setDirectiveState(null);
+      setAvailableActions([]);
+      return;
+    }
+    const sessionId = activeSessionId;
+    const botId = selectedBot.botId;
+
+    async function refreshGuidance() {
+      try {
+        const [nextDirectiveState, nextAvailableActions] = await Promise.all([
+          window.gameplaySimulator.simulation.getDirectiveState(sessionId),
+          window.gameplaySimulator.simulation.getBotAvailableActions(sessionId, botId)
+        ]);
+        if (!cancelled) {
+          setDirectiveState(nextDirectiveState);
+          setAvailableActions(nextAvailableActions);
+        }
+      } catch {
+        if (!cancelled) {
+          setAvailableActions([]);
+        }
+      }
+    }
+
+    void refreshGuidance();
+    const intervalId = window.setInterval(refreshGuidance, 1_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeSessionId, selectedBot?.botId]);
+
+  useEffect(() => {
+    if (!directionChangeMessage) {
+      return;
+    }
+    const timeoutId = window.setTimeout(() => setDirectionChangeMessage(null), 4_500);
+    return () => window.clearTimeout(timeoutId);
+  }, [directionChangeMessage]);
+
+  useEffect(() => {
+    const activeDirectiveId = activeDirective?.directiveId;
+    if (previousActiveDirectiveId.current === null) {
+      previousActiveDirectiveId.current = activeDirectiveId;
+      return;
+    }
+    if (previousActiveDirectiveId.current !== activeDirectiveId) {
+      setDirectionChangeMessage(
+        activeDirective
+          ? `${selectedBot?.botId ?? 'The bot'} is now following ${activeDirective.name}.`
+          : `${selectedBot?.botId ?? 'The bot'} returned to normal profile behavior.`
+      );
+      previousActiveDirectiveId.current = activeDirectiveId;
+    }
+  }, [activeDirective, selectedBot?.botId]);
 
   async function refreshSession(sessionId: string) {
     const [snapshot, nextBots, nextInstances, nextIssues, nextLogs, nextCoverage, nextObservation] = await Promise.all([
@@ -401,6 +493,13 @@ export function LiveSessionPage() {
             />
             <strong>{liveObservation?.currentAction ?? 'Waiting for first action'}</strong>
           </div>
+          <div className="observation-field">
+            <FieldLabel
+              label="Active Test Direction"
+              helpText="This is the user direction currently guiding the watched bot. It changes planning without restarting the bot and never invents actions the adapter does not support. It adds almost no CPU or RAM use and opens no extra window. If it says Normal profile behavior, no user direction is active."
+            />
+            <strong>{activeDirective?.name ?? 'Normal profile behavior'}</strong>
+          </div>
           <div className="observation-field observation-field--wide">
             <FieldLabel
               label="Action Reason"
@@ -493,7 +592,28 @@ export function LiveSessionPage() {
           />
           <span>{liveObservation?.message ?? 'Waiting for a running bot to observe.'}</span>
         </div>
+        {directionChangeMessage ? (
+          <div className="direction-change-label" role="status">
+            Direction changed: {directionChangeMessage}
+          </div>
+        ) : null}
       </section>
+
+      <LiveBotGuidancePanel
+        sessionId={activeSessionId}
+        selectedBot={selectedBot}
+        currentGoal={selectedBotGoal}
+        currentDirective={activeDirective}
+        currentProgress={activeDirectiveProgress}
+        queuedDirectives={queuedDirectives}
+        availableActions={availableActions}
+        currentArea={selectedBot?.currentArea}
+        selectedIssue={selectedIssue ? { issueId: selectedIssue.issueId, title: selectedIssue.title } : undefined}
+        onMutation={(result) => {
+          setDirectiveState(result.snapshot);
+          setDirectionChangeMessage(result.message);
+        }}
+      />
 
       <section className="viability-panel" aria-label="Live controls">
         <div className="viability-panel__header">

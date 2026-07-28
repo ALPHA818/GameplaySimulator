@@ -1,11 +1,13 @@
 import type {
   ActionResult,
+  BotDirectiveProgress,
   BotProfile,
   BotStatus,
   DetectedIssue,
   GameAction,
   GameStateSnapshot,
   RuntimeBotSnapshot,
+  BotTestDirective,
   UIFlow
 } from '../types';
 import type { LogEntry, LogLevel } from '../logging/LogEntry';
@@ -61,6 +63,8 @@ export interface BotOptions {
   seed?: number;
   getCoverageData?: () => CoverageData;
   getRecentIssues?: () => DetectedIssue[];
+  getActiveDirective?: () => BotTestDirective | undefined;
+  getDirectiveProgress?: (directiveId: string) => BotDirectiveProgress | undefined;
   uiFlows?: UIFlow[];
   getInstanceHeartbeat?: (instanceId: string) => string | undefined;
   getProcessResponsive?: (instanceId: string) => boolean | undefined;
@@ -72,6 +76,13 @@ export interface BotOptions {
   now?: () => string;
   sleep?: (ms: number) => Promise<void>;
   onStatusChange?: (status: RuntimeBotSnapshot, memory: BotMemory) => void | Promise<void>;
+  onDirectiveActionSelected?: (action: GameAction) => void | Promise<void>;
+  onDirectiveActionResult?: (action: GameAction, result: ActionResult) => void | Promise<void>;
+  onDirectiveStateObserved?: (
+    directive: BotTestDirective,
+    previousState: GameStateSnapshot | null,
+    currentState: GameStateSnapshot | null
+  ) => void | Promise<void>;
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -132,6 +143,8 @@ export class Bot {
   private readonly seed?: number;
   private readonly getCoverageData?: () => CoverageData;
   private readonly getRecentIssues?: () => DetectedIssue[];
+  private readonly getActiveDirective?: () => BotTestDirective | undefined;
+  private readonly getDirectiveProgress?: (directiveId: string) => BotDirectiveProgress | undefined;
   private readonly uiFlows?: UIFlow[];
   private readonly getInstanceHeartbeat?: (instanceId: string) => string | undefined;
   private readonly getProcessResponsive?: (instanceId: string) => boolean | undefined;
@@ -140,6 +153,9 @@ export class Bot {
   private readonly now: () => string;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly onStatusChange?: BotOptions['onStatusChange'];
+  private readonly onDirectiveActionSelected?: BotOptions['onDirectiveActionSelected'];
+  private readonly onDirectiveActionResult?: BotOptions['onDirectiveActionResult'];
+  private readonly onDirectiveStateObserved?: BotOptions['onDirectiveStateObserved'];
   private stopRequested = false;
   private pauseRequested = false;
   private runPromise: Promise<void> | null = null;
@@ -158,6 +174,8 @@ export class Bot {
     this.seed = options.seed;
     this.getCoverageData = options.getCoverageData;
     this.getRecentIssues = options.getRecentIssues;
+    this.getActiveDirective = options.getActiveDirective;
+    this.getDirectiveProgress = options.getDirectiveProgress;
     this.uiFlows = options.uiFlows;
     this.getInstanceHeartbeat = options.getInstanceHeartbeat;
     this.getProcessResponsive = options.getProcessResponsive;
@@ -176,6 +194,9 @@ export class Bot {
       });
     this.sleep = options.sleep ?? defaultSleep;
     this.onStatusChange = options.onStatusChange;
+    this.onDirectiveActionSelected = options.onDirectiveActionSelected;
+    this.onDirectiveActionResult = options.onDirectiveActionResult;
+    this.onDirectiveStateObserved = options.onDirectiveStateObserved;
   }
 
   start(): Promise<void> {
@@ -251,6 +272,14 @@ export class Bot {
         }
 
         const state = await this.readAndRecordState();
+        const stateDirective = this.getActiveDirective?.();
+        if (stateDirective) {
+          await this.onDirectiveStateObserved?.(
+            stateDirective,
+            this.memory.previousState,
+            state
+          );
+        }
 
         if (this.shouldRunConfiguredUiJourney() && this.uiFlows?.[0]?.endState) {
           const currentScreen = currentUIScreen(state);
@@ -282,6 +311,7 @@ export class Bot {
           continue;
         }
 
+        const activeDirective = this.getActiveDirective?.();
         const action = this.planner.chooseAction({
           sessionId: this.sessionId,
           gameInstanceId: this.assignedInstanceId,
@@ -295,7 +325,11 @@ export class Bot {
           memory: this.memory,
           coverageData: this.getCoverageData?.(),
           recentIssues: this.getRecentIssues?.(),
-          uiFlows: this.uiFlows
+          uiFlows: this.uiFlows,
+          activeDirective,
+          directiveProgress: activeDirective
+            ? this.getDirectiveProgress?.(activeDirective.directiveId)
+            : undefined
         });
 
         if (!action) {
@@ -305,6 +339,9 @@ export class Bot {
         }
 
         this.memory.lastAction = action;
+        if (action.payload.planner === 'user-directive') {
+          await this.onDirectiveActionSelected?.(action);
+        }
         this.progressTracker.recordAction(action, action.requestedAt);
         this.updateProgressSummary();
         const actionInsight = actionInsightFromAction(action);
@@ -314,6 +351,9 @@ export class Bot {
         );
 
         const result = await this.adapter.performAction(this.assignedInstanceId, this.botId, action);
+        if (action.payload.planner === 'user-directive') {
+          await this.onDirectiveActionResult?.(action, result);
+        }
         this.memory.lastResult = result;
         this.memory.actionCount += 1;
         this.memory.recentActionTypes = [action.type, ...this.memory.recentActionTypes].slice(0, 12);

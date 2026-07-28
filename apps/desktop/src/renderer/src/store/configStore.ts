@@ -16,16 +16,27 @@ import type { PageId } from '../routes';
 interface ConfigState {
   currentPage: PageId;
   editingGameId: string | null;
+  editingBotProfileId: string | null;
+  cloningBotProfileId: string | null;
   gameProfiles: GameProfile[];
   botProfiles: BotProfile[];
   runConfigs: SimulationRunConfig[];
   lastValidatedRunConfig: SimulationRunConfig | null;
   advancedIntelligence: AdvancedIntelligenceConfig;
   runtimeObservation: RuntimeObservationConfig;
+  pendingSessionBotProfileId: string | null;
+  pendingSessionBotProfileIds: string[];
   navigate: (page: PageId) => void;
   openGameProfileEditor: (gameId?: string) => void;
+  openBotProfileEditor: (profileId?: string) => void;
+  cloneBotProfile: (profileId: string) => void;
   saveGameProfile: (profile: GameProfile) => void;
+  saveBotProfile: (profile: BotProfile) => void;
   saveRunConfig: (config: SimulationRunConfig) => void;
+  addBotProfileToSession: (profileId: string) => void;
+  addBotProfilesToSession: (profileIds: string[]) => void;
+  clearPendingSessionBotProfile: () => void;
+  clearPendingSessionBotProfiles: () => void;
   updateAdvancedIntelligence: (patch: Partial<AdvancedIntelligenceConfig>) => void;
   updateRuntimeObservation: (patch: Partial<RuntimeObservationConfig>) => void;
 }
@@ -202,25 +213,39 @@ export function createBotPoolFromProfile(profile: BotProfile, index: number, ena
 }
 
 export function createDefaultBotPools(botProfiles: BotProfile[]): BotPoolConfig[] {
-  const defaultProfileIds = new Set(['main-story-bot', 'explorer-bot', 'combat-tester-bot']);
-
   return botProfiles
-    .filter((profile) => defaultProfileIds.has(profile.profileId))
+    .filter((profile) => profile.defaultEnabled)
     .map((profile, index) => createBotPoolFromProfile(profile, index, true));
 }
 
 export const useConfigStore = create<ConfigState>((set) => ({
   currentPage: 'dashboard',
   editingGameId: null,
+  editingBotProfileId: null,
+  cloningBotProfileId: null,
   gameProfiles: seededGameProfiles,
   botProfiles: seededBotProfiles,
   runConfigs: [],
   lastValidatedRunConfig: null,
   advancedIntelligence: defaultAdvancedIntelligenceConfig,
   runtimeObservation: loadRuntimeObservationPreference(),
+  pendingSessionBotProfileId: null,
+  pendingSessionBotProfileIds: [],
   navigate: (currentPage) => set({ currentPage }),
   openGameProfileEditor: (gameId) =>
     set({ currentPage: 'gameProfileEditor', editingGameId: gameId ?? null }),
+  openBotProfileEditor: (profileId) =>
+    set({
+      currentPage: 'botProfileEditor',
+      editingBotProfileId: profileId ?? null,
+      cloningBotProfileId: null
+    }),
+  cloneBotProfile: (profileId) =>
+    set({
+      currentPage: 'botProfileEditor',
+      editingBotProfileId: null,
+      cloningBotProfileId: profileId
+    }),
   saveGameProfile: (profile) =>
     set((state) => {
       const existingIndex = state.gameProfiles.findIndex((item) => item.gameId === profile.gameId);
@@ -235,11 +260,41 @@ export const useConfigStore = create<ConfigState>((set) => ({
         editingGameId: null
       };
     }),
+  saveBotProfile: (profile) =>
+    set((state) => {
+      const existingIndex = state.botProfiles.findIndex(
+        (item) => item.profileId === state.editingBotProfileId
+      );
+      const botProfiles = existingIndex === -1
+        ? [...state.botProfiles, profile]
+        : state.botProfiles.map((item, index) => index === existingIndex ? profile : item);
+
+      return {
+        botProfiles,
+        currentPage: 'botProfiles',
+        editingBotProfileId: null,
+        cloningBotProfileId: null
+      };
+    }),
   saveRunConfig: (config) =>
     set((state) => ({
       runConfigs: [config, ...state.runConfigs],
       lastValidatedRunConfig: config
     })),
+  addBotProfileToSession: (profileId) =>
+    set({
+      currentPage: 'newSession',
+      pendingSessionBotProfileId: profileId,
+      pendingSessionBotProfileIds: []
+    }),
+  addBotProfilesToSession: (profileIds) =>
+    set({
+      currentPage: 'newSession',
+      pendingSessionBotProfileId: null,
+      pendingSessionBotProfileIds: [...new Set(profileIds)]
+    }),
+  clearPendingSessionBotProfile: () => set({ pendingSessionBotProfileId: null }),
+  clearPendingSessionBotProfiles: () => set({ pendingSessionBotProfileIds: [] }),
   updateAdvancedIntelligence: (patch) =>
     set((state) => ({
       advancedIntelligence: AdvancedIntelligenceConfigSchema.parse({

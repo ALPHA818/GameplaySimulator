@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { AppShell } from './components/AppShell';
 import { BotProfilesPage } from './pages/BotProfilesPage';
+import { BotProfileEditorPage } from './pages/BotProfileEditorPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { GameProfileEditorPage } from './pages/GameProfileEditorPage';
 import { GameProfilesPage } from './pages/GameProfilesPage';
@@ -76,6 +77,7 @@ export function App() {
       {currentPage === 'gameProfiles' ? <GameProfilesPage /> : null}
       {currentPage === 'gameProfileEditor' ? <GameProfileEditorPage /> : null}
       {currentPage === 'botProfiles' ? <BotProfilesPage /> : null}
+      {currentPage === 'botProfileEditor' ? <BotProfileEditorPage /> : null}
       {currentPage === 'newSession' ? <NewSessionPage /> : null}
       {currentPage === 'liveSession' ? <LiveSessionPage /> : null}
       {currentPage === 'issues' ? <IssuesPage /> : null}

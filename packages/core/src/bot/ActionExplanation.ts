@@ -10,6 +10,12 @@ export interface ActionInsight {
   quality: ActionQuality;
   explanation: string;
   nextLikelyAction?: string;
+  directiveId?: string;
+  directiveName?: string;
+  directiveReason?: string;
+  directiveStepId?: string;
+  matchedKeywords?: string[];
+  fallbackUsed?: boolean;
 }
 
 export interface PlannerExplanationInput {
@@ -36,7 +42,10 @@ function actionQualityValue(value: unknown): ActionQuality | undefined {
     'repeated',
     'risky',
     'random',
-    'startup-flow'
+    'startup-flow',
+    'user-directed',
+    'directive-sequence',
+    'directive-retry'
   ].includes(String(value))
     ? value as ActionQuality
     : undefined;
@@ -44,6 +53,15 @@ function actionQualityValue(value: unknown): ActionQuality | undefined {
 
 function profileName(profile: BotProfile): string {
   return profile.displayName.trim() || profile.profileId;
+}
+
+function stringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const values = value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  return values.length > 0 ? values : undefined;
 }
 
 function readableProfileKey(profileKey: string): string {
@@ -64,7 +82,33 @@ function readableProfileKey(profileKey: string): string {
     sequence: 'sequence breaker',
     performance: 'performance stress',
     save: 'save/load',
-    boundary: 'boundary testing'
+    boundary: 'boundary testing',
+    crafting: 'crafting and recipe',
+    building: 'building and destruction',
+    physics: 'physics interaction',
+    camera: 'camera and view',
+    loot: 'loot and random drop',
+    death: 'death and respawn',
+    npc: 'NPC behaviour',
+    boss: 'boss encounter',
+    procedural: 'procedural generation',
+    environment: 'environment cycle',
+    'keyboard-input': 'keyboard and input mapping',
+    controller: 'controller and gamepad',
+    touch: 'touch and mobile controls',
+    display: 'display and resolution',
+    localization: 'localization and text overflow',
+    audio: 'audio and subtitle',
+    accessibility: 'automated accessibility indication',
+    settings: 'settings and configuration',
+    transition: 'loading and transition',
+    'network-resilience': 'controlled network resilience',
+    multiplayer: 'private multiplayer session',
+    endurance: 'memory leak and endurance',
+    'save-migration': 'save migration',
+    'world-persistence': 'world persistence',
+    achievement: 'achievement and unlock',
+    'file-permission': 'approved file and permission'
   };
 
   return names[profileKey] ?? profileKey.replace(/-/g, ' ');
@@ -110,6 +154,8 @@ export function actionInsightFromAction(action: GameAction | null | undefined): 
   const recovery = payload.recovery === true;
   const planner = stringValue(payload.planner) ?? (recovery ? 'recovery' : 'unknown');
   const plannerReason = stringValue(payload.reason) ?? stringValue(payload.stuckReason);
+  const directiveName = stringValue(payload.directiveName);
+  const directiveReason = stringValue(payload.directiveReason);
   const quality = actionQualityValue(payload.quality) ?? (recovery ? 'recovery' : planner === 'ui-journey' ? 'startup-flow' : 'planned');
   const explanation =
     stringValue(payload.explanation) ??
@@ -117,6 +163,8 @@ export function actionInsightFromAction(action: GameAction | null | undefined): 
       ? `The bot chose ${action.type} as a recovery action because it was stuck: ${plannerReason ?? 'progress had stopped'}.`
       : planner === 'ui-journey'
         ? `UI Journey Bot chose ${action.type} because it was the next configured startup-flow step.`
+        : planner === 'user-directive'
+          ? `The bot selected ${action.type} because the user directive ${directiveName ?? 'requested test'} matched this action.`
         : `The bot chose ${action.type} because it was the strongest available action for its profile.`);
 
   return {
@@ -128,7 +176,13 @@ export function actionInsightFromAction(action: GameAction | null | undefined): 
     seed: numberValue(payload.seed),
     quality,
     explanation,
-    nextLikelyAction: stringValue(payload.nextLikelyAction)
+    nextLikelyAction: stringValue(payload.nextLikelyAction),
+    directiveId: stringValue(payload.directiveId),
+    directiveName,
+    directiveReason,
+    directiveStepId: stringValue(payload.directiveStepId),
+    matchedKeywords: stringList(payload.matchedKeywords),
+    fallbackUsed: payload.fallbackUsed === true
   };
 }
 
@@ -141,7 +195,13 @@ export function plannerMetadataForLog(action: GameAction): Record<string, unknow
     randomValue: insight?.randomValue,
     reason: insight?.plannerReason,
     profileKey: insight?.profileKey,
-    seed: insight?.seed
+    seed: insight?.seed,
+    directiveId: insight?.directiveId,
+    directiveName: insight?.directiveName,
+    directiveReason: insight?.directiveReason,
+    directiveStepId: insight?.directiveStepId,
+    matchedKeywords: insight?.matchedKeywords,
+    fallbackUsed: insight?.fallbackUsed
   };
 }
 

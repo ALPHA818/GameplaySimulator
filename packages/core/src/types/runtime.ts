@@ -81,7 +81,10 @@ export const ActionQualitySchema = z.enum([
   'repeated',
   'risky',
   'random',
-  'startup-flow'
+  'startup-flow',
+  'user-directed',
+  'directive-sequence',
+  'directive-retry'
 ]);
 
 export const SaveIsolationRuntimeInfoSchema = z.object({

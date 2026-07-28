@@ -5,6 +5,9 @@ import { describe, expect, it } from 'vitest';
 import { LogsPage } from './LogsPage';
 import { SettingsPage } from './SettingsPage';
 import { LiveSessionPage } from './LiveSessionPage';
+import { BotProfilesPage } from './BotProfilesPage';
+import { BotProfileEditorPage } from './BotProfileEditorPage';
+import { NewSessionPage } from './NewSessionPage';
 
 const globalCss = readFileSync(
   resolve(process.cwd(), 'apps/desktop/src/renderer/src/styles/global.css'),
@@ -115,6 +118,98 @@ describe('Settings responsive content layout', () => {
   });
 });
 
+describe('Bot Profiles responsive recommendation layout', () => {
+  it('keeps recommendation details and the batch action inside the content width', () => {
+    const html = renderToStaticMarkup(<BotProfilesPage />);
+    const summaryStyles = cssBlock('.bot-recommendation-summary');
+    const buttonStyles = cssBlock('.bot-recommendation-summary .primary-button');
+    const narrowProfiles = responsiveBlock('@container (max-width: 560px)');
+
+    expect(html).toContain('Recommended Specialist Bots');
+    expect(html).toContain('Add Recommended Bots To Session');
+    expect(html).toContain('Compatible With Selected Game');
+    expect(html).toContain('Missing Requirements');
+    expect(summaryStyles).toContain('display: flex');
+    expect(summaryStyles).toContain('flex-wrap: wrap');
+    expect(summaryStyles).toContain('max-width: 100%');
+    expect(buttonStyles).toContain('max-width: 100%');
+    expect(buttonStyles).toContain('white-space: normal');
+    expect(narrowProfiles).toContain('.bot-recommendation-summary');
+    expect(narrowProfiles).toContain('flex-direction: column');
+    expect(narrowProfiles).toContain('width: 100%');
+  });
+
+  it('keeps specialized cards and category filtering usable at narrow widths', () => {
+    const html = renderToStaticMarkup(<BotProfilesPage />);
+    const cardStyles = cssBlock('.bot-profile-card');
+    const filterStyles = cssBlock('.bot-profile-filter select');
+    const narrowProfiles = responsiveBlock('@container (max-width: 560px)');
+
+    expect(html).toContain('id="specialized-bot-category"');
+    expect(html).toContain('All Specialized Bots');
+    expect(html).toContain('Gameplay Systems');
+    expect(html).toContain('UI And Input');
+    expect(cardStyles).toContain('min-width: 0');
+    expect(cardStyles).toContain('max-width: 100%');
+    expect(cardStyles).toContain('overflow: clip');
+    expect(filterStyles).toContain('width: 100%');
+    expect(filterStyles).toContain('min-width: 0');
+    expect(narrowProfiles).toContain('.bot-profile-card__summary');
+    expect(narrowProfiles).toContain('flex-direction: column');
+  });
+});
+
+describe('Bot Profile Editor responsive layout', () => {
+  it('uses container-fitting fields, traits, clone controls, and actions', () => {
+    const html = renderToStaticMarkup(<BotProfileEditorPage />);
+    const editorStyles = cssBlock('.bot-profile-editor-page');
+    const fieldGridStyles = cssBlock('.profile-editor-grid,\n.profile-trait-grid');
+    const cloneStyles = cssBlock('.profile-clone-row');
+    const narrowEditor = responsiveBlock('@container (max-width: 560px)');
+
+    expect(html).toContain('bot-profile-editor-page');
+    expect(html).toContain('New Bot Profile');
+    expect(html).toContain('Clone Existing Profile');
+    expect(html).toContain('Help for Profile Name');
+    expect(editorStyles).toContain('container-type: inline-size');
+    expect(editorStyles).toContain('min-width: 0');
+    expect(editorStyles).toContain('max-width: 100%');
+    expect(fieldGridStyles).toContain(
+      'repeat(auto-fit, minmax(min(100%, 230px), 1fr))'
+    );
+    expect(cloneStyles).toContain('grid-template-columns: minmax(0, 1fr) auto');
+    expect(narrowEditor).toContain('.profile-editor-grid');
+    expect(narrowEditor).toContain('.profile-clone-row');
+    expect(narrowEditor).toContain('grid-template-columns: minmax(0, 1fr)');
+    expect(narrowEditor).toContain('.profile-editor-actions button');
+    expect(narrowEditor).toContain('width: 100%');
+  });
+});
+
+describe('Focused Test responsive layout', () => {
+  it('keeps the specialist bundle and directive actions inside New Session content width', () => {
+    const html = renderToStaticMarkup(<NewSessionPage />);
+    const focusedGridStyles = cssBlock('.focused-template-grid');
+    const focusedHeaderStyles = cssBlock('.focused-test-section .section-header-row');
+    const narrowNewSession = responsiveBlock('@container (max-width: 520px)');
+
+    expect(html).toContain('Focused Test Template');
+    expect(html).toContain('Apply Focused Test');
+    expect(html).toContain('Required Capabilities');
+    expect(focusedGridStyles).toContain(
+      'repeat(auto-fit, minmax(min(100%, 230px), 1fr))'
+    );
+    expect(focusedHeaderStyles).toContain('flex-wrap: wrap');
+    expect(focusedHeaderStyles).toContain('max-width: 100%');
+    expect(narrowNewSession).toContain('.focused-test-section .section-header-row');
+    expect(narrowNewSession).toContain('.focused-template-grid');
+    expect(narrowNewSession).toContain('grid-template-columns: minmax(0, 1fr)');
+    expect(cssBlock('.directive-editor-actions,\n.planned-directive-actions')).toContain(
+      'flex-wrap: wrap'
+    );
+  });
+});
+
 describe('Logs responsive content layout', () => {
   it('keeps every filter, including the rightmost Instance filter, in the filter surface', () => {
     const html = renderToStaticMarkup(<LogsPage />);
@@ -213,6 +308,7 @@ describe('Live Session observation layout', () => {
     expect(html).toContain('Stop Following');
     expect(html).toContain('Show Previous Bot');
     expect(html).toContain('Show Next Bot');
+    expect(html).toContain('Guide This Bot');
     expect(cssBlock('.live-session-page')).toContain('container-type: inline-size');
     expect(cssBlock('.observation-detail-grid')).toContain(
       'repeat(auto-fit, minmax(min(100%, 220px), 1fr))'
@@ -220,5 +316,30 @@ describe('Live Session observation layout', () => {
     expect(cssBlock('.observation-controls')).toContain('flex-wrap: wrap');
     expect(narrowLiveSession).toContain('.observation-controls');
     expect(narrowLiveSession).toContain('grid-template-columns: minmax(0, 1fr)');
+    expect(cssBlock('.guidance-field-grid')).toContain(
+      'repeat(auto-fit, minmax(min(100%, 220px), 1fr))'
+    );
+    expect(
+      cssBlock('.guidance-quick-actions,\n.guidance-actions,\n.directive-queue-actions')
+    ).toContain('flex-wrap: wrap');
+    expect(narrowLiveSession).toContain('.guidance-field-grid');
+  });
+
+  it('keeps the live directive form and queue controls responsive', () => {
+    const narrowLiveSession = responsiveBlock('@container live-session (max-width: 620px)');
+    const queueRowStyles = cssBlock('.directive-queue-row');
+    const queueActionStyles = cssBlock('.guidance-quick-actions,\n.guidance-actions,\n.directive-queue-actions');
+
+    expect(cssBlock('.guidance-field-grid')).toContain(
+      'repeat(auto-fit, minmax(min(100%, 220px), 1fr))'
+    );
+    expect(queueRowStyles).toContain('flex-wrap: wrap');
+    expect(queueRowStyles).toContain('max-width: 100%');
+    expect(queueActionStyles).toContain('flex-wrap: wrap');
+    expect(narrowLiveSession).toContain('.guidance-field-grid');
+    expect(narrowLiveSession).toContain('.directive-queue-row');
+    expect(narrowLiveSession).toContain('flex-direction: column');
+    expect(narrowLiveSession).toContain('.directive-queue-actions');
+    expect(narrowLiveSession).toContain('width: 100%');
   });
 });

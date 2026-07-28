@@ -11,7 +11,10 @@ import {
 import { dirname, join } from 'node:path';
 import type {
   ActionResult,
+  BotDirectiveProgress,
+  BotDirectiveEvent,
   BotProfile,
+  BotTestDirective,
   DetectedIssue,
   GameAction,
   GameInstanceStatus,
@@ -24,6 +27,8 @@ import type {
   SimulationRunConfig
 } from '../types';
 import { actionInsightFromAction, plannerMetadataForLog } from '../bot/ActionExplanation';
+import { evaluateBotProfileCompatibility } from '../bot/BotProfileCompatibility';
+import { defaultBotProfiles, TECHNICAL_BOT_PROFILE_IDS } from '../bot/defaultBotProfiles';
 import { resolveRuntimeObservationConfig } from '../config/runtimeObservationConfig';
 
 export type StructuredLogEventType =
@@ -56,7 +61,25 @@ export type StructuredLogEventType =
   | 'visible_window_started'
   | 'visible_window_stopped'
   | 'observation_bot_changed'
-  | 'observation_limit_reached';
+  | 'observation_limit_reached'
+  | 'directive_created'
+  | 'directive_queued'
+  | 'directive_assigned'
+  | 'directive_activated'
+  | 'directive_action_selected'
+  | 'directive_state_changed'
+  | 'directive_condition_checked'
+  | 'directive_evidence_captured'
+  | 'directive_step_started'
+  | 'directive_step_completed'
+  | 'directive_step_failed'
+  | 'directive_progress'
+  | 'directive_succeeded'
+  | 'directive_failed'
+  | 'directive_unavailable'
+  | 'directive_expired'
+  | 'directive_cancelled'
+  | 'directive_reassigned';
 
 export interface StructuredLogEvent<TPayload extends Record<string, unknown> = Record<string, unknown>> {
   eventId: string;
@@ -116,6 +139,9 @@ export interface SessionSummaryReportInput {
   createdAt?: string;
   startedAt?: string;
   stoppedAt?: string;
+  directives?: BotTestDirective[];
+  directiveProgress?: BotDirectiveProgress[];
+  directiveEvents?: BotDirectiveEvent[];
   startupFlow?: {
     flowId: string;
     flowName: string;
@@ -128,6 +154,45 @@ export interface SessionSummaryReportInput {
     screenshotPath?: string;
     timeline?: Array<Record<string, unknown>>;
   };
+}
+
+function technicalTestReadiness(input: SessionSummaryReportInput) {
+  const technicalIds = new Set<string>(TECHNICAL_BOT_PROFILE_IDS);
+  const profilesById = new Map(defaultBotProfiles.map((profile) => [profile.profileId, profile]));
+
+  return input.runConfig.botPools
+    .filter((pool) => pool.enabled && pool.desiredCount > 0 && technicalIds.has(pool.profileId))
+    .map((pool) => {
+      const profile = profilesById.get(pool.profileId);
+      const actualBots = input.bots.filter((bot) => bot.profileId === pool.profileId).length;
+      if (!profile) {
+        return {
+          profileId: pool.profileId,
+          profileName: pool.profileId,
+          status: 'Unsupported',
+          requestedBots: pool.desiredCount,
+          actualBots,
+          details: ['Technical profile definition was not available while generating the report.']
+        };
+      }
+
+      const compatibility = evaluateBotProfileCompatibility(profile, input.gameProfile, input.runConfig);
+      const details = [...compatibility.blockers, ...compatibility.warnings];
+      if (actualBots === 0) details.push('No bot from this technical profile launched, so the test is incomplete.');
+
+      return {
+        profileId: pool.profileId,
+        profileName: profile.displayName,
+        status: compatibility.blockers.length > 0
+          ? 'Unsupported'
+          : compatibility.warnings.length > 0 || actualBots === 0
+            ? 'Incomplete'
+            : 'Supported',
+        requestedBots: pool.desiredCount,
+        actualBots,
+        details
+      };
+    });
 }
 
 interface StructuredLogFileSource {
@@ -365,6 +430,7 @@ function isImportantStructuredEvent(record: Record<string, unknown>): boolean {
     eventType.includes('failed') ||
     eventType.includes('warning') ||
     eventType.includes('resource') ||
+    eventType.includes('directive_') ||
     eventType.includes('recovery') ||
     eventType.includes('flow_') ||
     eventType.includes('instance_start') ||
@@ -921,6 +987,85 @@ export class SessionLogger {
       String(item.message ?? item.resultMessage ?? item.reason ?? ''),
       String(item.timestamp ?? '')
     ]);
+    const directiveRows = (input.directives ?? []).map((directive) => [
+      directive.name,
+      directive.directiveType,
+      directive.directiveMode,
+      directive.priority,
+      directive.status,
+      directive.target.allBots
+        ? 'All bots'
+        : [
+            ...directive.target.botIds.map((value) => `Bot: ${value}`),
+            ...directive.target.profileIds.map((value) => `Profile: ${value}`),
+            ...directive.target.gameInstanceIds.map((value) => `Instance: ${value}`)
+          ].join(', ')
+    ]);
+    const directiveProgressRows = (input.directiveProgress ?? []).map((progress) => [
+      progress.directiveId,
+      progress.botId,
+      progress.instanceId,
+      progress.status,
+      String(progress.actionsAttempted),
+      String(progress.attempts),
+      progress.progressMessage ?? 'No progress message'
+    ]);
+    const technicalReadiness = technicalTestReadiness(input);
+    const directivesById = new Map(
+      (input.directives ?? []).map((directive) => [directive.directiveId, directive])
+    );
+    const userDirectedTestRows = (input.directiveProgress ?? []).map((progress) => {
+      const directive = directivesById.get(progress.directiveId);
+      const expectedConditionCount = Math.max(
+        directive?.successConditions.length ?? 0,
+        directive?.expectedState ? 1 : 0,
+        directive?.targetScene || directive?.targetArea ? 1 : 0
+      );
+      const evidenceCount =
+        (progress.screenshotPaths?.length ?? 0) + (progress.videoPaths?.length ?? 0);
+      return [
+        directive?.name ?? progress.directiveId,
+        progress.botId,
+        directive?.directiveMode ?? 'unknown',
+        directive?.priority ?? 'unknown',
+        progress.status,
+        `${progress.actionsAttempted} (${progress.successfulActions ?? 0} succeeded, ${progress.failedActions ?? 0} failed)`,
+        `${progress.conditionsMet?.length ?? 0}/${expectedConditionCount || 'manual'}`,
+        String(progress.issueIds?.length ?? 0),
+        evidenceCount > 0 ? `${evidenceCount} file(s)` : 'None'
+      ];
+    });
+    const directiveTimelineRows = (input.directiveEvents ?? []).map((event) => [
+      event.timestamp,
+      directivesById.get(event.directiveId)?.name ?? event.directiveId,
+      event.botId ?? 'Unassigned',
+      event.eventType,
+      String(event.payload.message ?? event.payload.summary ?? event.payload.condition ?? event.payload.action ?? '')
+    ]);
+    const directiveDetailLines = (input.directiveProgress ?? []).flatMap((progress) => {
+      const directive = directivesById.get(progress.directiveId);
+      return [
+        `#### ${directive?.name ?? progress.directiveId} / ${progress.botId}`,
+        '',
+        `Result: ${progress.status}`,
+        `Started: ${progress.startedAt ?? 'Not started'}`,
+        `Ended: ${progress.completedAt ?? 'Not ended'}`,
+        `Actions attempted: ${progress.actionsAttempted}`,
+        `Matching actions: ${(progress.matchedActions ?? []).join(', ') || 'None'}`,
+        `Unrelated actions: ${(progress.unrelatedActions ?? []).join(', ') || 'None'}`,
+        `Successful actions: ${progress.successfulActions ?? 0}`,
+        `Failed actions: ${progress.failedActions ?? 0}`,
+        `Reached scenes: ${(progress.reachedScenes ?? []).join(', ') || 'None'}`,
+        `Reached areas: ${(progress.reachedAreas ?? []).join(', ') || 'None'}`,
+        `Observed state changes: ${(progress.observedStateChanges ?? []).join(' | ') || 'None'}`,
+        `Conditions met: ${(progress.conditionsMet ?? []).join(' | ') || 'None'}`,
+        `Issues discovered: ${(progress.issueIds ?? []).join(', ') || 'None'}`,
+        `Screenshots: ${(progress.screenshotPaths ?? []).join(', ') || 'None'}`,
+        `Videos: ${(progress.videoPaths ?? []).join(', ') || 'None'}`,
+        `Failure reason: ${progress.failureReason ?? 'None'}`,
+        ''
+      ];
+    });
     const lines = [
       `# GameplaySimulator Session: ${this.options.sessionId}`,
       '',
@@ -965,6 +1110,60 @@ export class SessionLogger {
         startupTimelineRows,
         input.startupFlow ? 'No startup flow timeline events captured' : 'No startup flow configured'
       ),
+      '',
+      '## User-Directed Tests',
+      '',
+      ...markdownTable(
+        ['Direction', 'Bot', 'Mode', 'Priority', 'Result', 'Actions Used', 'Conditions Met', 'Issues Found', 'Evidence'],
+        userDirectedTestRows,
+        'No user-directed tests were assigned to bots'
+      ),
+      '',
+      '### Directive Timeline',
+      '',
+      ...markdownTable(
+        ['Time', 'Direction', 'Bot', 'Event', 'Details'],
+        directiveTimelineRows,
+        'No directive timeline events recorded'
+      ),
+      '',
+      '### Directive Details',
+      '',
+      ...(directiveDetailLines.length > 0 ? directiveDetailLines : ['No directive details recorded']),
+      '',
+      '### Configured Directives',
+      '',
+      ...markdownTable(
+        ['Name', 'Type', 'Mode', 'Priority', 'Status', 'Targets'],
+        directiveRows,
+        'No user test directives configured'
+      ),
+      '',
+      '### Per-Bot Directive Progress',
+      '',
+      ...markdownTable(
+        ['Directive', 'Bot', 'Instance', 'Status', 'Actions', 'Attempts', 'Progress'],
+        directiveProgressRows,
+        'No directive progress recorded'
+      ),
+      '',
+      '## Technical Test Readiness',
+      '',
+      ...markdownTable(
+        ['Profile', 'Status', 'Requested Bots', 'Actual Bots', 'Details'],
+        technicalReadiness.map((item) => [
+          item.profileName,
+          item.status,
+          String(item.requestedBots),
+          String(item.actualBots),
+          item.details.join(' ') || 'All declared technical requirements were available.'
+        ]),
+        'No specialized technical test profiles were requested'
+      ),
+      '',
+      `Controlled network test confirmed: ${input.runConfig.technicalTesting?.controlledNetworkTestConfirmed ? 'yes' : 'no'}`,
+      `Save migration test files: ${input.runConfig.technicalTesting?.saveMigrationTestPaths.length ?? 0}`,
+      `Approved file test directories: ${input.runConfig.technicalTesting?.approvedFileTestDirectories.length ?? 0}`,
       '',
       '## Bot Counts',
       '',
@@ -1634,6 +1833,31 @@ export class StructuredRunLogger {
     const screenshotFiles = [...this.botLoggers.values()]
       .flatMap((logger) => listFilesRecursive(logger.screenshotsDir))
       .filter((path) => /\.(png|jpe?g|webp|gif|svg)$/i.test(path));
+    const directivesById = new Map(
+      (input.directives ?? []).map((directive) => [directive.directiveId, directive])
+    );
+    const userDirectedTests = (input.directiveProgress ?? []).map((progress) => ({
+      directive: directivesById.get(progress.directiveId),
+      assignedBot: progress.botId,
+      gameInstanceId: progress.instanceId,
+      startedAt: progress.startedAt,
+      completedAt: progress.completedAt,
+      actionsAttempted: progress.actionsAttempted,
+      matchingActions: progress.matchedActions,
+      unrelatedActions: progress.unrelatedActions ?? [],
+      successfulActions: progress.successfulActions ?? 0,
+      failedActions: progress.failedActions ?? 0,
+      reachedScenes: progress.reachedScenes ?? [],
+      reachedAreas: progress.reachedAreas ?? [],
+      observedStateChanges: progress.observedStateChanges ?? [],
+      conditionsMet: progress.conditionsMet ?? [],
+      issuesDiscovered: progress.issueIds ?? [],
+      screenshots: progress.screenshotPaths ?? [],
+      videos: progress.videoPaths ?? [],
+      finalResult: progress.status,
+      failureReason: progress.failureReason
+    }));
+    const technicalReadiness = technicalTestReadiness(input);
     const summaryJson = {
       sessionId: this.sessionLogger.sessionId,
       label: bundleLabel(input.runConfig),
@@ -1647,6 +1871,14 @@ export class StructuredRunLogger {
       },
       adapterType: input.runConfig.adapterType,
       runtimeObservation,
+      directives: input.directives ?? [],
+      directiveProgress: input.directiveProgress ?? [],
+      directiveTimeline: input.directiveEvents ?? [],
+      userDirectedTests,
+      technicalTesting: {
+        config: input.runConfig.technicalTesting,
+        readiness: technicalReadiness
+      },
       createdAt: input.createdAt,
       startedAt: input.startedAt,
       stoppedAt: input.stoppedAt,
@@ -1697,6 +1929,8 @@ export class StructuredRunLogger {
     writeJson(paths.summaryJson, summaryJson);
     writeJson(paths.issuesJson, input.issues);
     writeJson(paths.issueTimelineJson, issueTimeline);
+    writeJson(join(paths.sessionDirectory, 'user-directed-tests.json'), userDirectedTests);
+    writeJson(join(paths.sessionDirectory, 'directive-timeline.json'), input.directiveEvents ?? []);
     writeJson(join(paths.screenshotsDirectory, 'manifest.json'), {
       sessionId: bundle.sessionId,
       screenshots: screenshotFiles

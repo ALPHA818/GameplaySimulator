@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type {
   ActionResult,
+  BotTestDirective,
   BotProfile,
   GameAction,
   GameInstanceConfig,
@@ -529,6 +530,358 @@ describe('SimulationService', () => {
 
     expect(stopped.status).toBe('stopped');
     expect(service.getBotStatuses(runConfig.sessionId).every((bot) => bot.status === 'stopped')).toBe(true);
+  }, 10_000);
+
+  it('rejects a real specialist pool when its required input capability is unavailable', () => {
+    const service = new SimulationService({ systemSnapshot });
+    const controllerProfile: BotProfile = {
+      ...botProfiles[0],
+      profileId: 'controller-gamepad-tester-bot',
+      displayName: 'Controller And Gamepad Tester Bot',
+      botType: 'controller-gamepad'
+    };
+    const controllerRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-controller-unavailable',
+      useMockRuntime: false,
+      botPools: [{
+        ...runConfig.botPools[0],
+        profileId: controllerProfile.profileId,
+        minCount: 1,
+        desiredCount: 1,
+        maxCount: 1
+      }]
+    };
+
+    const validation = service.validateSessionConfig({
+      runConfig: controllerRunConfig,
+      gameProfile,
+      botProfiles: [controllerProfile]
+    });
+
+    expect(validation.valid).toBe(false);
+    expect(validation.errors.map((error) => error.message).join(' ')).toContain('Gamepad input is unavailable');
+  });
+
+  it('rejects network specialists without explicit controlled-test confirmation', () => {
+    const service = new SimulationService({ systemSnapshot });
+    const networkProfile: BotProfile = {
+      ...botProfiles[0],
+      profileId: 'network-resilience-tester-bot',
+      displayName: 'Network Resilience Tester Bot',
+      botType: 'network-resilience'
+    };
+    const networkRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-network-unconfirmed',
+      useMockRuntime: false,
+      botPools: [{
+        ...runConfig.botPools[0],
+        profileId: networkProfile.profileId,
+        minCount: 1,
+        desiredCount: 1,
+        maxCount: 1
+      }],
+      technicalTesting: {
+        controlledNetworkTestConfirmed: false,
+        saveMigrationTestPaths: [],
+        approvedFileTestDirectories: []
+      }
+    };
+
+    const validation = service.validateSessionConfig({
+      runConfig: networkRunConfig,
+      gameProfile,
+      botProfiles: [networkProfile]
+    });
+
+    expect(validation.valid).toBe(false);
+    expect(validation.errors.map((error) => error.message).join(' ')).toContain(
+      'Controlled network test confirmation is required'
+    );
+    expect(() => service.createSession({
+      runConfig: networkRunConfig,
+      gameProfile,
+      botProfiles: [networkProfile]
+    })).toThrow(/Controlled network test confirmation is required/);
+  });
+
+  it('exposes assigned directive state to the renderer bridge', () => {
+    const directiveRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-with-directives',
+      directives: [
+        {
+          directiveId: 'explore-forest',
+          sessionId: 'session-with-directives',
+          name: 'Explore the forest',
+          description: 'Focus the explorer bots on paths through the forest.',
+          directiveType: 'area',
+          directiveMode: 'focus',
+          priority: 'high',
+          status: 'queued',
+          target: {
+            allBots: false,
+            botIds: [],
+            profileIds: ['explorer'],
+            gameInstanceIds: []
+          },
+          actionKeywords: ['move', 'explore'],
+          avoidedActionKeywords: ['idle'],
+          targetArea: 'Forest',
+          successConditions: ['A new forest path is visited.'],
+          failureConditions: [],
+          steps: [],
+          repeatUntilSuccess: false,
+          createdAt: '2026-07-04T08:59:00.000Z',
+          createdBy: 'user'
+        }
+      ]
+    };
+    const service = new SimulationService({
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot
+    });
+
+    service.createSession({ runConfig: directiveRunConfig, gameProfile, botProfiles });
+    const state = service.getDirectiveState(directiveRunConfig.sessionId);
+
+    expect(state.directives).toHaveLength(1);
+    expect(state.progress.map((progress) => progress.botId)).toEqual([
+      'explorer-001',
+      'explorer-002'
+    ]);
+    expect(state.events.map((event) => event.eventType)).toEqual([
+      'directive_created',
+      'directive_queued',
+      'directive_assigned',
+      'directive_assigned'
+    ]);
+    expect(
+      service
+        .getLogs(directiveRunConfig.sessionId)
+        .some((entry) => entry.message.includes('directive_assigned'))
+    ).toBe(true);
+  });
+
+  it('runs a valid forced directive and returns the bot to profile planning after success', async () => {
+    vi.useFakeTimers();
+    const sessionId = 'session-forced-directive';
+    const directiveRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId,
+      maxActionsPerBot: 2,
+      botPools: [
+        {
+          ...runConfig.botPools[0],
+          minCount: 1,
+          desiredCount: 1,
+          maxCount: 1
+        }
+      ],
+      directives: [
+        {
+          directiveId: 'open-menu-now',
+          sessionId,
+          name: 'Open the menu once',
+          description: 'Use the reported open-menu action before normal exploration.',
+          directiveType: 'action',
+          directiveMode: 'force-next-valid-action',
+          priority: 'urgent',
+          status: 'queued',
+          target: {
+            allBots: false,
+            botIds: [],
+            profileIds: ['explorer'],
+            gameInstanceIds: []
+          },
+          actionKeywords: ['open-menu'],
+          avoidedActionKeywords: [],
+          successConditions: ['The open-menu action succeeds.'],
+          failureConditions: [],
+          steps: [],
+          repeatUntilSuccess: false,
+          createdAt: '2026-07-04T08:59:00.000Z',
+          createdBy: 'user'
+        }
+      ]
+    };
+    const service = new SimulationService({
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot
+    });
+
+    service.createSession({ runConfig: directiveRunConfig, gameProfile, botProfiles });
+    await service.startSession(sessionId);
+    await vi.advanceTimersByTimeAsync(900);
+
+    const directiveState = service.getDirectiveState(sessionId);
+    const botLogs = service.getLogs(sessionId).map((entry) => entry.message);
+
+    expect(directiveState.directives[0].status).toBe('succeeded');
+    expect(directiveState.progress[0]).toMatchObject({
+      status: 'succeeded',
+      actionsAttempted: 1,
+      lastAction: 'open-menu',
+      successfulActions: 1,
+      conditionsMet: ['The open-menu action succeeds.']
+    });
+    expect(directiveState.progress[0].screenshotPaths?.length).toBeGreaterThanOrEqual(2);
+    expect(directiveState.events.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining([
+        'directive_activated',
+        'directive_condition_checked',
+        'directive_succeeded',
+        'directive_evidence_captured'
+      ])
+    );
+    expect(botLogs.some((message) => message.includes('user asked it to open the menu once'))).toBe(true);
+    expect(botLogs.some((message) => message.includes('directive_succeeded'))).toBe(true);
+
+    await service.stopSession(sessionId);
+  });
+
+  it('guides a running bot without restarting its loop and validates exact available actions', async () => {
+    vi.useFakeTimers();
+    const sessionId = 'session-live-guidance';
+    const liveRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId,
+      actionDelayMs: 1_000,
+      maxActionsPerBot: 20,
+      botPools: [
+        {
+          ...runConfig.botPools[0],
+          minCount: 1,
+          desiredCount: 1,
+          maxCount: 1
+        }
+      ]
+    };
+    const service = new SimulationService({
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot
+    });
+    const liveDirective = (
+      directiveId: string,
+      name: string,
+      overrides: Partial<BotTestDirective> = {}
+    ): BotTestDirective => ({
+      directiveId,
+      sessionId,
+      name,
+      description: `Guide the running bot to ${name.toLowerCase()}.`,
+      directiveType: 'feature',
+      directiveMode: 'focus',
+      priority: 'normal',
+      status: 'queued',
+      target: {
+        allBots: false,
+        botIds: ['explorer-001'],
+        profileIds: [],
+        gameInstanceIds: []
+      },
+      actionKeywords: ['move-forward'],
+      avoidedActionKeywords: [],
+      targetFeature: 'movement',
+      successConditions: ['Movement succeeds.'],
+      failureConditions: [],
+      steps: [],
+      maxActions: 5,
+      maxAttempts: 2,
+      repeatUntilSuccess: false,
+      createdAt: '2026-07-04T09:00:00.000Z',
+      createdBy: 'user-live-session',
+      ...overrides
+    });
+
+    service.createSession({ runConfig: liveRunConfig, gameProfile, botProfiles });
+    await service.startSession(sessionId);
+    await vi.advanceTimersByTimeAsync(350);
+
+    const actions = await service.getBotAvailableActions(sessionId, 'explorer-001');
+    expect(actions.map((action) => action.actionType)).toContain('move-forward');
+
+    const applied = await service.guideBot({
+      sessionId,
+      botId: 'explorer-001',
+      behavior: 'apply',
+      directive: liveDirective('movement-now', 'Test movement')
+    });
+    expect(applied.activeDirectiveId).toBe('movement-now');
+    expect(service.getBotStatuses(sessionId)[0].status).toBe('running');
+
+    const queued = await service.guideBot({
+      sessionId,
+      botId: 'explorer-001',
+      behavior: 'queue',
+      directive: liveDirective('inventory-later', 'Test inventory', {
+        actionKeywords: ['equip-inventory-item'],
+        targetFeature: 'inventory'
+      })
+    });
+    expect(queued.snapshot.progress.find((progress) => progress.directiveId === 'inventory-later')).toMatchObject({
+      botId: 'explorer-001',
+      status: 'queued'
+    });
+
+    await service.guideBot({
+      sessionId,
+      botId: 'explorer-001',
+      behavior: 'queue',
+      directive: liveDirective('combat-later', 'Test combat', {
+        actionKeywords: ['attack-enemy'],
+        targetFeature: 'combat'
+      })
+    });
+    const reordered = service.reorderBotDirectives({
+      sessionId,
+      botId: 'explorer-001',
+      directiveIds: ['combat-later', 'inventory-later']
+    });
+    expect(
+      reordered.snapshot.directives
+        .filter((directive) => ['combat-later', 'inventory-later'].includes(directive.directiveId))
+        .map((directive) => directive.directiveId)
+    ).toEqual(['combat-later', 'inventory-later']);
+
+    const replaced = await service.guideBot({
+      sessionId,
+      botId: 'explorer-001',
+      behavior: 'replace',
+      directive: liveDirective('menu-now', 'Test menu', {
+        priority: 'urgent',
+        actionKeywords: ['open-menu'],
+        targetFeature: 'menu'
+      })
+    });
+    expect(replaced.activeDirectiveId).toBe('menu-now');
+    expect(
+      replaced.snapshot.progress.find((progress) => progress.directiveId === 'movement-now')?.status
+    ).toBe('cancelled');
+
+    const cancelled = service.cancelBotDirective(sessionId, 'explorer-001', 'menu-now');
+    expect(cancelled.activeDirectiveId).toBe('combat-later');
+    expect(service.getBotStatuses(sessionId)[0].status).toBe('running');
+
+    const unavailable = await service.guideBot({
+      sessionId,
+      botId: 'explorer-001',
+      behavior: 'replace',
+      directive: liveDirective('imaginary-action', 'Use imaginary action', {
+        directiveType: 'action',
+        directiveMode: 'force-next-valid-action',
+        actionKeywords: ['not-reported-by-adapter'],
+        targetFeature: undefined
+      })
+    });
+    expect(unavailable.message).toMatch(/does not currently report/);
+    expect(
+      unavailable.snapshot.progress.find((progress) => progress.directiveId === 'imaginary-action')
+    ).toMatchObject({ status: 'unavailable', actionsAttempted: 0 });
+    expect(unavailable.activeDirectiveId).toBe('combat-later');
+
+    await service.stopSession(sessionId);
   });
 
   it('launches and stops adapter-backed sessions through AdapterFactory by default', async () => {

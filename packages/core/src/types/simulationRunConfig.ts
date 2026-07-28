@@ -3,6 +3,7 @@ import { AdapterTypeSchema } from './adapter';
 import { BotPoolConfigSchema } from './bot';
 import { SessionLabelSchema } from './sessionBundle';
 import { ObservationModeSchema } from '../config/runtimeObservationConfig';
+import { BotTestDirectiveSchema } from './botTestDirective';
 
 export const RunModeSchema = z.enum(['parallel', 'sequential', 'hybrid']);
 
@@ -13,6 +14,12 @@ export const ResourceLimitsSchema = z.object({
   reserveRamMb: z.number().min(0),
   maxGameInstances: z.number().int().min(1),
   allowAutoScaling: z.boolean()
+});
+
+export const TechnicalTestingConfigSchema = z.object({
+  controlledNetworkTestConfirmed: z.boolean().default(false),
+  saveMigrationTestPaths: z.array(z.string().trim().min(1)).default([]),
+  approvedFileTestDirectories: z.array(z.string().trim().min(1)).default([])
 });
 
 export const SimulationRunConfigSchema = z
@@ -41,6 +48,8 @@ export const SimulationRunConfigSchema = z
     startupFlowId: z.string().min(1).optional(),
     continueOnStartupFlowFailure: z.boolean().optional(),
     startupFlowTimeoutMs: z.number().int().positive().optional(),
+    directives: z.array(BotTestDirectiveSchema).optional(),
+    technicalTesting: TechnicalTestingConfigSchema.optional(),
     botPools: z.array(BotPoolConfigSchema).min(1),
     globalBotLimit: z.number().int().min(1),
     perGameInstanceBotLimit: z.number().int().min(1),
@@ -60,8 +69,29 @@ export const SimulationRunConfigSchema = z
         message: 'globalBotLimit must allow the minimum enabled bot pool size.'
       });
     }
+
+    const directiveIds = new Set<string>();
+    config.directives?.forEach((directive, index) => {
+      if (directive.sessionId !== config.sessionId) {
+        context.addIssue({
+          code: 'custom',
+          path: ['directives', index, 'sessionId'],
+          message: 'Directive sessionId must match the run config sessionId.'
+        });
+      }
+
+      if (directiveIds.has(directive.directiveId)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['directives', index, 'directiveId'],
+          message: 'Directive IDs must be unique within a session.'
+        });
+      }
+      directiveIds.add(directive.directiveId);
+    });
   });
 
 export type RunMode = z.infer<typeof RunModeSchema>;
 export type ResourceLimits = z.infer<typeof ResourceLimitsSchema>;
+export type TechnicalTestingConfig = z.infer<typeof TechnicalTestingConfigSchema>;
 export type SimulationRunConfig = z.infer<typeof SimulationRunConfigSchema>;

@@ -1,9 +1,13 @@
 import type { LogEntry } from '../logging/LogEntry';
 import type {
+  ActionResult,
+  BotDirectiveProgress,
   BotLaunchPlan,
   BotProfile,
   BotStatus,
   DetectedIssue,
+  GameAction,
+  BotTestDirective,
   RuntimeBotSnapshot,
   SimulationRunConfig,
   UIFlow
@@ -33,6 +37,8 @@ export interface BotManagerOptions {
   maxConcurrentBots?: number;
   getCoverageData?: () => CoverageData;
   getRecentIssues?: () => DetectedIssue[];
+  getActiveDirective?: (botId: string) => BotTestDirective | undefined;
+  getDirectiveProgress?: (directiveId: string, botId: string) => BotDirectiveProgress | undefined;
   uiFlows?: UIFlow[];
   startupBotIds?: string[];
   continueAfterStartupFailure?: boolean;
@@ -44,6 +50,18 @@ export interface BotManagerOptions {
   sleep?: (ms: number) => Promise<void>;
   onStatusChange?: (event: BotManagerStatusEvent) => void | Promise<void>;
   onLog?: (event: BotManagerLogEvent) => void | Promise<void>;
+  onDirectiveActionSelected?: (botId: string, action: GameAction) => void | Promise<void>;
+  onDirectiveActionResult?: (
+    botId: string,
+    action: GameAction,
+    result: ActionResult
+  ) => void | Promise<void>;
+  onDirectiveStateObserved?: (
+    botId: string,
+    directive: BotTestDirective,
+    previousState: import('../types').GameStateSnapshot | null,
+    currentState: import('../types').GameStateSnapshot | null
+  ) => void | Promise<void>;
   onIdle?: () => void | Promise<void>;
 }
 
@@ -173,6 +191,9 @@ export class BotManager {
           seed: plan.seed,
           getCoverageData: options.getCoverageData,
           getRecentIssues: options.getRecentIssues,
+          getActiveDirective: () => options.getActiveDirective?.(plan.botId),
+          getDirectiveProgress: (directiveId) =>
+            options.getDirectiveProgress?.(directiveId, plan.botId),
           uiFlows: options.uiFlows,
           getInstanceHeartbeat: options.getInstanceHeartbeat,
           getProcessResponsive: options.getProcessResponsive,
@@ -180,7 +201,13 @@ export class BotManager {
           allowRestartGameInstanceRecovery: options.allowRestartGameInstanceRecovery,
           now: options.now,
           sleep: options.sleep,
-          onStatusChange: (status, memory) => this.handleStatusChange(plan.botId, status, memory)
+          onStatusChange: (status, memory) => this.handleStatusChange(plan.botId, status, memory),
+          onDirectiveActionSelected: (action) =>
+            options.onDirectiveActionSelected?.(plan.botId, action),
+          onDirectiveActionResult: (action, result) =>
+            options.onDirectiveActionResult?.(plan.botId, action, result),
+          onDirectiveStateObserved: (directive, previousState, currentState) =>
+            options.onDirectiveStateObserved?.(plan.botId, directive, previousState, currentState)
         })
       };
 

@@ -3,6 +3,7 @@ export type PageId =
   | 'gameProfiles'
   | 'gameProfileEditor'
   | 'botProfiles'
+  | 'botProfileEditor'
   | 'newSession'
   | 'liveSession'
   | 'issues'
@@ -16,6 +17,7 @@ export const routes = {
   gameProfiles: 'gameProfiles',
   gameProfileEditor: 'gameProfileEditor',
   botProfiles: 'botProfiles',
+  botProfileEditor: 'botProfileEditor',
   newSession: 'newSession',
   liveSession: 'liveSession',
   issues: 'issues',
