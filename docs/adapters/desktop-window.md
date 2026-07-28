@@ -1,6 +1,6 @@
 # Desktop Window Adapter
 
-`DesktopWindowAdapter` is the general fallback for normal desktop games that do not expose structured state. It works across many engines, but it has weaker awareness than instrumented adapters.
+`DesktopWindowAdapter` is the fallback for normal desktop games that do not expose structured state. It has weaker awareness than instrumented adapters. In this release, Linux supports input and screenshots when required command-line tools are installed. Windows supports process launch, health, and safe stop, but not desktop input, focus, or screenshots.
 
 ## Best Integration Method
 
@@ -10,7 +10,7 @@ If you control the game, prefer adding instrumentation first and keep `DesktopWi
 
 ## Fallback Method
 
-If desktop window control is unreliable, add an `InstrumentedAdapter` endpoint or a custom file/socket bridge to expose state while keeping desktop input for actions.
+If desktop window control is unreliable, add a Local HTTP `InstrumentedAdapter` endpoint. A game can expose state through instrumentation while still using supported desktop input for actions.
 
 ## Data The Simulator Can Read
 
@@ -21,7 +21,7 @@ Without instrumentation:
 - Screenshots captured from the game window.
 - Last action sent.
 - Basic resource usage estimates.
-- Limited telemetry from logs if configured later.
+- Limited telemetry supplied by the game or adapter.
 
 With a companion bridge:
 
@@ -31,17 +31,17 @@ With a companion bridge:
 
 - Launch a local executable.
 - Stop the process safely.
-- Focus the game window where possible.
-- Send keyboard input.
-- Send mouse input.
-- Reserve controller input abstraction for later.
-- Capture screenshots of the game window when supported.
+- Focus the game window on Linux when `xdotool` is installed.
+- Send keyboard and mouse input on Linux when `xdotool` is installed.
+- Capture screenshots on Linux when `gnome-screenshot`, `scrot`, or ImageMagick `import` is installed.
 
 ## Limitations
 
 - State awareness is weak. The simulator may not know the true scene, inventory, quest flags, or UI state.
 - Focus, fullscreen mode, display scaling, overlays, and OS permissions can affect input.
 - Screenshots can prove what happened but do not automatically explain game state.
+- Windows desktop input, focus, and screenshots are unavailable in version `0.1.0`.
+- macOS packages are not produced for version `0.1.0`.
 - Do not use this adapter for anti-cheat bypasses, process injection, or multiplayer exploits.
 
 ## Example Game Profile
@@ -133,4 +133,3 @@ Desktop-only runs may not have structured state. A weak desktop state can still 
 - Keep control bindings stable and document them in the game profile.
 - Allow screenshots from the game window.
 - Prefer offline/dev builds. Do not test against protected public multiplayer clients.
-

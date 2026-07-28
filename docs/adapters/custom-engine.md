@@ -4,7 +4,7 @@ Custom engines can usually provide the best integration because you control the 
 
 ## Best Integration Method
 
-Implement the GameplaySimulator instrumentation protocol over local HTTP, WebSocket, file/socket bridge, or a future plugin bridge. Use `InstrumentedAdapter` when the protocol is available. Use `CustomAdapter` when you need engine-specific transport or plugin behavior.
+Implement the GameplaySimulator instrumentation protocol over Local HTTP and use `InstrumentedAdapter`. The generic `CustomAdapter` runtime is unavailable in this release. When instrumentation is not possible, use desktop-window fallback.
 
 Minimum useful endpoints:
 
@@ -43,8 +43,8 @@ With instrumentation:
 
 With desktop fallback:
 
-- Keyboard and mouse input mapped from controls.
-- Screenshots and safe stop.
+- Keyboard and mouse input mapped from controls on supported Linux systems.
+- Screenshots when supported and safe process stop.
 
 ## Limitations
 
@@ -74,7 +74,7 @@ With desktop fallback:
     "supportsStateRead": true,
     "supportsDirectActions": true,
     "supportsScreenshots": true,
-    "supportsVideo": true,
+    "supportsVideo": false,
     "supportsSaveIsolation": true
   },
   "controls": [],
@@ -152,4 +152,3 @@ With desktop fallback:
 - Provide per-instance save/profile directories.
 - Emit structured event IDs for content coverage and issues.
 - Keep public online builds free of debug endpoints unless intentionally designed for internal QA.
-

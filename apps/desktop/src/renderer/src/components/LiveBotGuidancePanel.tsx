@@ -4,6 +4,7 @@ import { BotTestDirectiveSchema } from '@core/types';
 import {
   ArrowDown,
   ArrowUp,
+  Check,
   CornerDownRight,
   ListPlus,
   RotateCcw,
@@ -323,6 +324,26 @@ export function LiveBotGuidancePanel({
     }
   }
 
+  async function confirmDirectiveSuccess(directiveId: string) {
+    if (!sessionId || !selectedBot) {
+      return;
+    }
+    try {
+      setBusy(true);
+      const result = await window.gameplaySimulator.simulation.confirmBotDirectiveSuccess(
+        sessionId,
+        selectedBot.botId,
+        directiveId
+      );
+      onMutation(result);
+      setMessage(result.message);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'The direction result could not be confirmed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function moveQueuedDirective(index: number, offset: -1 | 1) {
     if (!sessionId || !selectedBot) {
       return;
@@ -549,6 +570,17 @@ export function LiveBotGuidancePanel({
               <X size={17} aria-hidden="true" />
               <span>Cancel Current Direction</span>
             </button>
+            {currentDirective?.manualSuccessConfirmation ? (
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || !currentProgress || currentProgress.status !== 'active'}
+                onClick={() => void confirmDirectiveSuccess(currentDirective.directiveId)}
+              >
+                <Check size={17} aria-hidden="true" />
+                <span>Confirm Direction Succeeded</span>
+              </button>
+            ) : null}
           </div>
 
           <div className="inline-notice guidance-message" aria-live="polite">{message}</div>

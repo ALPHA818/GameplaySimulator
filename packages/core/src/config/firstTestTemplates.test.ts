@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { defaultBotProfiles } from '../bot/defaultBotProfiles';
 import { GameProfileSchema } from '../types/gameProfile';
 import {
   firstTestProfileKind,
@@ -45,8 +46,10 @@ describe('first test templates', () => {
   it('provides all ten beginner templates with hard first-run limits', () => {
     expect(firstTestTemplates).toHaveLength(10);
     expect(new Set(firstTestTemplates.map((template) => template.id)).size).toBe(10);
+    const profileIds = new Set(defaultBotProfiles.map((profile) => profile.profileId));
 
     for (const template of firstTestTemplates) {
+      expect(profileIds.has(template.botProfileId), template.name).toBe(true);
       expect(template.actionCount).toBeLessThanOrEqual(20);
       expect(template.actionDelayMs).toBeGreaterThanOrEqual(500);
       expect(template.actionDelayMs).toBeLessThanOrEqual(750);

@@ -56,6 +56,7 @@ export interface GameInstancePlanningInput {
   adapterType?: AdapterType;
   adapterCapabilities?: Partial<GameInstanceManagerCapabilities>;
   defaultStatus?: GameInstanceRuntimeStatus;
+  defaultSaveRoot?: string;
   now?: string;
 }
 
@@ -112,6 +113,7 @@ export interface GameInstanceManagerOptions {
   gameProfile: GameProfile;
   launchPlans: BotLaunchPlan[];
   restartCrashedInstances?: boolean;
+  defaultSaveRoot?: string;
   fileSystem?: GameInstanceManagerFileSystem;
   now?: () => string;
 }
@@ -186,6 +188,41 @@ function resolvePath(path: string): string {
 
   const cwd = currentWorkingDirectory();
   return cwd ? joinPath(cwd, path) : path;
+}
+
+function normalizedContainmentPath(path: string): string {
+  const source = resolvePath(path).replace(/\\/g, '/');
+  const isUnc = source.startsWith('//');
+  const hasDrive = /^[a-zA-Z]:\//.test(source);
+  const isRooted = source.startsWith('/');
+  const prefix = isUnc ? '//' : hasDrive ? source.slice(0, 3) : isRooted ? '/' : '';
+  const content = hasDrive ? source.slice(3) : source.slice(prefix.length);
+  const segments: string[] = [];
+
+  for (const segment of content.split('/')) {
+    if (!segment || segment === '.') {
+      continue;
+    }
+
+    if (segment === '..') {
+      segments.pop();
+      continue;
+    }
+
+    segments.push(segment);
+  }
+
+  const normalized = `${prefix}${segments.join('/')}`.replace(/\/+$/, '');
+  return hasDrive ? normalized.toLowerCase() : normalized;
+}
+
+function assertStrictChildPath(rootPath: string, candidatePath: string): void {
+  const root = normalizedContainmentPath(rootPath);
+  const candidate = normalizedContainmentPath(candidatePath);
+
+  if (!root || candidate === root || !candidate.startsWith(`${root}/`)) {
+    throw new Error('Save isolation cleanup path must be a child of its approved working root.');
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -307,11 +344,12 @@ function workingSaveRoot(input: {
   runConfig: SimulationRunConfig;
   gameProfile: GameProfile;
   saveIsolation: SaveIsolationConfig;
+  defaultSaveRoot?: string;
 }): string {
   const configuredRoot = input.saveIsolation.workingSaveRoot?.trim();
   const root = configuredRoot && configuredRoot.length > 0
     ? configuredRoot
-    : joinPath('runs', input.runConfig.sessionId, 'saves');
+    : input.defaultSaveRoot ?? joinPath('runs', input.runConfig.sessionId, 'saves');
 
   return resolvePath(root);
 }
@@ -341,6 +379,7 @@ function saveIsolationRuntimeInfo(input: {
   runConfig: SimulationRunConfig;
   gameProfile: GameProfile;
   capabilities: GameInstanceManagerCapabilities;
+  defaultSaveRoot?: string;
 }): SaveIsolationRuntimeInfo | undefined {
   const { instanceId, assignedBots, runConfig, gameProfile, capabilities } = input;
   const saveIsolation = saveIsolationFor(gameProfile);
@@ -352,7 +391,12 @@ function saveIsolationRuntimeInfo(input: {
 
   const profileId = `${runConfig.sessionId}-${instanceId}`;
   const isolatedSaveDirectory = needsLocalSaveDirectory(saveIsolation.mode)
-    ? joinPath(workingSaveRoot({ runConfig, gameProfile, saveIsolation }), safePathSegment(instanceId))
+    ? joinPath(workingSaveRoot({
+        runConfig,
+        gameProfile,
+        saveIsolation,
+        defaultSaveRoot: input.defaultSaveRoot
+      }), safePathSegment(instanceId))
     : undefined;
   const botIds = assignedBots.map((bot) => bot.botId).join(',');
   const resolvedProfileArgument = saveIsolation.profileArgumentTemplate && saveIsolation.mode === 'launch-argument-profile'
@@ -372,7 +416,12 @@ function saveIsolationRuntimeInfo(input: {
     mode: saveIsolation.mode,
     profileId,
     sourceSavePath: saveIsolation.sourceSavePath,
-    workingSaveRoot: workingSaveRoot({ runConfig, gameProfile, saveIsolation }),
+    workingSaveRoot: workingSaveRoot({
+      runConfig,
+      gameProfile,
+      saveIsolation,
+      defaultSaveRoot: input.defaultSaveRoot
+    }),
     isolatedSaveDirectory,
     profileArgumentTemplate: saveIsolation.profileArgumentTemplate,
     resolvedProfileArgument,
@@ -390,6 +439,7 @@ function configForInstance(input: {
   runConfig: SimulationRunConfig;
   gameProfile: GameProfile;
   capabilities: GameInstanceManagerCapabilities;
+  defaultSaveRoot?: string;
 }): GameInstanceConfig {
   const { instanceId, assignedBots, runConfig, gameProfile, capabilities } = input;
   const saveIsolation = saveIsolationRuntimeInfo(input);
@@ -667,7 +717,8 @@ export function planGameInstances(input: GameInstancePlanningInput): GameInstanc
       assignedBots: instance.assignedBots,
       runConfig: input.runConfig,
       gameProfile: input.gameProfile,
-      capabilities
+      capabilities,
+      defaultSaveRoot: input.defaultSaveRoot
     });
     instance.status = statusForInstance({
       instanceId: instance.instanceId,
@@ -701,6 +752,7 @@ export class GameInstanceManager {
   private readonly runConfig: SimulationRunConfig;
   private readonly gameProfile: GameProfile;
   private readonly restartCrashedInstances: boolean;
+  private readonly defaultSaveRoot?: string;
   private readonly fileSystem?: GameInstanceManagerFileSystem;
   private readonly now: () => string;
   private readonly statuses = new Map<string, GameInstanceStatus>();
@@ -713,6 +765,7 @@ export class GameInstanceManager {
     this.runConfig = options.runConfig;
     this.gameProfile = options.gameProfile;
     this.restartCrashedInstances = options.restartCrashedInstances ?? false;
+    this.defaultSaveRoot = options.defaultSaveRoot;
     this.fileSystem = options.fileSystem;
     this.now = options.now ?? nowIso;
     this.plan = planGameInstances({
@@ -722,6 +775,7 @@ export class GameInstanceManager {
       adapterType: options.adapter.adapterType,
       adapterCapabilities: options.adapter.capabilities,
       defaultStatus: 'stopped',
+      defaultSaveRoot: this.defaultSaveRoot,
       now: this.now()
     });
 
@@ -795,6 +849,7 @@ export class GameInstanceManager {
       adapterType: this.adapter.adapterType,
       adapterCapabilities: this.adapter.capabilities,
       defaultStatus: 'stopped',
+      defaultSaveRoot: this.defaultSaveRoot,
       now: this.now()
     });
     this.resetStatusesFromPlan();
@@ -1084,6 +1139,15 @@ export class GameInstanceManager {
     const warnings = [...saveIsolation.warnings];
 
     if (saveIsolation.isolatedSaveDirectory) {
+      if (!saveIsolation.workingSaveRoot) {
+        throw new Error(
+          'Save isolation needs an approved working root before creating or copying files.'
+        );
+      }
+      assertStrictChildPath(
+        saveIsolation.workingSaveRoot,
+        saveIsolation.isolatedSaveDirectory
+      );
       const fs = this.requireFileSystem();
 
       if (saveIsolation.sourceSavePath) {
@@ -1135,7 +1199,16 @@ export class GameInstanceManager {
       return;
     }
 
+    if (!saveIsolation.workingSaveRoot) {
+      throw new Error(
+        'Save isolation needs an approved working root before temporary files can be removed.'
+      );
+    }
     const fs = this.requireFileSystem();
+    assertStrictChildPath(
+      saveIsolation.workingSaveRoot,
+      saveIsolation.isolatedSaveDirectory
+    );
     await fs.rm(saveIsolation.isolatedSaveDirectory, { recursive: true, force: true });
     saveIsolation.cleanedUpAt = this.now();
     config.saveIsolation = {

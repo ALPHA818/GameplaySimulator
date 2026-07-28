@@ -14,6 +14,7 @@ import type {
   GameStateSnapshot
 } from '@core/types';
 import { mkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { chromium, firefox, webkit } from 'playwright';
 import { BaseGameAdapter } from '../base/BaseGameAdapter';
@@ -40,6 +41,11 @@ import {
   setBrowserActionIndicatorsHidden,
   type BrowserActionIndicatorPayload
 } from './BrowserActionIndicator';
+import {
+  electronResourcesPath,
+  findPackagedChromiumExecutable,
+  isPackagedElectronRuntime
+} from './PackagedBrowserRuntime';
 
 type BrowserActionStatus = ActionResult['status'];
 type BrowserKind = 'chromium' | 'firefox' | 'webkit';
@@ -96,6 +102,7 @@ interface PageLike {
   isClosed(): boolean;
   viewportSize?(): { width: number; height: number } | null;
   bringToFront?(): Promise<void>;
+  removeAllListeners?(): void;
   on(event: 'console', listener: (message: ConsoleMessageLike) => void): void;
   on(event: 'pageerror', listener: (error: Error) => void): void;
   on(event: 'crash' | 'close', listener: () => void): void;
@@ -142,6 +149,9 @@ export interface BrowserAdapterOptions {
   contextOptions?: Record<string, unknown>;
   launchOptions?: Record<string, unknown>;
   browserLauncher?: BrowserLauncherLike;
+  browserExecutablePath?: string;
+  packagedRuntime?: boolean;
+  resourcesPath?: string;
   domScanMode?: BrowserDomScanMode;
   runtimeObservation?: RuntimeObservationConfig;
   includeActionIndicatorsInScreenshots?: boolean;
@@ -256,6 +266,11 @@ function normalizeBrowserKind(value: string | undefined): BrowserKind {
   return 'chromium';
 }
 
+function isAlreadyClosedCleanupError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /target (?:page, context or browser|page|context|browser) has been closed/i.test(message);
+}
+
 function defaultLauncher(kind: BrowserKind): BrowserLauncherLike {
   if (kind === 'firefox') {
     return firefox;
@@ -359,6 +374,7 @@ export class BrowserAdapter extends BaseGameAdapter {
   private readonly runtimeObservation: RuntimeObservationConfig;
   private readonly includeActionIndicatorsInScreenshots: boolean;
   private readonly browserInstances = new Map<string, BrowserRuntime>();
+  private readonly stoppedInstanceLogs = new Map<string, LogEntry[]>();
 
   constructor(options: BrowserAdapterOptions = {}) {
     super({
@@ -389,12 +405,37 @@ export class BrowserAdapter extends BaseGameAdapter {
     this.targetUrl = options.targetUrl;
     this.domScanMode = options.domScanMode ?? 'fallback';
     this.browserKind = normalizeBrowserKind(options.browserName);
+    const packagedRuntime = options.packagedRuntime ?? isPackagedElectronRuntime();
+    const packagedChromiumExecutable = this.browserKind === 'chromium'
+      ? options.browserExecutablePath ?? findPackagedChromiumExecutable({
+          resourcesPath: options.resourcesPath ?? electronResourcesPath()
+        })
+      : undefined;
+
+    if (packagedRuntime && !options.browserLauncher && this.browserKind !== 'chromium') {
+      throw new Error(
+        `The packaged application includes Chromium only. ${this.browserKind} is not available in this release.`
+      );
+    }
+
+    if (packagedRuntime && !options.browserLauncher && !packagedChromiumExecutable) {
+      throw new Error(
+        'The packaged Chromium runtime is missing. Reinstall GameplaySimulator before starting a browser session.'
+      );
+    }
+
     this.browserLauncher = options.browserLauncher ?? defaultLauncher(this.browserKind);
     this.controlBindings = options.controlBindings ?? [];
-    this.screenshotDirectory = options.screenshotDirectory ?? join(process.cwd(), 'runs', 'browser-screenshots');
+    this.screenshotDirectory = options.screenshotDirectory ??
+      join(tmpdir(), 'gameplay-simulator', 'browser-screenshots');
     this.headless = options.headless ?? true;
     this.contextOptions = options.contextOptions ?? {};
-    this.launchOptions = options.launchOptions ?? {};
+    this.launchOptions = {
+      ...(packagedChromiumExecutable
+        ? { executablePath: packagedChromiumExecutable }
+        : {}),
+      ...options.launchOptions
+    };
     this.runtimeObservation = options.runtimeObservation ?? defaultRuntimeObservationConfig;
     this.includeActionIndicatorsInScreenshots = options.includeActionIndicatorsInScreenshots ?? true;
   }
@@ -423,6 +464,7 @@ export class BrowserAdapter extends BaseGameAdapter {
 
   override async launchInstance(config: GameInstanceConfig): Promise<GameAdapterInstance> {
     const targetUrl = config.launch.url ?? this.targetUrl;
+    this.stoppedInstanceLogs.delete(config.instanceId);
 
     if (!targetUrl) {
       throw new Error('BrowserAdapter requires a URL to launch a browser game instance.');
@@ -551,6 +593,7 @@ export class BrowserAdapter extends BaseGameAdapter {
 
   override async stopInstance(instanceId: string): Promise<void> {
     const runtime = this.browserInstances.get(instanceId);
+    const closeErrors: string[] = [];
 
     if (runtime) {
       if (runtime.visible && !runtime.closed) {
@@ -561,17 +604,51 @@ export class BrowserAdapter extends BaseGameAdapter {
           `Visible browser window ${runtime.visibleWindowNumber ?? 1} stopped for ${instanceId}.`
         );
       }
-      await runtime.page.close().catch(() => undefined);
-      await runtime.context.close().catch(() => undefined);
-      await runtime.browser.close().catch(() => undefined);
+      for (const close of [
+        () => runtime.page.close(),
+        () => runtime.context.close(),
+        () => runtime.browser.close()
+      ]) {
+        try {
+          await close();
+        } catch (error) {
+          if (!isAlreadyClosedCleanupError(error)) {
+            closeErrors.push(error instanceof Error ? error.message : String(error));
+          }
+        }
+      }
       runtime.closed = true;
+      this.stoppedInstanceLogs.set(instanceId, this.logsForRuntime(instanceId, runtime));
+      runtime.page.removeAllListeners?.();
+      this.browserInstances.delete(instanceId);
     }
 
     await super.stopInstance(instanceId);
+
+    if (closeErrors.length > 0) {
+      throw new Error(`Browser cleanup failed: ${closeErrors.join('; ')}`);
+    }
   }
 
   override async stopAll(): Promise<void> {
-    await Promise.all([...this.browserInstances.keys()].map((instanceId) => this.stopInstance(instanceId)));
+    const results = await Promise.allSettled(
+      [...this.browserInstances.keys()].map((instanceId) => this.stopInstance(instanceId))
+    );
+    const errors = results.flatMap((result) =>
+      result.status === 'rejected'
+        ? [result.reason instanceof Error ? result.reason.message : String(result.reason)]
+        : []
+    );
+
+    if (errors.length > 0) {
+      throw new Error(errors.join('; '));
+    }
+  }
+
+  async forceStopAll(): Promise<void> {
+    await Promise.allSettled(
+      [...this.browserInstances.keys()].map((instanceId) => this.stopInstance(instanceId))
+    );
   }
 
   override async isRunning(instanceId: string): Promise<boolean> {
@@ -909,7 +986,16 @@ export class BrowserAdapter extends BaseGameAdapter {
   }
 
   override async captureLogs(instanceId: string): Promise<LogEntry[]> {
-    const runtime = this.requireRuntime(instanceId);
+    const runtime = this.browserInstances.get(instanceId);
+
+    if (!runtime) {
+      return [...(this.stoppedInstanceLogs.get(instanceId) ?? [])];
+    }
+
+    return this.logsForRuntime(instanceId, runtime);
+  }
+
+  private logsForRuntime(instanceId: string, runtime: BrowserRuntime): LogEntry[] {
     const consoleLogs = runtime.consoleLogs.map<LogEntry>((log, index) => ({
       id: `${instanceId}-browser-console-${index + 1}`,
       level: consoleLogLevel(log.type),

@@ -135,6 +135,6 @@
     "collectibles": ["Collectible"],
     "achievements": ["First run"],
     "mechanics": ["movement", "menu confirmation"],
-    "notes": ["Placeholder profile for local or permitted QA testing."]
+    "notes": ["Sample profile for local or permitted QA testing."]
   }
 }

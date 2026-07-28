@@ -109,6 +109,7 @@ async function startHtmlGameServer(): Promise<RunningHtmlServer> {
     domOnlyUrl: `http://127.0.0.1:${port}/dom-only.html`,
     stop: () =>
       new Promise<void>((resolve, reject) => {
+        server.closeAllConnections?.();
         server.close((error) => {
           if (error) {
             reject(error);

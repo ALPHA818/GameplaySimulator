@@ -28,7 +28,7 @@ const conceptItems: HelpItem[] = [
   {
     label: 'Adapter',
     helpText:
-      'This is the bridge between the simulator and your game. It is used to launch, read, control, and capture evidence. For example, BrowserAdapter opens a web game, and DesktopWindowAdapter opens an executable. Beginners should choose the adapter that matches how they normally open the game.',
+      'This is the bridge between the simulator and your game. It is used to launch, read, control, and capture evidence. For example, the Browser adapter opens a web game, and the Desktop adapter opens an executable. Some adapter features depend on your operating system. Beginners should run Test Profile and read its capability results.',
     body: 'Adapters let the simulator talk to different game types without making the app browser-only or engine-only.'
   },
   {
@@ -58,7 +58,7 @@ const conceptItems: HelpItem[] = [
   {
     label: 'Screenshots',
     helpText:
-      'Screenshots are pictures captured during a test. The simulator uses them as proof when something goes wrong. For example, a screenshot can show a frozen loading screen. Beginners should keep screenshots on.',
+      'Screenshots are pictures captured during a test. The simulator uses them as proof when something goes wrong. For example, a screenshot can show a frozen loading screen. Screenshot support depends on the adapter and operating system. Beginners should check Test Profile and keep screenshots on when supported.',
     body: 'Screenshots make reports easier to trust because you can see what the bot saw.'
   },
   {
@@ -129,8 +129,8 @@ const adapterSections: HelpSection[] = [
       {
         label: 'Choose browser adapter',
         helpText:
-          'This tells the simulator to use Playwright and browser controls. It is used only for browser games. Beginners should use Chromium unless they need another browser.',
-        body: 'Set Adapter Type to Browser and keep browser type as Chromium for the first run.'
+          'This tells the simulator to use Playwright and browser controls. It is used only for browser games. The installed app includes Chromium. Firefox and WebKit are not included. Beginners should keep Chromium selected.',
+        body: 'Set Adapter Type to Browser and keep browser type as Chromium.'
       },
       {
         label: 'Add keyboard/mouse mappings',
@@ -147,15 +147,15 @@ const adapterSections: HelpSection[] = [
       {
         label: 'Screenshots on, video off',
         helpText:
-          'Screenshots give proof without using too much disk space. Video can be heavy. Beginners should turn screenshots on and leave video off until screenshots work.',
-        body: 'Save screenshots, skip video, and open evidence from the Issues page if anything appears.'
+          'Screenshots give proof without using too much disk space when the adapter supports them. Video recording is not included in this release. Beginners should turn screenshots on when Test Profile reports screenshot support.',
+        body: 'Save screenshots when supported, leave video off, and open evidence from the Issues page if anything appears.'
       }
     ]
   },
   {
     title: 'Desktop Game First Test',
     helpText:
-      'Use this when your game starts from an executable file. The simulator opens the game window and sends keyboard or mouse input. Beginners should use a dev build without anti-cheat.',
+      'Use this when your game starts from an executable file. Linux can send keyboard and mouse input when xdotool is installed. Windows can launch and monitor the process but cannot send desktop input in this release. Beginners should use a permitted local dev build and read Test Profile results.',
     items: [
       {
         label: 'Choose executable path',
@@ -184,8 +184,8 @@ const adapterSections: HelpSection[] = [
       {
         label: 'Test one control',
         helpText:
-          'This sends one mapped key or click before a full run. The simulator uses it to prove input works. For example, test Jump. If it fails, fix focus or control mapping.',
-        body: 'Try a safe control like menu or jump, then check the game reacted.'
+          'On Linux with xdotool, this sends one mapped key or click before a full run. It proves input works. For example, test Menu. If input is unsupported or the test fails, do not start an action bot until the dependency or mapping is fixed.',
+        body: 'On supported Linux systems, try a safe control like menu or jump and check that the game reacted.'
       },
       {
         label: 'Run 1 bot',
@@ -240,8 +240,8 @@ const adapterSections: HelpSection[] = [
       {
         label: 'Desktop fallback',
         helpText:
-          'This opens the Godot export as a normal game window. The simulator uses mapped keys and screenshots. If state is weak, reports may have less detail.',
-        body: 'Use fallback with executable path, working directory, and simple controls.'
+          'This opens the Godot export as a normal game window. Supported Linux systems can use mapped keys and screenshots. Windows fallback can only launch and monitor the process in this release. Reports have less state detail than instrumentation.',
+        body: 'Use fallback with an executable path and controls only after Test Profile confirms the needed platform capabilities.'
       },
       {
         label: 'Required fields',
@@ -284,26 +284,26 @@ const adapterSections: HelpSection[] = [
         label: 'Recommended safe first bot',
         helpText:
           'This keeps the first Unreal run light. Unreal builds can use more CPU and GPU. Beginners should start with one UI tester or explorer.',
-        body: 'Run one UI tester or explorer, video off, screenshots on.'
+        body: 'Run one UI tester or explorer, video off, and screenshots on when supported.'
       }
     ]
   },
   {
     title: 'Custom Engine First Test',
     helpText:
-      'Use this when your game has its own engine or a plugin adapter. The simulator can use an instrumented endpoint if you provide one, or desktop fallback if not.',
+      'Use this when your game has its own engine. The simulator can use a Local HTTP instrumented endpoint or desktop fallback. The generic Custom adapter runtime is not included.',
     items: [
       {
         label: 'Instrumented endpoint if possible',
         helpText:
-          'This is a local address where your game shares state and actions. The simulator uses it for stronger testing. For example, http://localhost:4317. If wrong, the adapter cannot connect.',
-        body: 'Expose health, state, actions, and action endpoints if your engine can.'
+          'This is a local HTTP address where your game shares state and actions. The simulator uses it for stronger testing. For example, http://127.0.0.1:4317. If it is wrong, the adapter cannot connect. Beginners should use Local HTTP.',
+        body: 'Expose the documented Local HTTP health, state, actions, and event endpoints if your engine can.'
       },
       {
         label: 'Desktop fallback otherwise',
         helpText:
-          'This opens your custom engine game as a normal app. The simulator uses keys, mouse, and screenshots. It works with less game knowledge.',
-        body: 'Use executable path and control mappings when no endpoint exists.'
+          'This opens your custom engine game as a normal app. Supported Linux systems can use keys, mouse, and screenshots. Windows fallback can only launch and monitor the process in this release.',
+        body: 'Use an executable path and control mappings only when Test Profile confirms the needed platform capabilities.'
       },
       {
         label: 'Start very small',
@@ -391,14 +391,14 @@ const safeSettingItems: HelpItem[] = [
   {
     label: 'Screenshots on',
     helpText:
-      'Screenshots save proof without too much overhead. The simulator attaches them to issues when possible. Beginners should keep this on.',
-    body: 'Save screenshots for the first run.'
+      'Screenshots save proof without too much overhead when the adapter supports them. The simulator attaches them to issues when possible. If Test Profile says screenshots are unavailable, the run can continue with logs. Beginners should keep this on for browser tests.',
+    body: 'Save screenshots for the first run when Test Profile reports support.'
   },
   {
     label: 'Video off',
     helpText:
-      'Video can use more disk and CPU. The simulator can run without it. Beginners should leave it off until screenshots work.',
-    body: 'Skip video for the first run.'
+      'Video recording is not included in this release. Old saved configurations may still contain this value, but session validation rejects video recording. Beginners should use screenshots and logs.',
+    body: 'Video remains off; use screenshots and logs as evidence.'
   },
   {
     label: 'State snapshots off unless instrumented',

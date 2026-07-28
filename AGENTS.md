@@ -12,7 +12,6 @@ GameplaySimulator is a desktop-first, game-agnostic QA tool for controlled AI/pl
 ## Repository map
 
 - `apps/desktop`: Electron main process, preload bridge, and React renderer.
-- `apps/runner`: backend runner package.
 - `packages/core`: game-agnostic simulator types and services.
 - `packages/adapters`: instrumented, desktop, browser, Unity, Godot, Unreal, and custom adapter boundaries.
 - `packages/ui-shared`: shared UI constants and helpers.

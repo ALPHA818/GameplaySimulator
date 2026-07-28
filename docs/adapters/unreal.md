@@ -9,14 +9,14 @@ Use `InstrumentedAdapter` with a local Unreal development module. An `UnrealAdap
 Recommended Unreal implementation:
 
 - Add a QA-only plugin, `UGameInstanceSubsystem`, or developer module.
-- Expose local HTTP or WebSocket endpoints.
+- Expose Local HTTP endpoints.
 - Map world, level, pawn, controller, gameplay tags, UI widgets, inventory, quests, save state, and performance data.
 - Expose direct actions through safe subsystem calls or debug exec commands.
 - Emit coverage events from level streaming, gameplay tags, quest systems, NPC interactions, widgets, bosses, minigames, and achievements.
 
 ## Fallback Method
 
-Use `DesktopWindowAdapter` for packaged Unreal builds. It can launch the executable, focus the window, send input, take screenshots, and track process health.
+Use `DesktopWindowAdapter` for packaged Unreal builds. Linux supports focus, input, and screenshots when the required tools are installed. Windows fallback is limited to process launch, health, and safe stop.
 
 ## Data The Simulator Can Read
 
@@ -45,8 +45,8 @@ With instrumentation:
 
 With desktop fallback:
 
-- Keyboard/mouse/controller-style input mapped through controls.
-- Screenshot capture and safe process stop.
+- Keyboard and mouse input mapped through controls on supported Linux systems.
+- Screenshot capture when supported and safe process stop.
 
 ## Limitations
 
@@ -148,4 +148,3 @@ With desktop fallback:
 - Use isolated save directories and deterministic test seeds.
 - Forward Unreal logs, ensures, crashes, and gameplay error events.
 - Keep direct actions server-safe and local to permitted QA builds.
-

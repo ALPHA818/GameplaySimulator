@@ -45,6 +45,7 @@ import {
 } from '../components/FormFields';
 import { createBotPoolFromProfile, createDefaultBotPools, useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
+import { pollRuntimeDetails } from '../runtimePolling';
 import type { FieldErrors } from '../utils/forms';
 import { optionalText, zodFieldErrors } from '../utils/forms';
 
@@ -551,8 +552,7 @@ function applyTemplateToForm(
   current: RunFormState,
   template: FirstTestTemplate,
   gameProfile: GameProfile,
-  botProfiles: BotProfile[],
-  forceBackgroundObservation = false
+  botProfiles: BotProfile[]
 ): RunFormState | null {
   const botPool = botPoolForTemplate(template, botProfiles);
 
@@ -592,10 +592,9 @@ function applyTemplateToForm(
     maxGameInstances: 1,
     allowAutoScaling: false,
     useGlobalObservationSettings: false,
-    showBotGameplay:
-      !forceBackgroundObservation && template.observationPreference !== 'background',
+    showBotGameplay: template.observationPreference !== 'background',
     observationMode:
-      forceBackgroundObservation || template.observationPreference === 'background'
+      template.observationPreference === 'background'
         ? 'background'
         : 'follow-first-bot',
     selectedObservationBotId: '',
@@ -841,9 +840,6 @@ export function NewSessionPage() {
   const gameProfiles = useConfigStore((state) => state.gameProfiles);
   const botProfiles = useConfigStore((state) => state.botProfiles);
   const runtimeObservation = useConfigStore((state) => state.runtimeObservation);
-  const longOvernightTestMode = useConfigStore(
-    (state) => state.advancedIntelligence.longOvernightTestMode
-  );
   const saveRunConfig = useConfigStore((state) => state.saveRunConfig);
   const pendingSessionBotProfileId = useConfigStore((state) => state.pendingSessionBotProfileId);
   const pendingSessionBotProfileIds = useConfigStore((state) => state.pendingSessionBotProfileIds);
@@ -860,21 +856,12 @@ export function NewSessionPage() {
   const selectedReviewIssueId = useSessionStore((state) => state.reviewIssueId);
   const applySessionSnapshot = useSessionStore((state) => state.applySessionSnapshot);
   const applyRuntimeDetails = useSessionStore((state) => state.applyRuntimeDetails);
+  const setRuntimeWarnings = useSessionStore((state) => state.setRuntimeWarnings);
   const initialGameProfile = gameProfiles[0];
   const initialTemplate = initialGameProfile ? recommendedFirstTestTemplate(initialGameProfile) : undefined;
-  const [form, setForm] = useState<RunFormState>(() => {
-    const initial = initialRunFormState(initialGameProfile, botProfiles, runtimeObservation);
-
-    return longOvernightTestMode
-      ? {
-          ...initial,
-          useGlobalObservationSettings: false,
-          showBotGameplay: false,
-          observationMode: 'background',
-          bringGameToFrontOnAction: false
-        }
-      : initial;
-  });
+  const [form, setForm] = useState<RunFormState>(() =>
+    initialRunFormState(initialGameProfile, botProfiles, runtimeObservation)
+  );
   const [selectedTemplateId, setSelectedTemplateId] = useState<FirstTestTemplateId>(
     initialTemplate?.id ?? 'browser-smoke-test'
   );
@@ -900,7 +887,7 @@ export function NewSessionPage() {
   const selectedProfile = gameProfiles.find((profile) => profile.gameId === form.gameProfileId);
   const adapterType = selectedProfile?.adapter.type ?? 'custom';
   const observationSupport = observationSupportMessage(selectedProfile);
-  const videoSupported = selectedProfile?.adapter.supportsVideo ?? false;
+  const videoSupported = false;
   const canPause = activeSessionId !== null && sessionStatus === 'running';
   const canResume = activeSessionId !== null && sessionStatus === 'paused';
   const canStop =
@@ -1148,7 +1135,7 @@ export function NewSessionPage() {
       : []),
     ...(!successCanBeMeasured && !directiveDraft.manualSuccessConfirmation
       ? [
-          'This success condition cannot be measured reliably from the selected profile. Turn on Manual Success Confirmation if you will check the result yourself.'
+          'This success condition cannot be measured reliably from the selected profile. Turn on Manual Success Confirmation if you will check the result in Live Session.'
         ]
       : [])
   ];
@@ -1343,8 +1330,7 @@ export function NewSessionPage() {
       form,
       selectedTemplate,
       selectedProfile,
-      botProfiles,
-      longOvernightTestMode
+      botProfiles
     );
 
     if (!nextForm) {
@@ -1443,17 +1429,12 @@ export function NewSessionPage() {
   }
 
   async function refreshRuntimeDetails(sessionId: string) {
-    const [status, botStatuses, instanceStatuses, issues, logs, coverage] = await Promise.all([
-      window.gameplaySimulator.simulation.getSessionStatus(sessionId),
-      window.gameplaySimulator.simulation.getBotStatuses(sessionId),
-      window.gameplaySimulator.simulation.getInstanceStatuses(sessionId),
-      window.gameplaySimulator.simulation.getIssues(sessionId),
-      window.gameplaySimulator.simulation.getLogs(sessionId),
-      window.gameplaySimulator.simulation.getCoverage(sessionId)
-    ]);
+    const status = await window.gameplaySimulator.simulation.getSessionStatus(sessionId);
+    const result = await pollRuntimeDetails(window.gameplaySimulator.simulation, sessionId);
 
     applySessionSnapshot(status);
-    applyRuntimeDetails({ botStatuses, instanceStatuses, issues, logs, coverage });
+    applyRuntimeDetails(result.details);
+    setRuntimeWarnings(result.warnings);
   }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -1854,7 +1835,7 @@ export function NewSessionPage() {
               <strong>
                 <FieldLabel
                   label="Selected Issue Required"
-                  helpText="This focused test works best when an issue was selected in the Issues page. Without one, the template uses a clear placeholder issue ID. Apply the template, edit its planned direction, and replace the placeholder with the real issue ID and last actions before starting."
+                  helpText="This focused test works best when an issue was selected in the Issues page. Without one, the template uses an obvious editable issue ID. Apply the template, edit its planned direction, and replace the starting value with the real issue ID and last actions before starting."
                 />
               </strong>
               <span>No issue is selected. The generated direction will use choose-an-issue-id until you edit it.</span>
@@ -1924,8 +1905,7 @@ export function NewSessionPage() {
                       current,
                       nextTemplate,
                       nextProfile,
-                      botProfiles,
-                      longOvernightTestMode
+                      botProfiles
                     ) ?? {
                       ...current,
                       gameProfileId: event.target.value,
@@ -2042,12 +2022,6 @@ export function NewSessionPage() {
               onChange={(event) => update('saveScreenshots', event.target.checked)}
             />
             <ToggleInput
-              label="Save video"
-              checked={videoSupported && form.saveVideo}
-              disabled={!videoSupported}
-              onChange={(event) => update('saveVideo', event.target.checked)}
-            />
-            <ToggleInput
               label="Action Timeline"
               checked={form.saveActionTimeline}
               onChange={(event) => update('saveActionTimeline', event.target.checked)}
@@ -2066,7 +2040,7 @@ export function NewSessionPage() {
           </div>
           <div className="wizard-test-card">
             <div>
-              <FieldLabel label="Test Startup Flow" />
+              <FieldLabel label="Check Startup Flow" />
               <p className="form-hint">
                 {selectedStartupFlow
                   ? `Checks "${selectedStartupFlow.name}" before the real session uses it.`
@@ -2080,12 +2054,12 @@ export function NewSessionPage() {
               onClick={testStartupFlow}
             >
               <Play size={18} aria-hidden="true" />
-              <span>Test Startup Flow</span>
+              <span>Check Startup Flow</span>
             </button>
           </div>
           {startupFlowTestResult ? (
             <div className="inline-notice inline-notice--ready">
-              <FieldLabel label="Startup Flow Test Result" />
+              <FieldLabel label="Startup Flow Check Result" />
               <span>{startupFlowTestResult}</span>
             </div>
           ) : null}
@@ -2659,7 +2633,7 @@ export function NewSessionPage() {
               name="directiveSuccessCondition"
               className="field--wide"
               label="Success Condition"
-              helpText="This describes what must happen for the direction to count as successful. For example, the inventory opens and three item actions succeed. Instrumented state can measure some conditions automatically. If the adapter cannot see the result, use Manual Success Confirmation. Beginners should write one clear result."
+              helpText="This describes what must happen for the direction to count as successful. For example, the inventory opens and three item actions succeed. Instrumented state can measure some conditions automatically. If the adapter cannot see the result, use Manual Success Confirmation in Live Session. Beginners should write one clear result."
               rows={2}
               value={directiveDraft.successCondition}
               onChange={(event) => updateDirectiveDraft('successCondition', event.target.value)}
@@ -2696,7 +2670,7 @@ export function NewSessionPage() {
           <div className="directive-toggle-grid">
             <ToggleInput
               label="Repeat Until Successful"
-              helpText="This asks the bot to keep trying matching valid actions until success or a limit is reached. It can increase test time and action count, but it does not create extra bots or game windows. If the game cannot report success, use manual confirmation. Beginners should leave this off unless testing a repeatable action."
+              helpText="This asks the bot to keep trying matching valid actions until success or a limit is reached. It can increase test time and action count, but it does not create extra bots or game windows. If the game cannot report success, use manual confirmation from Live Session. Beginners should leave this off unless testing a repeatable action."
               checked={directiveDraft.repeatUntilSuccess}
               onChange={(event) =>
                 updateDirectiveDraft('repeatUntilSuccess', event.target.checked)
@@ -2704,7 +2678,7 @@ export function NewSessionPage() {
             />
             <ToggleInput
               label="Manual Success Confirmation"
-              helpText="This means you will decide whether the direction succeeded when the adapter cannot measure the result. It is useful for visual changes or desktop games with weak state awareness. For example, confirm that a button changed the screen. If you leave it off, the direction may remain incomplete. Beginners should turn it on when a warning says success cannot be measured."
+              helpText="This adds a Confirm Direction Succeeded command to Live Session when the adapter cannot measure the result. Use it after you see the expected result in the game, screenshot, or logs. For example, confirm that a button changed the screen. A wrong confirmation makes the report say the test passed when it did not. Beginners should turn it on only when a warning says success cannot be measured."
               checked={directiveDraft.manualSuccessConfirmation}
               onChange={(event) =>
                 updateDirectiveDraft('manualSuccessConfirmation', event.target.checked)
@@ -3142,7 +3116,7 @@ export function NewSessionPage() {
         <div className="viability-panel__header">
           <div>
             <p className="eyebrow">Backend Runtime</p>
-            <h2>Mock session state</h2>
+            <h2>Session runtime state</h2>
           </div>
           <span className="status-pill">{sessionStatus}</span>
         </div>

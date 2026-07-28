@@ -85,12 +85,6 @@ export function ReportsPage() {
     setLoadMessage(result.message);
   }
 
-  async function openLogs(sessionId: string) {
-    const result = await window.gameplaySimulator.simulation.openLogs(sessionId);
-    setLoadState(result.opened ? 'ready' : 'error');
-    setLoadMessage(result.message);
-  }
-
   async function openSessionFolder(sessionId: string) {
     const result = await window.gameplaySimulator.simulation.openSessionFolder(sessionId);
     setLoadState(result.opened ? 'ready' : 'error');
@@ -112,6 +106,11 @@ export function ReportsPage() {
   function viewIssues(sessionId: string) {
     setReviewSessionId(sessionId);
     navigate('issues');
+  }
+
+  function viewLogs(sessionId: string) {
+    setReviewSessionId(sessionId);
+    navigate('logs');
   }
 
   function exportIssues(sessionId: string) {
@@ -308,7 +307,7 @@ export function ReportsPage() {
             onChange={(event) => setKeepSummaries(event.target.checked)}
           />
           <ToggleInput
-            label="Archive session bundle"
+            label="Save bundle file list"
             checked={archiveSessionBundle}
             onChange={(event) => setArchiveSessionBundle(event.target.checked)}
           />
@@ -361,7 +360,7 @@ export function ReportsPage() {
                 <button className="secondary-button" type="button" onClick={() => viewIssues(session.sessionId)}>
                   View issues
                 </button>
-                <button className="secondary-button" type="button" onClick={() => void openLogs(session.sessionId)}>
+                <button className="secondary-button" type="button" onClick={() => viewLogs(session.sessionId)}>
                   View logs
                 </button>
                 <button className="secondary-button" type="button" onClick={() => exportIssues(session.sessionId)}>

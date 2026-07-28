@@ -1,17 +1,19 @@
 import type { BotPoolConfig, BotProfile, GameProfile, SimulationRunConfig } from '@core/types';
 import { defaultBotProfiles } from '@core/bot/defaultBotProfiles';
 import {
-  AdvancedIntelligenceConfigSchema,
-  defaultAdvancedIntelligenceConfig,
-  type AdvancedIntelligenceConfig
-} from '@core/config/advancedIntelligenceConfig';
-import {
   defaultRuntimeObservationConfig,
   RuntimeObservationConfigSchema,
   type RuntimeObservationConfig
 } from '@core/config/runtimeObservationConfig';
+import type { WorkspaceData } from '@core/config/workspaceData';
 import { create } from 'zustand';
 import type { PageId } from '../routes';
+import {
+  mergeBotProfiles,
+  mergeGameProfiles,
+  RUNTIME_OBSERVATION_STORAGE_KEY,
+  requestWorkspacePersistence
+} from './workspacePersistence';
 
 interface ConfigState {
   currentPage: PageId;
@@ -22,10 +24,11 @@ interface ConfigState {
   botProfiles: BotProfile[];
   runConfigs: SimulationRunConfig[];
   lastValidatedRunConfig: SimulationRunConfig | null;
-  advancedIntelligence: AdvancedIntelligenceConfig;
   runtimeObservation: RuntimeObservationConfig;
   pendingSessionBotProfileId: string | null;
   pendingSessionBotProfileIds: string[];
+  workspaceHydrated: boolean;
+  workspaceWarning: string | null;
   navigate: (page: PageId) => void;
   openGameProfileEditor: (gameId?: string) => void;
   openBotProfileEditor: (profileId?: string) => void;
@@ -37,13 +40,14 @@ interface ConfigState {
   addBotProfilesToSession: (profileIds: string[]) => void;
   clearPendingSessionBotProfile: () => void;
   clearPendingSessionBotProfiles: () => void;
-  updateAdvancedIntelligence: (patch: Partial<AdvancedIntelligenceConfig>) => void;
   updateRuntimeObservation: (patch: Partial<RuntimeObservationConfig>) => void;
+  hydrateWorkspace: (data: WorkspaceData, warning?: string) => void;
+  setWorkspaceWarning: (warning: string | null) => void;
 }
 
 type PreferenceStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
-export const RUNTIME_OBSERVATION_STORAGE_KEY = 'gameplay-simulator.runtime-observation.v1';
+export { RUNTIME_OBSERVATION_STORAGE_KEY };
 
 function browserPreferenceStorage(): PreferenceStorage | undefined {
   if (typeof window === 'undefined') {
@@ -93,7 +97,7 @@ export function saveRuntimeObservationPreference(
   }
 }
 
-const seededGameProfiles: GameProfile[] = [
+export const builtInGameProfiles: GameProfile[] = [
   {
     gameId: 'sample-browser-game',
     gameName: 'Sample Browser Game',
@@ -191,7 +195,7 @@ const seededGameProfiles: GameProfile[] = [
       collectibles: ['Collectible'],
       achievements: ['First run'],
       mechanics: ['movement', 'menu confirmation'],
-      notes: ['Placeholder profile for local or permitted QA testing.']
+      notes: ['Sample profile for local or permitted QA testing.']
     }
   }
 ];
@@ -223,14 +227,15 @@ export const useConfigStore = create<ConfigState>((set) => ({
   editingGameId: null,
   editingBotProfileId: null,
   cloningBotProfileId: null,
-  gameProfiles: seededGameProfiles,
+  gameProfiles: builtInGameProfiles,
   botProfiles: seededBotProfiles,
   runConfigs: [],
   lastValidatedRunConfig: null,
-  advancedIntelligence: defaultAdvancedIntelligenceConfig,
-  runtimeObservation: loadRuntimeObservationPreference(),
+  runtimeObservation: defaultRuntimeObservationConfig,
   pendingSessionBotProfileId: null,
   pendingSessionBotProfileIds: [],
+  workspaceHydrated: false,
+  workspaceWarning: null,
   navigate: (currentPage) => set({ currentPage }),
   openGameProfileEditor: (gameId) =>
     set({ currentPage: 'gameProfileEditor', editingGameId: gameId ?? null }),
@@ -246,21 +251,24 @@ export const useConfigStore = create<ConfigState>((set) => ({
       editingBotProfileId: null,
       cloningBotProfileId: profileId
     }),
-  saveGameProfile: (profile) =>
+  saveGameProfile: (profile) => {
     set((state) => {
-      const existingIndex = state.gameProfiles.findIndex((item) => item.gameId === profile.gameId);
+      const existingId = state.editingGameId ?? profile.gameId;
+      const existingIndex = state.gameProfiles.findIndex((item) => item.gameId === existingId);
       const gameProfiles =
         existingIndex === -1
           ? [...state.gameProfiles, profile]
-          : state.gameProfiles.map((item) => (item.gameId === profile.gameId ? profile : item));
+          : state.gameProfiles.map((item, index) => (index === existingIndex ? profile : item));
 
       return {
         gameProfiles,
         currentPage: 'gameProfiles',
         editingGameId: null
       };
-    }),
-  saveBotProfile: (profile) =>
+    });
+    requestWorkspacePersistence();
+  },
+  saveBotProfile: (profile) => {
     set((state) => {
       const existingIndex = state.botProfiles.findIndex(
         (item) => item.profileId === state.editingBotProfileId
@@ -275,12 +283,16 @@ export const useConfigStore = create<ConfigState>((set) => ({
         editingBotProfileId: null,
         cloningBotProfileId: null
       };
-    }),
-  saveRunConfig: (config) =>
+    });
+    requestWorkspacePersistence();
+  },
+  saveRunConfig: (config) => {
     set((state) => ({
       runConfigs: [config, ...state.runConfigs],
       lastValidatedRunConfig: config
-    })),
+    }));
+    requestWorkspacePersistence();
+  },
   addBotProfileToSession: (profileId) =>
     set({
       currentPage: 'newSession',
@@ -295,13 +307,6 @@ export const useConfigStore = create<ConfigState>((set) => ({
     }),
   clearPendingSessionBotProfile: () => set({ pendingSessionBotProfileId: null }),
   clearPendingSessionBotProfiles: () => set({ pendingSessionBotProfileIds: [] }),
-  updateAdvancedIntelligence: (patch) =>
-    set((state) => ({
-      advancedIntelligence: AdvancedIntelligenceConfigSchema.parse({
-        ...state.advancedIntelligence,
-        ...patch
-      })
-    })),
   updateRuntimeObservation: (patch) =>
     set((state) => {
       const runtimeObservation = RuntimeObservationConfigSchema.parse({
@@ -310,6 +315,18 @@ export const useConfigStore = create<ConfigState>((set) => ({
       });
 
       saveRuntimeObservationPreference(runtimeObservation);
+      requestWorkspacePersistence();
       return { runtimeObservation };
-    })
+    }),
+  hydrateWorkspace: (data, warning) =>
+    set({
+      gameProfiles: mergeGameProfiles(builtInGameProfiles, data),
+      botProfiles: mergeBotProfiles(data),
+      runConfigs: data.runConfigs,
+      lastValidatedRunConfig: data.lastValidatedRunConfig,
+      runtimeObservation: data.runtimeObservation,
+      workspaceHydrated: true,
+      workspaceWarning: warning ?? null
+    }),
+  setWorkspaceWarning: (workspaceWarning) => set({ workspaceWarning })
 }));

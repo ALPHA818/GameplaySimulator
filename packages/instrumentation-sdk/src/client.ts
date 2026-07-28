@@ -163,5 +163,5 @@ export function createInstrumentationClient(options: {
     });
   }
 
-  throw new Error(`${transport} instrumentation client is not implemented yet.`);
+  throw new Error(`${transport} instrumentation transport is unavailable in this build.`);
 }

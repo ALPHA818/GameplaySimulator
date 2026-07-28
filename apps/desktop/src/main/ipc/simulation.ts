@@ -1,135 +1,175 @@
 import { ipcMain } from 'electron';
 import { z } from 'zod';
-import type { SimulationService } from '../services/simulationService';
+import {
+  DesktopControlTestRequestSchema,
+  GameProfileTestRequestSchema,
+  GitHubIssueExportRequestSchema,
+  GitHubIssuePostRequestSchema,
+  GuideBotDirectiveRequestSchema,
+  ReorderBotDirectivesRequestSchema,
+  SessionCleanupOptionsSchema,
+  SimulationSessionRequestSchema,
+  type SimulationService
+} from '../services/simulationService';
+import {
+  IpcIdentifierSchema,
+  IpcPathSchema,
+  OptionalIpcIdentifierSchema
+} from './validation';
 
-const SessionIdSchema = z.string().min(1);
 const ObservationDirectionSchema = z.enum(['next', 'previous']);
-const SessionCleanupOptionsSchema = z.object({
-  sessionId: SessionIdSchema,
-  deleteRawStateLogs: z.boolean().default(false),
-  keepScreenshots: z.boolean().default(true),
-  keepSummaries: z.boolean().default(true),
-  archiveSessionBundle: z.boolean().default(false)
-});
+const ValidationPayloadBoundarySchema = z
+  .object({
+    runConfig: z.unknown(),
+    gameProfile: z.unknown(),
+    botProfiles: z.unknown().optional(),
+    runtimeObservation: z.unknown().optional()
+  })
+  .passthrough();
 
 export function registerSimulationIpc(service: SimulationService): void {
-  ipcMain.handle('simulation:createSession', (_event, payload: unknown) => service.createSession(payload));
+  ipcMain.handle('simulation:createSession', (_event, payload: unknown) =>
+    service.createSession(SimulationSessionRequestSchema.parse(payload))
+  );
   ipcMain.handle('simulation:listSessions', () => service.listSessions());
   ipcMain.handle('simulation:reloadSessions', () => service.reloadPersistedSessions());
   ipcMain.handle('simulation:validateSessionConfig', (_event, payload: unknown) =>
-    service.validateSessionConfig(payload)
+    service.validateSessionConfig(ValidationPayloadBoundarySchema.parse(payload))
   );
-  ipcMain.handle('simulation:estimateViability', (_event, payload: unknown) => service.estimateViability(payload));
+  ipcMain.handle('simulation:estimateViability', (_event, payload: unknown) =>
+    service.estimateViability(SimulationSessionRequestSchema.parse(payload))
+  );
   ipcMain.handle('simulation:getDesktopAdapterDependencies', () => service.getDesktopAdapterDependencies());
-  ipcMain.handle('simulation:testGameProfile', (_event, payload: unknown) => service.testGameProfile(payload));
-  ipcMain.handle('simulation:testDesktopControl', (_event, payload: unknown) => service.testDesktopControl(payload));
+  ipcMain.handle('simulation:testGameProfile', (_event, payload: unknown) =>
+    service.testGameProfile(GameProfileTestRequestSchema.parse(payload))
+  );
+  ipcMain.handle('simulation:testDesktopControl', (_event, payload: unknown) =>
+    service.testDesktopControl(DesktopControlTestRequestSchema.parse(payload))
+  );
   ipcMain.handle('simulation:startSession', (_event, sessionId: unknown) =>
-    service.startSession(SessionIdSchema.parse(sessionId))
+    service.startSession(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:stopSession', (_event, sessionId: unknown) =>
-    service.stopSession(SessionIdSchema.parse(sessionId))
+    service.stopSession(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:pauseSession', (_event, sessionId: unknown) =>
-    service.pauseSession(SessionIdSchema.parse(sessionId))
+    service.pauseSession(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:resumeSession', (_event, sessionId: unknown) =>
-    service.resumeSession(SessionIdSchema.parse(sessionId))
+    service.resumeSession(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:getSessionStatus', (_event, sessionId?: unknown) =>
-    service.getSessionStatus(typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined)
+    service.getSessionStatus(OptionalIpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:getBotStatuses', (_event, sessionId: unknown) =>
-    service.getBotStatuses(SessionIdSchema.parse(sessionId))
+    service.getBotStatuses(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:getDirectiveState', (_event, sessionId: unknown) =>
-    service.getDirectiveState(SessionIdSchema.parse(sessionId))
+    service.getDirectiveState(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:getBotAvailableActions', (_event, sessionId: unknown, botId: unknown) =>
-    service.getBotAvailableActions(SessionIdSchema.parse(sessionId), SessionIdSchema.parse(botId))
+    service.getBotAvailableActions(
+      IpcIdentifierSchema.parse(sessionId),
+      IpcIdentifierSchema.parse(botId)
+    )
   );
-  ipcMain.handle('simulation:guideBot', (_event, payload: unknown) => service.guideBot(payload));
+  ipcMain.handle('simulation:guideBot', (_event, payload: unknown) =>
+    service.guideBot(GuideBotDirectiveRequestSchema.parse(payload))
+  );
   ipcMain.handle(
     'simulation:cancelBotDirective',
     (_event, sessionId: unknown, botId: unknown, directiveId: unknown) =>
       service.cancelBotDirective(
-        SessionIdSchema.parse(sessionId),
-        SessionIdSchema.parse(botId),
-        SessionIdSchema.parse(directiveId)
+        IpcIdentifierSchema.parse(sessionId),
+        IpcIdentifierSchema.parse(botId),
+        IpcIdentifierSchema.parse(directiveId)
+      )
+  );
+  ipcMain.handle(
+    'simulation:confirmBotDirectiveSuccess',
+    (_event, sessionId: unknown, botId: unknown, directiveId: unknown) =>
+      service.confirmBotDirectiveSuccess(
+        IpcIdentifierSchema.parse(sessionId),
+        IpcIdentifierSchema.parse(botId),
+        IpcIdentifierSchema.parse(directiveId)
       )
   );
   ipcMain.handle('simulation:reorderBotDirectives', (_event, payload: unknown) =>
-    service.reorderBotDirectives(payload)
+    service.reorderBotDirectives(ReorderBotDirectivesRequestSchema.parse(payload))
   );
   ipcMain.handle('simulation:getLiveObservationState', (_event, sessionId: unknown) =>
-    service.getLiveObservationState(SessionIdSchema.parse(sessionId))
+    service.getLiveObservationState(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:followBot', (_event, sessionId: unknown, botId: unknown) =>
-    service.followBot(SessionIdSchema.parse(sessionId), SessionIdSchema.parse(botId))
+    service.followBot(IpcIdentifierSchema.parse(sessionId), IpcIdentifierSchema.parse(botId))
   );
   ipcMain.handle('simulation:stopFollowingBot', (_event, sessionId: unknown) =>
-    service.stopFollowingBot(SessionIdSchema.parse(sessionId))
+    service.stopFollowingBot(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:showAdjacentBot', (_event, sessionId: unknown, direction: unknown) =>
     service.showAdjacentBot(
-      SessionIdSchema.parse(sessionId),
+      IpcIdentifierSchema.parse(sessionId),
       ObservationDirectionSchema.parse(direction)
     )
   );
   ipcMain.handle('simulation:focusObservedGameWindow', (_event, sessionId: unknown) =>
-    service.focusObservedGameWindow(SessionIdSchema.parse(sessionId))
+    service.focusObservedGameWindow(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:stopBot', (_event, sessionId: unknown, botId: unknown) =>
-    service.stopBot(SessionIdSchema.parse(sessionId), SessionIdSchema.parse(botId))
+    service.stopBot(IpcIdentifierSchema.parse(sessionId), IpcIdentifierSchema.parse(botId))
   );
   ipcMain.handle('simulation:stopBotPool', (_event, sessionId: unknown, profileId: unknown) =>
-    service.stopBotPool(SessionIdSchema.parse(sessionId), SessionIdSchema.parse(profileId))
+    service.stopBotPool(IpcIdentifierSchema.parse(sessionId), IpcIdentifierSchema.parse(profileId))
   );
   ipcMain.handle('simulation:getInstanceStatuses', (_event, sessionId: unknown) =>
-    service.getInstanceStatuses(SessionIdSchema.parse(sessionId))
+    service.getInstanceStatuses(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:getIssues', (_event, sessionId: unknown) =>
-    service.getIssues(SessionIdSchema.parse(sessionId))
+    service.getIssues(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:getLogs', (_event, sessionId: unknown) =>
-    service.getLogs(SessionIdSchema.parse(sessionId))
+    service.getLogs(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:getCoverage', (_event, sessionId: unknown) =>
-    service.getCoverage(SessionIdSchema.parse(sessionId))
+    service.getCoverage(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:getStructuredLogs', (_event, sessionId: unknown) =>
-    service.getStructuredLogs(SessionIdSchema.parse(sessionId))
+    service.getStructuredLogs(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:openEvidence', (_event, sessionId: unknown, evidencePath: unknown) =>
-    service.openEvidence(SessionIdSchema.parse(sessionId), SessionIdSchema.parse(evidencePath))
+    service.openEvidence(IpcIdentifierSchema.parse(sessionId), IpcPathSchema.parse(evidencePath))
   );
   ipcMain.handle('simulation:openReport', (_event, sessionId: unknown) =>
-    service.openReport(SessionIdSchema.parse(sessionId))
+    service.openReport(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:openLogs', (_event, sessionId: unknown) =>
-    service.openLogs(SessionIdSchema.parse(sessionId))
+    service.openLogs(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:openSessionFolder', (_event, sessionId: unknown) =>
-    service.openSessionFolder(SessionIdSchema.parse(sessionId))
+    service.openSessionFolder(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:openIssueFolder', (_event, sessionId: unknown) =>
-    service.openIssueFolder(SessionIdSchema.parse(sessionId))
+    service.openIssueFolder(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:openScreenshotsFolder', (_event, sessionId: unknown) =>
-    service.openScreenshotsFolder(SessionIdSchema.parse(sessionId))
+    service.openScreenshotsFolder(IpcIdentifierSchema.parse(sessionId))
   );
   ipcMain.handle('simulation:cleanupSessionBundle', (_event, payload: unknown) =>
     service.cleanupSessionBundle(SessionCleanupOptionsSchema.parse(payload))
   );
   ipcMain.handle('simulation:compareSessions', (_event, oldSessionId: unknown, newSessionId: unknown) =>
-    service.compareSessions(SessionIdSchema.parse(oldSessionId), SessionIdSchema.parse(newSessionId))
+    service.compareSessions(
+      IpcIdentifierSchema.parse(oldSessionId),
+      IpcIdentifierSchema.parse(newSessionId)
+    )
   );
   ipcMain.handle('simulation:previewGitHubIssueExport', (_event, payload: unknown) =>
-    service.previewGitHubIssueExport(payload)
+    service.previewGitHubIssueExport(GitHubIssueExportRequestSchema.parse(payload))
   );
   ipcMain.handle('simulation:exportGitHubIssueMarkdown', (_event, payload: unknown) =>
-    service.exportGitHubIssueMarkdown(payload)
+    service.exportGitHubIssueMarkdown(GitHubIssueExportRequestSchema.parse(payload))
   );
   ipcMain.handle('simulation:postGitHubIssues', (_event, payload: unknown) =>
-    service.postGitHubIssues(payload)
+    service.postGitHubIssues(GitHubIssuePostRequestSchema.parse(payload))
   );
 }

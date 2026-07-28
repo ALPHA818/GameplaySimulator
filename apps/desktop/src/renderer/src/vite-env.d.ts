@@ -40,6 +40,11 @@ import type {
 } from '../../main/services/simulationService';
 import type { DesktopAdapterDependencyReport } from '../../../../../packages/adapters/src';
 import type { RuntimeObservationConfig } from '@core/config/runtimeObservationConfig';
+import type {
+  WorkspaceData,
+  WorkspaceDataPatch,
+  WorkspaceLoadResult
+} from '@core/config/workspaceData';
 import type { BotDirectiveManagerSnapshot } from '@core/bot/BotDirectiveManager';
 import type { AvailableGameActionLike } from '@core/bot/ActionPlanner';
 
@@ -55,12 +60,21 @@ declare global {
     gameplaySimulator: {
       app: {
         getVersion: () => Promise<string>;
+        openApplicationLogs: () => Promise<{ opened: boolean; message: string }>;
+        reportRendererError: (details: Record<string, unknown>) => Promise<void>;
       };
       sessions: {
         getStatus: () => Promise<SimulationSessionStatusSnapshot>;
       };
       resources: {
         estimateViability: (payload: SimulationSessionPayload) => Promise<RuntimeViabilityReport>;
+      };
+      workspace: {
+        load: () => Promise<WorkspaceLoadResult>;
+        save: (data: WorkspaceData) => Promise<WorkspaceData>;
+        update: (patch: WorkspaceDataPatch) => Promise<WorkspaceData>;
+        createBackup: () => Promise<string | null>;
+        recoverFromBackup: () => Promise<WorkspaceData | null>;
       };
       simulation: {
         createSession: (payload: SimulationSessionPayload) => Promise<SimulationSessionCreateResult>;
@@ -81,6 +95,7 @@ declare global {
         getBotAvailableActions: (sessionId: string, botId: string) => Promise<AvailableGameActionLike[]>;
         guideBot: (payload: GuideBotDirectiveRequest) => Promise<LiveDirectiveMutationResult>;
         cancelBotDirective: (sessionId: string, botId: string, directiveId: string) => Promise<LiveDirectiveMutationResult>;
+        confirmBotDirectiveSuccess: (sessionId: string, botId: string, directiveId: string) => Promise<LiveDirectiveMutationResult>;
         reorderBotDirectives: (payload: ReorderBotDirectivesRequest) => Promise<LiveDirectiveMutationResult>;
         getLiveObservationState: (sessionId: string) => Promise<LiveObservationState>;
         followBot: (sessionId: string, botId: string) => Promise<LiveObservationState>;

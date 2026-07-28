@@ -407,15 +407,13 @@ export function BotProfileEditorPage() {
                 update('profileId', slug(event.target.value));
               }}
             />
-            <SelectInput
-              label="Profile Group"
-              helpText="This decides which Bot Profiles section contains the profile. User-made specialists are kept in Custom Bot Profiles so they do not get mixed with built-in bots. The simulator uses Custom for every profile created here. Beginners should leave this on Custom."
-              value={form.profileGroup}
-              disabled
-              onChange={() => undefined}
-            >
-              <option value="custom">Custom</option>
-            </SelectInput>
+            <div className="field">
+              <FieldLabel
+                label="Profile Group"
+                helpText="This decides which Bot Profiles section contains the profile. User-made specialists are kept in Custom Bot Profiles so they do not get mixed with built-in bots. The simulator uses Custom for every profile created here. Beginners do not need to change it."
+              />
+              <strong>Custom</strong>
+            </div>
             <SelectInput
               label="Specialization Category"
               helpText="This groups the custom bot by the system it tests. For example, a Farming System Tester fits Gameplay Systems, while a Save Migration bot fits Saves And Persistence. The category helps users filter profiles. If it is wrong, the bot still works but is harder to find."

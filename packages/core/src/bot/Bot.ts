@@ -366,6 +366,15 @@ export class Bot {
         );
         await this.emitStatus();
 
+        const directiveWaitAfterMs =
+          typeof action.payload.directiveWaitAfterMs === 'number' &&
+          Number.isFinite(action.payload.directiveWaitAfterMs)
+            ? Math.max(0, action.payload.directiveWaitAfterMs)
+            : 0;
+        if (directiveWaitAfterMs > 0) {
+          await this.sleep(directiveWaitAfterMs);
+        }
+
         if (this.shouldCompleteUiJourney(action, result)) {
           await this.setStatus('completed', `UI flow completed after ${this.memory.actionCount} action(s).`);
           await this.log('info', `UI journey completed after action ${action.type}.`);

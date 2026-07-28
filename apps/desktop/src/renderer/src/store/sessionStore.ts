@@ -7,6 +7,7 @@ import type {
   SimulationSessionStatusSnapshot
 } from '../../../main/services/simulationService';
 import { create } from 'zustand';
+import { requestWorkspacePersistence } from './workspacePersistence';
 
 type SessionRuntimeStatus =
   | 'idle'
@@ -29,6 +30,7 @@ interface SessionState {
   logs: LogEntry[];
   coverage: ContentCoverageSummary | null;
   liveObservation: LiveObservationState | null;
+  runtimeWarnings: string[];
   reviewSessionId: string | null;
   reviewIssueId: string | null;
   reviewedIssueIds: string[];
@@ -45,8 +47,10 @@ interface SessionState {
     coverage?: ContentCoverageSummary;
     liveObservation?: LiveObservationState;
   }) => void;
+  setRuntimeWarnings: (warnings: string[]) => void;
   markIssueReviewed: (issueId: string) => void;
   markIssueFalsePositive: (issueId: string) => void;
+  hydrateIssueReviewState: (reviewedIssueIds: string[], falsePositiveIssueIds: string[]) => void;
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -60,6 +64,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   logs: [],
   coverage: null,
   liveObservation: null,
+  runtimeWarnings: [],
   reviewSessionId: null,
   reviewIssueId: null,
   reviewedIssueIds: [],
@@ -83,13 +88,16 @@ export const useSessionStore = create<SessionState>((set) => ({
       coverage: details.coverage ?? state.coverage,
       liveObservation: details.liveObservation ?? state.liveObservation
     })),
-  markIssueReviewed: (issueId) =>
+  setRuntimeWarnings: (runtimeWarnings) => set({ runtimeWarnings }),
+  markIssueReviewed: (issueId) => {
     set((state) => ({
       reviewedIssueIds: state.reviewedIssueIds.includes(issueId)
         ? state.reviewedIssueIds
         : [...state.reviewedIssueIds, issueId]
-    })),
-  markIssueFalsePositive: (issueId) =>
+    }));
+    requestWorkspacePersistence();
+  },
+  markIssueFalsePositive: (issueId) => {
     set((state) => ({
       falsePositiveIssueIds: state.falsePositiveIssueIds.includes(issueId)
         ? state.falsePositiveIssueIds
@@ -97,5 +105,12 @@ export const useSessionStore = create<SessionState>((set) => ({
       reviewedIssueIds: state.reviewedIssueIds.includes(issueId)
         ? state.reviewedIssueIds
         : [...state.reviewedIssueIds, issueId]
-    }))
+    }));
+    requestWorkspacePersistence();
+  },
+  hydrateIssueReviewState: (reviewedIssueIds, falsePositiveIssueIds) =>
+    set({
+      reviewedIssueIds: [...new Set(reviewedIssueIds)],
+      falsePositiveIssueIds: [...new Set(falsePositiveIssueIds)]
+    })
 }));

@@ -757,6 +757,7 @@ function buildDirectiveAction(input: {
       directiveMode: input.directive.directiveMode,
       directivePriority: input.directive.priority,
       directiveStepId: input.step?.stepId,
+      directiveWaitAfterMs: input.step?.waitAfterMs,
       directiveReason: input.directiveReason,
       matchedKeywords: input.matchedKeywords,
       expectedCondition:

@@ -49,8 +49,8 @@ describe('Settings responsive content layout', () => {
     expect(html).toContain('page-stack settings-page');
     expect(html).toContain('Real Runtime Readiness');
     expect(html).toContain('Adapter-first');
-    expect(html).toContain('Advanced Intelligence');
-    expect(html).toContain('0 enabled');
+    expect(html).toContain('Live Bot Observation');
+    expect(html).not.toContain('Advanced Intelligence');
     expect(headingStyles).toContain('display: flex');
     expect(headingStyles).toContain('flex-wrap: wrap');
     expect(headingStyles).toContain('align-items: flex-start');
@@ -62,10 +62,10 @@ describe('Settings responsive content layout', () => {
     expect(pillStyles).toContain('white-space: normal');
   });
 
-  it('uses auto-fit metric cards and toggle columns that fit their container', () => {
+  it('uses auto-fit metric cards and observation toggle columns that fit their container', () => {
     const html = renderToStaticMarkup(<SettingsPage />);
 
-    expect(occurrences(html, 'class="metric-card"')).toBe(4);
+    expect(occurrences(html, 'class="metric-card"')).toBe(7);
     expect(cssBlock('.settings-page .metric-grid--session')).toContain(
       'repeat(auto-fit, minmax(min(100%, 190px), 1fr))'
     );
@@ -74,30 +74,27 @@ describe('Settings responsive content layout', () => {
     );
   });
 
-  it('keeps long toggle labels, checkboxes, and help marks together', () => {
+  it('keeps observation toggle labels, checkboxes, and help marks together', () => {
     const html = renderToStaticMarkup(<SettingsPage />);
     const toggleLabelStyles = cssBlock('.settings-page .toggle-row__label');
 
-    expect(html).toContain('Long Overnight Test Mode');
-    expect(html).toContain('Engine-Specific Plugins');
-    expect(html).toContain('Help for Long Overnight Test Mode');
+    expect(html).toContain('Bring Game To Front On Action');
+    expect(html).toContain('Show Action Information');
+    expect(html).toContain('Help for Bring Game To Front On Action');
     expect(toggleLabelStyles).toContain('min-width: 0');
     expect(toggleLabelStyles).toContain('flex: 1 1 auto');
     expect(cssBlock('.settings-page .toggle-row input')).toContain('flex: 0 0 auto');
     expect(globalCss).toContain('.settings-page .toggle-row__label .field-label__text');
     expect(globalCss).toContain('white-space: normal');
     expect(globalCss).toContain('overflow-wrap: anywhere');
-    expect(html).toMatch(/Long Overnight Test Mode<\/label><span[^>]*class="field-help"/);
+    expect(html).toMatch(/Bring Game To Front On Action<\/label><span[^>]*class="field-help"/);
   });
 
   it('keeps warning notices constrained by their Settings cards', () => {
     const html = renderToStaticMarkup(<SettingsPage />);
-    const observationSection = html.match(
-      /<section class="form-section observation-settings-section">([\s\S]*?)<section class="form-section">/
-    )?.[1] ?? '';
 
-    expect(observationSection).toContain('observation-warning-list');
-    expect(observationSection).toContain('Observation Resource Impact');
+    expect(html).toContain('observation-warning-list');
+    expect(html).toContain('Observation Resource Impact');
     expect(cssBlock('.settings-page .metric-card,\n.settings-page .toggle-row,\n.settings-page .notice-list')).toContain(
       'max-width: 100%'
     );

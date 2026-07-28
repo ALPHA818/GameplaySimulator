@@ -500,6 +500,7 @@ export async function startInstrumentedTestServer(
     endpoint,
     stop: () =>
       new Promise<void>((resolve, reject) => {
+        server.closeAllConnections?.();
         server.close((error) => {
           if (error) {
             reject(error);

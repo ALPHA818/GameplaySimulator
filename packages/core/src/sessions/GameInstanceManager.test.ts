@@ -213,6 +213,26 @@ describe('GameInstanceManager', () => {
     expect(plan.instances[0].status.saveIsolationMode).toBe('temp-directory');
   });
 
+  it('uses the runtime session directory for default isolated saves when provided', () => {
+    const defaultSaveRoot = resolve('/tmp/gameplay-simulator-user-data/runs/session-live/saves');
+    const plan = planGameInstances({
+      runConfig,
+      gameProfile,
+      launchPlans: launchPlans(1),
+      adapterCapabilities: {
+        supportsMultipleInstances: true,
+        supportsMultipleBotsPerInstance: true,
+        supportsSaveIsolation: true
+      },
+      defaultSaveRoot,
+      now: '2026-07-02T20:00:00.000Z'
+    });
+
+    expect(plan.instances[0].config.isolatedSaveDirectory).toBe(
+      join(defaultSaveRoot, 'game-instance-001')
+    );
+  });
+
   it('supports one active bot per instance when the adapter requires it', () => {
     const plan = planGameInstances({
       runConfig: { ...runConfig, perGameInstanceBotLimit: 4 },

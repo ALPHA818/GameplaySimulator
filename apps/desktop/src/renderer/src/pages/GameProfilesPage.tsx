@@ -37,10 +37,7 @@ export function GameProfilesPage() {
             <span>{profile.engine.type}</span>
             <span>{profile.adapter.type}</span>
             <span>{profile.adapter.supportsMultipleInstances ? 'Multiple' : 'Single'}</span>
-            <span>
-              {profile.adapter.supportsScreenshots ? 'Screenshots' : 'No screenshots'}
-              {profile.adapter.supportsVideo ? ' + video' : ''}
-            </span>
+            <span>{profile.adapter.supportsScreenshots ? 'Screenshots' : 'No screenshots'}</span>
             <button
               className="icon-text-button"
               type="button"

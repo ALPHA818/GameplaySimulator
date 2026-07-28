@@ -299,7 +299,9 @@ beforeEach(() => {
     logs: [],
     coverage: null,
     reviewedIssueIds: [],
-    falsePositiveIssueIds: []
+    falsePositiveIssueIds: [],
+    reviewSessionId: null,
+    reviewIssueId: null
   });
   useConfigStore.setState({
     currentPage: 'logs'

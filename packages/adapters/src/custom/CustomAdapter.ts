@@ -1,7 +1,9 @@
 import { BaseGameAdapter } from '../base/BaseGameAdapter';
+import type { GameInstanceConfig } from '@core/types';
 import type {
   AdapterCapabilities,
   AdapterHealth,
+  GameAdapterInstance,
   ObservationCapability,
   WindowFocusResult
 } from '../base/GameAdapter';
@@ -50,6 +52,12 @@ export class CustomAdapter extends BaseGameAdapter {
     this.protocolName = options.protocolName;
     this.observationCapability = observationCapability;
     this.windowFocusHandler = options.windowFocusHandler;
+  }
+
+  override async launchInstance(_config: GameInstanceConfig): Promise<GameAdapterInstance> {
+    throw new Error(
+      'Custom adapter runtime is unavailable. Use an instrumented endpoint or desktop fallback for a custom engine.'
+    );
   }
 
   async focusWindow(instanceId: string): Promise<WindowFocusResult> {

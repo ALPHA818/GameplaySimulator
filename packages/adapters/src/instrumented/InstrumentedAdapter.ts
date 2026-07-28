@@ -49,7 +49,6 @@ export class InstrumentedAdapter extends BaseGameAdapter {
         supportsDirectActions: true,
         supportsInputSimulation: false,
         supportsScreenshots: true,
-        supportsVideo: true,
         supportsGameLogs: true,
         supportsSaveIsolation: true,
         supportsReset: true,
@@ -58,7 +57,8 @@ export class InstrumentedAdapter extends BaseGameAdapter {
         supportsWindowFocus: Boolean(options.windowFocusHandler),
         supportsMultipleVisibleWindows: false,
         observationCapability,
-        ...options.capabilities
+        ...options.capabilities,
+        supportsVideo: false
       }
     });
 

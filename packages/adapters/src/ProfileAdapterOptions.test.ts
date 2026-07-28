@@ -157,7 +157,7 @@ describe('createAdapterOptionsFromGameProfile', () => {
     );
   });
 
-  it('warns when evidence is requested but unsupported by the selected profile', () => {
+  it('warns for unavailable screenshots and rejects unavailable video capture', () => {
     const profile: GameProfile = {
       ...unityProfile,
       adapter: {
@@ -174,13 +174,20 @@ describe('createAdapterOptionsFromGameProfile', () => {
 
     expect(result.warnings).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ path: 'adapter.supportsScreenshots' }),
-        expect.objectContaining({ path: 'adapter.supportsVideo' })
+        expect.objectContaining({ path: 'adapter.supportsScreenshots' })
+      ])
+    );
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: 'saveVideo',
+          message: expect.stringContaining('Video recording is unavailable')
+        })
       ])
     );
   });
 
-  it('reports unavailable observation for a custom adapter without a window', () => {
+  it('rejects the unavailable generic custom adapter runtime', () => {
     const profile: GameProfile = {
       ...unityProfile,
       engine: { type: 'custom' },
@@ -203,6 +210,108 @@ describe('createAdapterOptionsFromGameProfile', () => {
     expect(result.options.custom).toMatchObject({ observationCapability: 'unavailable' });
     expect(result.observationMessage).toBe(
       'The test is running, but only logs and screenshots can be viewed.'
+    );
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: 'adapter.type',
+          message: expect.stringContaining('Custom adapter runtime is unavailable')
+        })
+      ])
+    );
+  });
+
+  it('rejects instrumented transports without a runtime implementation', () => {
+    const result = createAdapterOptionsFromGameProfile(
+      {
+        ...unityProfile,
+        adapter: {
+          ...unityProfile.adapter,
+          instrumentationTransport: 'local-websocket'
+        }
+      },
+      runConfig
+    );
+
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: 'adapter.instrumentationTransport',
+          message: expect.stringContaining('Only Local HTTP')
+        })
+      ])
+    );
+  });
+
+  it('rejects unsafe browser URLs, instrumentation endpoints, and relative executables', () => {
+    const browserResult = createAdapterOptionsFromGameProfile(
+      {
+        ...unityProfile,
+        engine: { type: 'browser' },
+        launch: {
+          platform: 'browser',
+          url: 'file:///tmp/private-game.html',
+          arguments: []
+        },
+        adapter: {
+          ...unityProfile.adapter,
+          type: 'browser',
+          instrumentationEndpoint: undefined
+        }
+      },
+      {
+        ...runConfig,
+        adapterType: 'browser'
+      }
+    );
+    const instrumentedResult = createAdapterOptionsFromGameProfile(
+      {
+        ...unityProfile,
+        adapter: {
+          ...unityProfile.adapter,
+          type: 'instrumented',
+          instrumentationEndpoint: 'javascript:alert(1)'
+        }
+      },
+      {
+        ...runConfig,
+        adapterType: 'instrumented'
+      }
+    );
+    const desktopResult = createAdapterOptionsFromGameProfile(
+      {
+        ...unityProfile,
+        engine: { type: 'unknown' },
+        launch: {
+          ...unityProfile.launch,
+          executablePath: './TestGame.exe'
+        },
+        adapter: {
+          ...unityProfile.adapter,
+          type: 'desktop',
+          instrumentationEndpoint: undefined
+        }
+      },
+      {
+        ...runConfig,
+        adapterType: 'desktop'
+      }
+    );
+
+    expect(browserResult.errors).toContainEqual(
+      expect.objectContaining({ path: 'launch.url', message: expect.stringContaining('http') })
+    );
+    expect(instrumentedResult.errors).toContainEqual(
+      expect.objectContaining({
+        path: 'adapter.instrumentationEndpoint',
+        message: expect.stringContaining('http')
+      })
+    );
+    expect(desktopResult.errors).toContainEqual(
+      expect.objectContaining({
+        path: 'launch.executablePath',
+        message: expect.stringContaining('absolute')
+      })
     );
   });
 
@@ -336,5 +445,27 @@ describe('createAdapterOptionsFromGameProfile', () => {
     });
 
     expect(result.options.browser?.headless).toBe(true);
+  });
+
+  it('places adapter screenshots under an explicit runtime runs root', () => {
+    const profile: GameProfile = {
+      ...unityProfile,
+      engine: { type: 'browser' },
+      launch: { platform: 'browser', url: 'http://localhost:5173', arguments: [] },
+      adapter: { ...unityProfile.adapter, type: 'browser' }
+    };
+    const runsRoot = '/tmp/gameplay-simulator-user-data/runs';
+
+    const result = createAdapterOptionsFromGameProfile(
+      profile,
+      { ...runConfig, adapterType: 'browser' },
+      undefined,
+      { runsRoot }
+    );
+
+    expect(result.screenshotDirectory).toBe(
+      '/tmp/gameplay-simulator-user-data/runs/session-options/adapter-screenshots'
+    );
+    expect(result.options.browser?.screenshotDirectory).toBe(result.screenshotDirectory);
   });
 });

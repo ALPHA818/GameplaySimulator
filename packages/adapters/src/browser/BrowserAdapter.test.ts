@@ -52,6 +52,7 @@ class FakePage {
   indicatorsHidden = false;
   bringToFrontCount = 0;
   directHookEnabled = true;
+  listenersCleared = false;
 
   async goto(url: string) {
     this.currentUrl = url;
@@ -158,6 +159,11 @@ class FakePage {
     this.bringToFrontCount += 1;
   }
 
+  removeAllListeners() {
+    this.listeners.clear();
+    this.listenersCleared = true;
+  }
+
   on(event: 'console', listener: (message: FakeConsoleMessage) => void): void;
   on(event: 'pageerror', listener: (error: Error) => void): void;
   on(event: 'crash' | 'close', listener: () => void): void;
@@ -184,6 +190,7 @@ class FakeContext {
 
 class FakeBrowser {
   closed = false;
+  closeError?: Error;
 
   constructor(private readonly page: FakePage) {}
 
@@ -192,6 +199,9 @@ class FakeBrowser {
   }
 
   async close() {
+    if (this.closeError) {
+      throw this.closeError;
+    }
     this.closed = true;
   }
 }
@@ -259,6 +269,35 @@ function action(type: string, payload: Record<string, unknown> = {}): GameAction
 }
 
 describe('BrowserAdapter', () => {
+  it('passes the packaged Chromium executable to Playwright', async () => {
+    const launcher = new FakeLauncher();
+    const adapter = new BrowserAdapter({
+      browserLauncher: launcher,
+      browserExecutablePath: '/opt/GameplaySimulator/resources/playwright/chromium-1228/chrome-linux64/chrome',
+      packagedRuntime: true
+    });
+
+    await adapter.launchInstance(instanceConfig);
+
+    expect(launcher.launchOptions).toMatchObject({
+      executablePath:
+        '/opt/GameplaySimulator/resources/playwright/chromium-1228/chrome-linux64/chrome',
+      headless: true
+    });
+  });
+
+  it('does not claim unbundled browsers are available in packaged releases', () => {
+    expect(() => new BrowserAdapter({
+      browserName: 'firefox',
+      packagedRuntime: true
+    })).toThrow('packaged application includes Chromium only');
+    expect(() => new BrowserAdapter({
+      browserName: 'chromium',
+      packagedRuntime: true,
+      resourcesPath: '/missing/gameplay-simulator/resources'
+    })).toThrow('packaged Chromium runtime is missing');
+  });
+
   it('launches a visible browser and brings it forward when observation is enabled', async () => {
     const launcher = new FakeLauncher();
     const adapter = new BrowserAdapter({
@@ -306,6 +345,7 @@ describe('BrowserAdapter', () => {
     await adapter.stopAll();
     expect(launcher.page.closed).toBe(true);
     expect(launcher.browser.closed).toBe(true);
+    expect(launcher.page.listenersCleared).toBe(true);
     expect(await adapter.captureLogs(instanceConfig.instanceId)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ message: expect.stringContaining('visible_window_stopped:') })
@@ -613,5 +653,19 @@ describe('BrowserAdapter', () => {
     expect(await adapter.isRunning(instanceConfig.instanceId)).toBe(false);
     expect(launcher.page.closed).toBe(true);
     expect(launcher.browser.closed).toBe(true);
+  });
+
+  it('marks the browser stopped and reports cleanup errors when browser close throws', async () => {
+    const launcher = new FakeLauncher();
+    launcher.browser.closeError = new Error('browser process refused to close');
+    const adapter = new BrowserAdapter({ browserLauncher: launcher });
+    await adapter.launchInstance(instanceConfig);
+
+    await expect(adapter.stopInstance(instanceConfig.instanceId)).rejects.toThrow(
+      'browser process refused to close'
+    );
+
+    expect(await adapter.isRunning(instanceConfig.instanceId)).toBe(false);
+    expect(launcher.page.closed).toBe(true);
   });
 });

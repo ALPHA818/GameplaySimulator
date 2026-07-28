@@ -9,14 +9,14 @@ Use `InstrumentedAdapter` with a Unity QA build that exposes the GameplaySimulat
 Recommended Unity implementation:
 
 - Add a dev-only MonoBehaviour, service, or package enabled only for QA builds.
-- Start a local HTTP or WebSocket bridge.
+- Start a Local HTTP bridge.
 - Serialize Unity scene, GameObject, player controller, quest, inventory, UI, save, and performance state.
 - Expose direct actions as safe debug commands.
 - Emit coverage events from scene changes, quest steps, NPC interactions, item pickups, menus, dialogue choices, bosses, minigames, hidden areas, endings, and achievements.
 
 ## Fallback Method
 
-Use `DesktopWindowAdapter` for a normal Unity executable. This can launch the game, focus the window, send keyboard/mouse/controller-style inputs, and capture screenshots. It has weaker awareness unless the game also emits logs or state externally.
+Use `DesktopWindowAdapter` for a normal Unity executable. On Linux with the required tools, it can launch the game, focus the window, send keyboard/mouse input, and capture screenshots. Windows fallback is limited to process launch, health, and safe stop. Desktop fallback has weaker awareness unless the game also emits state externally.
 
 ## Data The Simulator Can Read
 
@@ -47,8 +47,8 @@ With instrumentation:
 
 With desktop fallback:
 
-- Keyboard, mouse, and future controller input mapped from `controls`.
-- Screenshot capture.
+- Keyboard and mouse input mapped from `controls` on supported Linux systems.
+- Screenshot capture when a supported Linux screenshot tool is installed.
 - Safe process stop.
 
 ## Limitations
@@ -151,4 +151,3 @@ With desktop fallback:
 - Use isolated save directories per game instance.
 - Log Unity exceptions and warnings into the instrumentation event stream.
 - Include deterministic seed support for reproducible bot runs.
-

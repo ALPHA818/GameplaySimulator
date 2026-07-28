@@ -1,7 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { DetectedIssue, GameInstanceStatus, SimulationRunConfig } from '@core/types';
 import type { LogEntry } from '@core/logging/LogEntry';
-import { defaultAdvancedIntelligenceConfig } from '@core/config/advancedIntelligenceConfig';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { IssuesPage } from './IssuesPage';
 import { LiveSessionPage } from './LiveSessionPage';
@@ -106,8 +105,7 @@ describe('renderer workflow smoke tests', () => {
       currentPage: 'dashboard',
       editingGameId: null,
       runConfigs: [runConfig],
-      lastValidatedRunConfig: runConfig,
-      advancedIntelligence: defaultAdvancedIntelligenceConfig
+      lastValidatedRunConfig: runConfig
     });
     useSessionStore.setState({
       status: 'running',
@@ -279,14 +277,14 @@ describe('renderer workflow smoke tests', () => {
     expect(html).toContain('Export visible logs');
   });
 
-  it('renders gated advanced intelligence settings with hover-help labels', () => {
+  it('renders runtime settings without exposing unavailable intelligence controls', () => {
     const html = renderToStaticMarkup(<SettingsPage />);
 
-    expect(html).toContain('Advanced Intelligence');
-    expect(html).toContain('Real Runtime Prerequisite');
-    expect(html).toContain('Vision Model');
-    expect(html).toContain('Bug Deduplication');
-    expect(html).toContain('Help for Vision Model');
+    expect(html).toContain('Real Runtime Readiness');
+    expect(html).toContain('Live Bot Observation');
+    expect(html).toContain('Help for Show Bot Gameplay');
+    expect(html).not.toContain('Advanced Intelligence');
+    expect(html).not.toContain('Vision Model');
   });
 
   it('renders first-test help for each adapter type with hover-help labels', () => {

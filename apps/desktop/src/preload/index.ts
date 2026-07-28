@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer as electronIpcRenderer } from 'electron';
 import type {
   BotProfile,
   DetectedIssue,
@@ -39,6 +39,11 @@ import type {
 } from '../main/services/simulationService';
 import type { DesktopAdapterDependencyReport } from '../../../../packages/adapters/src';
 import type { RuntimeObservationConfig } from '@core/config/runtimeObservationConfig';
+import type {
+  WorkspaceData,
+  WorkspaceDataPatch,
+  WorkspaceLoadResult
+} from '@core/config/workspaceData';
 import type { BotDirectiveManagerSnapshot } from '@core/bot/BotDirectiveManager';
 import type { AvailableGameActionLike } from '@core/bot/ActionPlanner';
 
@@ -49,9 +54,31 @@ interface SimulationSessionPayload {
   runtimeObservation?: RuntimeObservationConfig;
 }
 
+function readableIpcMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw
+    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim() || 'The application could not complete this request.';
+}
+
+const ipcRenderer = {
+  async invoke(channel: string, ...args: unknown[]): Promise<unknown> {
+    try {
+      return await electronIpcRenderer.invoke(channel, ...args);
+    } catch (error) {
+      throw new Error(readableIpcMessage(error));
+    }
+  }
+};
+
 const api = {
   app: {
-    getVersion: () => ipcRenderer.invoke('app:getVersion') as Promise<string>
+    getVersion: () => ipcRenderer.invoke('app:getVersion') as Promise<string>,
+    openApplicationLogs: () =>
+      ipcRenderer.invoke('app:openApplicationLogs') as Promise<{ opened: boolean; message: string }>,
+    reportRendererError: (details: Record<string, unknown>) =>
+      ipcRenderer.invoke('app:reportRendererError', details) as Promise<void>
   },
   sessions: {
     getStatus: () =>
@@ -60,6 +87,18 @@ const api = {
   resources: {
     estimateViability: (payload: SimulationSessionPayload) =>
       ipcRenderer.invoke('resources:estimateViability', payload) as Promise<RuntimeViabilityReport>
+  },
+  workspace: {
+    load: () =>
+      ipcRenderer.invoke('workspace:load') as Promise<WorkspaceLoadResult>,
+    save: (data: WorkspaceData) =>
+      ipcRenderer.invoke('workspace:save', data) as Promise<WorkspaceData>,
+    update: (patch: WorkspaceDataPatch) =>
+      ipcRenderer.invoke('workspace:update', patch) as Promise<WorkspaceData>,
+    createBackup: () =>
+      ipcRenderer.invoke('workspace:createBackup') as Promise<string | null>,
+    recoverFromBackup: () =>
+      ipcRenderer.invoke('workspace:recoverFromBackup') as Promise<WorkspaceData | null>
   },
   simulation: {
     createSession: (payload: SimulationSessionPayload) =>
@@ -98,6 +137,8 @@ const api = {
       ipcRenderer.invoke('simulation:guideBot', payload) as Promise<LiveDirectiveMutationResult>,
     cancelBotDirective: (sessionId: string, botId: string, directiveId: string) =>
       ipcRenderer.invoke('simulation:cancelBotDirective', sessionId, botId, directiveId) as Promise<LiveDirectiveMutationResult>,
+    confirmBotDirectiveSuccess: (sessionId: string, botId: string, directiveId: string) =>
+      ipcRenderer.invoke('simulation:confirmBotDirectiveSuccess', sessionId, botId, directiveId) as Promise<LiveDirectiveMutationResult>,
     reorderBotDirectives: (payload: ReorderBotDirectivesRequest) =>
       ipcRenderer.invoke('simulation:reorderBotDirectives', payload) as Promise<LiveDirectiveMutationResult>,
     getLiveObservationState: (sessionId: string) =>

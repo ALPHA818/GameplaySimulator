@@ -4,7 +4,7 @@
 
 ## Best Integration Method
 
-Use `BrowserAdapter` for games that run in a normal browser or local web runtime. For best results, add instrumentation to the game and expose structured state/actions through a local endpoint, `window` bridge, dev server route, or WebSocket.
+Use `BrowserAdapter` for games that run in a normal browser or local web runtime. For best results, expose structured state and actions through the documented `window` hooks or a Local HTTP instrumentation endpoint.
 
 For a ready-to-adapt example of all four browser hooks, see [Browser Instrumentation Hooks](browser-instrumentation.md).
 
@@ -52,6 +52,7 @@ With browser/input fallback:
 ## Limitations
 
 - BrowserAdapter is not intended for unauthorized testing of third-party games.
+- Packaged builds include Chromium only. Firefox and WebKit are unavailable.
 - Canvas/WebGL games often expose little state unless instrumented.
 - Browser security boundaries, CORS, iframes, and focus can limit direct control.
 - Production web builds should not expose debug bridges unless intentionally protected for QA.

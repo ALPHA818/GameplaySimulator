@@ -810,6 +810,7 @@ function IssueDiagnosisView({
 
 export function LogsPage() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
+  const preferredReviewSessionId = useSessionStore((state) => state.reviewSessionId);
   const navigate = useConfigStore((state) => state.navigate);
   const setReviewSessionId = useSessionStore((state) => state.setReviewSessionId);
   const setReviewIssueId = useSessionStore((state) => state.setReviewIssueId);
@@ -860,6 +861,13 @@ export function LogsPage() {
           return current;
         }
 
+        if (
+          preferredReviewSessionId &&
+          loadedSessions.some((session) => session.sessionId === preferredReviewSessionId)
+        ) {
+          return preferredReviewSessionId;
+        }
+
         if (activeSessionId) {
           return activeSessionId;
         }
@@ -896,6 +904,17 @@ export function LogsPage() {
   useEffect(() => {
     void loadSessions();
   }, []);
+
+  useEffect(() => {
+    if (
+      preferredReviewSessionId &&
+      preferredReviewSessionId !== selectedSessionId &&
+      sessions.some((session) => session.sessionId === preferredReviewSessionId)
+    ) {
+      setSelectedSessionId(preferredReviewSessionId);
+      setSelectedLogKey(null);
+    }
+  }, [preferredReviewSessionId, selectedSessionId, sessions]);
 
   useEffect(() => {
     if (!selectedSessionId && activeSessionId) {

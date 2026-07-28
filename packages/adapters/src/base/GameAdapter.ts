@@ -102,6 +102,7 @@ export interface GameAdapter {
   launchInstance(config: GameInstanceConfig): Promise<GameAdapterInstance>;
   stopInstance(instanceId: string): Promise<void>;
   stopAll(): Promise<void>;
+  forceStopAll?(): Promise<void>;
   getState(instanceId: string, botId: string): Promise<GameStateSnapshot | null>;
   getAvailableActions(instanceId: string, botId: string): Promise<AvailableGameAction[]>;
   performAction(instanceId: string, botId: string, action: GameAction): Promise<ActionResult>;

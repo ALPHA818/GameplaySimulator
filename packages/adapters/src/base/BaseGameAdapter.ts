@@ -12,8 +12,7 @@ import type {
   AvailableGameAction,
   GameAdapter,
   GameAdapterInstance,
-  ScreenshotCapture,
-  VideoCaptureHandle
+  ScreenshotCapture
 } from './GameAdapter';
 
 export interface BaseGameAdapterOptions {
@@ -51,7 +50,7 @@ export abstract class BaseGameAdapter implements GameAdapter {
       launchConfig: config,
       startedAt: new Date().toISOString(),
       metadata: {
-        placeholder: true,
+        baseLifecycle: true,
         adapterType: this.adapterType
       }
     };
@@ -82,14 +81,13 @@ export abstract class BaseGameAdapter implements GameAdapter {
 
     return {
       snapshotId: `${instanceId}-${botId}-${Date.now()}`,
-      sessionId: 'placeholder-session',
+      sessionId: 'adapter-session',
       gameId: tracked?.instance.gameProfileId ?? 'unknown-game',
       gameInstanceId: instanceId,
       botId,
       capturedAt: new Date().toISOString(),
       state: {
-        adapterId: this.id,
-        placeholder: true
+        adapterId: this.id
       },
       metrics: {}
     };
@@ -131,7 +129,7 @@ export abstract class BaseGameAdapter implements GameAdapter {
       durationMs: 0,
       message:
         running && canAct
-          ? 'Placeholder adapter accepted the action but did not execute real game input.'
+          ? 'This adapter does not provide an action implementation.'
           : 'Adapter cannot perform actions for this instance.',
       issueIds: []
     };
@@ -150,30 +148,6 @@ export abstract class BaseGameAdapter implements GameAdapter {
     };
   }
 
-  async startVideoCapture(instanceId: string, botId: string): Promise<VideoCaptureHandle> {
-    if (!this.capabilities.supportsVideo) {
-      throw new Error(`${this.name} does not support video capture.`);
-    }
-
-    return {
-      instanceId,
-      botId,
-      startedAt: new Date().toISOString()
-    };
-  }
-
-  async stopVideoCapture(instanceId: string, botId: string): Promise<VideoCaptureHandle> {
-    if (!this.capabilities.supportsVideo) {
-      throw new Error(`${this.name} does not support video capture.`);
-    }
-
-    return {
-      instanceId,
-      botId,
-      stoppedAt: new Date().toISOString()
-    };
-  }
-
   async captureLogs(instanceId: string): Promise<LogEntry[]> {
     if (!this.capabilities.supportsGameLogs) {
       return [];
@@ -181,9 +155,9 @@ export abstract class BaseGameAdapter implements GameAdapter {
 
     return [
       {
-        id: `${instanceId}-placeholder-log`,
+        id: `${instanceId}-adapter-log`,
         level: 'info',
-        message: `${this.name} placeholder log capture.`,
+        message: `${this.name} reported no adapter-specific game logs.`,
         timestamp: new Date().toISOString(),
         source: this.id
       }
@@ -214,7 +188,7 @@ export abstract class BaseGameAdapter implements GameAdapter {
       instanceId,
       status: tracked.running ? 'running' : 'stopped',
       checkedAt: new Date().toISOString(),
-      message: tracked.running ? 'Placeholder instance is marked running.' : 'Instance is stopped.',
+      message: tracked.running ? 'Adapter instance is running.' : 'Instance is stopped.',
       details: {
         adapterId: this.id,
         adapterType: this.adapterType,

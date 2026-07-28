@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type {
   BotProfile,
@@ -13,11 +13,11 @@ import type {
 } from '@core/types';
 import {
   ActionResultSchema,
+  BotProfileSchema,
   DetectedIssueSchema,
   GameActionSchema,
   GameProfileSchema,
   RuntimeViabilityReportSchema,
-  SessionBundleSchema,
   SessionLabelSchema,
   SimulationRunConfigSchema
 } from '@core/types';
@@ -30,6 +30,7 @@ import {
   type RuntimeObservationConfig
 } from '@core/config/runtimeObservationConfig';
 import type { SimulationBotStatus, SimulationRuntimeStatus } from './simulationService';
+import { assertPathWithin, isPathWithin } from './pathSafety';
 
 export interface SessionIssueCounts {
   total: number;
@@ -117,9 +118,15 @@ export interface SessionRepositoryWriteInput {
   reportPaths: SessionReportPaths;
 }
 
+export interface SessionRepositoryOptions {
+  now?: () => string;
+  reconcileInterruptedSessions?: boolean;
+}
+
 interface SessionConfigArtifact {
   runConfig: SimulationRunConfig;
   gameProfile: GameProfile;
+  botProfiles: BotProfile[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -324,6 +331,40 @@ function cloneIssue(issue: DetectedIssue): DetectedIssue {
   };
 }
 
+function sanitizeIssueEvidence(issue: DetectedIssue, sessionDir: string): DetectedIssue {
+  const allowedPath = (path: string | undefined): string | undefined => {
+    if (!path) {
+      return undefined;
+    }
+
+    if (isPathWithin(sessionDir, path)) {
+      return resolve(path);
+    }
+
+    const normalized = path.replaceAll('\\', '/');
+    for (const marker of ['/bots/', '/screenshots/', '/video/', '/issues/']) {
+      const markerIndex = normalized.lastIndexOf(marker);
+
+      if (markerIndex >= 0) {
+        const rebased = join(sessionDir, ...normalized.slice(markerIndex + 1).split('/'));
+        return isPathWithin(sessionDir, rebased) && existsSync(rebased) ? resolve(rebased) : undefined;
+      }
+    }
+
+    return undefined;
+  };
+
+  return {
+    ...issue,
+    screenshotPath: allowedPath(issue.screenshotPath),
+    videoPath: allowedPath(issue.videoPath),
+    evidencePaths: issue.evidencePaths.flatMap((path) => {
+      const allowed = allowedPath(path);
+      return allowed ? [allowed] : [];
+    })
+  };
+}
+
 function reportPathsFor(sessionDir: string): SessionReportPaths {
   const githubExportDirectory = join(sessionDir, 'github-issues');
   const exportsDirectory = join(sessionDir, 'exports');
@@ -355,7 +396,14 @@ function reportPathsFor(sessionDir: string): SessionReportPaths {
 }
 
 export class SessionRepository {
-  constructor(private readonly runsRoot: string) {
+  private readonly runsRoot: string;
+  private readonly now: () => string;
+  private readonly reconcileInterruptedSessions: boolean;
+
+  constructor(runsRoot: string, options: SessionRepositoryOptions = {}) {
+    this.runsRoot = resolve(runsRoot);
+    this.now = options.now ?? (() => new Date().toISOString());
+    this.reconcileInterruptedSessions = options.reconcileInterruptedSessions ?? true;
     mkdirSync(this.runsRoot, { recursive: true });
   }
 
@@ -385,6 +433,18 @@ export class SessionRepository {
   }
 
   writeSessionMetadata(input: SessionRepositoryWriteInput): PersistedSessionMetadata {
+    const sessionDir = assertPathWithin(
+      this.runsRoot,
+      input.sessionDir,
+      'Session metadata directory',
+      false
+    );
+    for (const path of Object.values(input.reportPaths)) {
+      if (typeof path === 'string') {
+        assertPathWithin(sessionDir, path, 'Session report path');
+      }
+    }
+
     const metadata: PersistedSessionMetadata = {
       sessionId: input.sessionId,
       gameName: input.gameProfile.gameName,
@@ -406,7 +466,7 @@ export class SessionRepository {
       reportPaths: input.reportPaths
     };
 
-    writeJson(join(input.sessionDir, 'session.json'), metadata);
+    writeJson(join(sessionDir, 'session.json'), metadata);
     return metadata;
   }
 
@@ -427,11 +487,74 @@ export class SessionRepository {
     );
     const sessionEvents = readJsonl(join(sessionDir, 'session-log.jsonl'));
     const issues = this.readIssues(sessionDir);
-    const botStatuses = this.readBotStatuses(sessionDir, config.runConfig, issues);
-    const instanceStatuses = this.readInstanceStatuses(sessionDir, config.runConfig, config.gameProfile);
-    const metadata = this.readMetadata(sessionDir, config, viabilityReport, issues, botStatuses, sessionEvents);
+    let botStatuses = this.readBotStatuses(sessionDir, config.runConfig, issues);
+    let instanceStatuses = this.readInstanceStatuses(sessionDir, config.runConfig, config.gameProfile);
+    let metadata = this.readMetadata(sessionDir, config, viabilityReport, issues, botStatuses, sessionEvents);
+    let logs = logEntriesFromEvents(sessionEvents, metadata.sessionId);
     const actions = this.readActions(sessionDir);
     const states = this.readStates(sessionDir);
+
+    if (
+      this.reconcileInterruptedSessions &&
+      ['starting', 'running', 'paused', 'stopping'].includes(metadata.status)
+    ) {
+      const interruptedAt = this.now();
+      botStatuses = botStatuses.map((bot) => {
+        const wasActive = ['starting', 'running', 'waiting', 'queued'].includes(bot.status);
+
+        return {
+          ...bot,
+          status: wasActive ? 'stopped' : bot.status,
+          progressState: wasActive ? 'Interrupted when the application closed' : bot.progressState,
+          message: wasActive
+            ? 'The previous application process ended before this session stopped cleanly.'
+            : bot.message
+        };
+      });
+      instanceStatuses = instanceStatuses.map((instance) => ({
+        ...instance,
+        status: ['starting', 'running', 'stopping', 'unresponsive'].includes(instance.status)
+          ? 'stopped'
+          : instance.status,
+        processId: undefined,
+        lastHeartbeat: interruptedAt
+      }));
+      metadata = {
+        ...metadata,
+        status: 'failed',
+        stoppedAt: metadata.stoppedAt ?? interruptedAt,
+        botCounts: {
+          ...metadata.botCounts,
+          running: 0,
+          stopped: botStatuses.filter((bot) => ['stopped', 'completed'].includes(bot.status)).length
+        },
+        reportPaths: reportPathsFor(sessionDir)
+      };
+      writeJson(join(sessionDir, 'session.json'), metadata);
+      appendFileSync(
+        join(sessionDir, 'session-log.jsonl'),
+        `${JSON.stringify({
+          eventType: 'session_interrupted',
+          timestamp: interruptedAt,
+          sessionId: metadata.sessionId,
+          payload: {
+            reason: 'application_closed_before_clean_stop',
+            status: 'failed'
+          }
+        })}\n`,
+        'utf8'
+      );
+      logs = [
+        ...logs,
+        {
+          id: `${metadata.sessionId}-interrupted`,
+          level: 'error',
+          message: 'Session was interrupted because the application closed before it stopped cleanly.',
+          timestamp: interruptedAt,
+          source: 'persisted-session'
+        }
+      ];
+    }
 
     return {
       metadata,
@@ -441,17 +564,28 @@ export class SessionRepository {
       botStatuses,
       instanceStatuses,
       issues,
-      logs: logEntriesFromEvents(sessionEvents, metadata.sessionId),
+      logs,
       coverageSummary: undefined,
       actions,
       states,
-      botProfiles: []
+      botProfiles: config.botProfiles
     };
   }
 
   resolveSessionDir(sessionDirOrId: string): string {
     if (existsSync(sessionDirOrId)) {
-      return sessionDirOrId;
+      const candidate = assertPathWithin(
+        this.runsRoot,
+        sessionDirOrId,
+        'Persisted session directory',
+        false
+      );
+
+      if (!statSync(candidate).isDirectory() || !existsSync(join(candidate, 'config.json'))) {
+        throw new Error(`Persisted session path "${sessionDirOrId}" is not a valid session directory.`);
+      }
+
+      return candidate;
     }
 
     for (const dir of this.listSessionDirectories()) {
@@ -488,7 +622,10 @@ export class SessionRepository {
 
     return {
       runConfig: SimulationRunConfigSchema.parse(artifact.runConfig),
-      gameProfile: GameProfileSchema.parse(artifact.gameProfile)
+      gameProfile: GameProfileSchema.parse(artifact.gameProfile),
+      botProfiles: Array.isArray(artifact.botProfiles)
+        ? artifact.botProfiles.map((profile) => BotProfileSchema.parse(profile))
+        : []
     };
   }
 
@@ -504,27 +641,7 @@ export class SessionRepository {
       readJsonFileIfExists(join(sessionDir, 'metadata.json'));
 
     if (isRecord(metadata)) {
-      const bundle = SessionBundleSchema.safeParse(metadata);
-      const bundlePaths = bundle.success ? bundle.data.paths : undefined;
-      const reportPaths = isRecord(metadata.reportPaths)
-        ? metadata.reportPaths as unknown as SessionReportPaths
-        : bundlePaths
-          ? {
-              sessionDirectory: bundlePaths.sessionDirectory,
-              metadataJson: bundlePaths.metadataJson,
-              summaryJson: bundlePaths.summaryJson,
-              summaryMarkdown: bundlePaths.summaryMarkdown,
-              importantEvents: bundlePaths.importantEventsJsonl,
-              fullStructuredLogs: bundlePaths.fullStructuredLogsJsonl,
-              issuesJson: bundlePaths.issuesJson,
-              issueTimeline: bundlePaths.issueTimelineJson,
-              screenshotsDirectory: bundlePaths.screenshotsDirectory,
-              reportsDirectory: bundlePaths.reportsDirectory,
-              exportsDirectory: bundlePaths.exportsDirectory,
-              replayDirectory: bundlePaths.replayDirectory,
-              issueDirectory: existsSync(join(sessionDir, 'issues')) ? join(sessionDir, 'issues') : undefined
-            }
-          : reportPathsFor(sessionDir);
+      const reportPaths = reportPathsFor(sessionDir);
 
       const parsedObservation = RuntimeObservationConfigSchema.safeParse(metadata.runtimeObservation);
 
@@ -587,7 +704,7 @@ export class SessionRepository {
         const parsed = DetectedIssueSchema.safeParse(issueValue);
 
         if (parsed.success) {
-          byId.set(issueId(parsed.data), cloneIssue(parsed.data));
+          byId.set(issueId(parsed.data), sanitizeIssueEvidence(cloneIssue(parsed.data), sessionDir));
         }
       }
     }
@@ -611,7 +728,7 @@ export class SessionRepository {
         const parsed = DetectedIssueSchema.safeParse(issueValue);
 
         if (parsed.success) {
-          byId.set(issueId(parsed.data), cloneIssue(parsed.data));
+          byId.set(issueId(parsed.data), sanitizeIssueEvidence(cloneIssue(parsed.data), sessionDir));
         }
       }
     }

@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type {
   ActionResult,
   BotTestDirective,
@@ -320,6 +320,16 @@ class RecordingGameAdapter implements GameAdapter {
 class FailingLaunchAdapter extends RecordingGameAdapter {
   override async launchInstance(_config: GameInstanceConfig): Promise<GameAdapterInstance> {
     throw new Error('configured game could not launch');
+  }
+}
+
+class FailingStopAdapter extends RecordingGameAdapter {
+  override async stopInstance(_instanceId: string): Promise<void> {
+    throw new Error('adapter refused to stop owned instance');
+  }
+
+  override async stopAll(): Promise<void> {
+    throw new Error('adapter cleanup failed');
   }
 }
 
@@ -741,6 +751,99 @@ describe('SimulationService', () => {
     await service.stopSession(sessionId);
   });
 
+  it('advances every guided directive step and records the completed result', async () => {
+    vi.useFakeTimers();
+    const sessionId = 'session-guided-directive';
+    const guidedRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId,
+      actionDelayMs: 0,
+      maxActionsPerBot: 3,
+      botPools: [{
+        ...runConfig.botPools[0],
+        minCount: 1,
+        desiredCount: 1,
+        maxCount: 1
+      }],
+      directives: [{
+        directiveId: 'menu-round-trip',
+        sessionId,
+        name: 'Open and close the menu',
+        description: 'Follow both reported menu actions in order.',
+        directiveType: 'sequence',
+        directiveMode: 'guided-sequence',
+        priority: 'high',
+        status: 'queued',
+        target: {
+          allBots: false,
+          botIds: [],
+          profileIds: ['explorer'],
+          gameInstanceIds: []
+        },
+        actionKeywords: [],
+        avoidedActionKeywords: [],
+        successConditions: ['Both menu actions succeed.'],
+        failureConditions: [],
+        steps: [
+          {
+            stepId: 'open',
+            name: 'Open menu',
+            actionType: 'open-menu',
+            actionKeywords: ['open-menu'],
+            successCondition: 'The menu action succeeds.',
+            maxAttempts: 2,
+            waitAfterMs: 0
+          },
+          {
+            stepId: 'close',
+            name: 'Close menu',
+            actionType: 'close-menu',
+            actionKeywords: ['close-menu'],
+            successCondition: 'The close action succeeds.',
+            maxAttempts: 2,
+            waitAfterMs: 0
+          }
+        ],
+        repeatUntilSuccess: false,
+        createdAt: '2026-07-04T08:59:00.000Z',
+        createdBy: 'user'
+      }]
+    };
+    const service = new SimulationService({
+      now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
+      systemSnapshot
+    });
+
+    service.createSession({ runConfig: guidedRunConfig, gameProfile, botProfiles });
+    await service.startSession(sessionId);
+    await vi.advanceTimersByTimeAsync(900);
+
+    const directiveState = service.getDirectiveState(sessionId);
+    expect(directiveState.directives[0].status).toBe('succeeded');
+    expect(directiveState.progress[0]).toMatchObject({
+      status: 'succeeded',
+      actionsAttempted: 2,
+      successfulActions: 2,
+      lastAction: 'close-menu'
+    });
+    expect(directiveState.events.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining([
+        'directive_step_started',
+        'directive_step_completed',
+        'directive_succeeded'
+      ])
+    );
+
+    const report = await readFile(join(
+      service.listSessions().find((session) => session.sessionId === sessionId)!.reportPaths.sessionDirectory,
+      'session-summary.md'
+    ), 'utf8');
+    expect(report).toContain('Open and close the menu');
+    expect(report).toContain('succeeded');
+
+    await service.stopSession(sessionId);
+  });
+
   it('guides a running bot without restarting its loop and validates exact available actions', async () => {
     vi.useFakeTimers();
     const sessionId = 'session-live-guidance';
@@ -852,7 +955,8 @@ describe('SimulationService', () => {
       directive: liveDirective('menu-now', 'Test menu', {
         priority: 'urgent',
         actionKeywords: ['open-menu'],
-        targetFeature: 'menu'
+        targetFeature: 'menu',
+        manualSuccessConfirmation: true
       })
     });
     expect(replaced.activeDirectiveId).toBe('menu-now');
@@ -860,8 +964,18 @@ describe('SimulationService', () => {
       replaced.snapshot.progress.find((progress) => progress.directiveId === 'movement-now')?.status
     ).toBe('cancelled');
 
-    const cancelled = service.cancelBotDirective(sessionId, 'explorer-001', 'menu-now');
-    expect(cancelled.activeDirectiveId).toBe('combat-later');
+    const confirmed = service.confirmBotDirectiveSuccess(
+      sessionId,
+      'explorer-001',
+      'menu-now'
+    );
+    expect(confirmed.activeDirectiveId).toBe('combat-later');
+    expect(
+      confirmed.snapshot.progress.find((progress) => progress.directiveId === 'menu-now')
+    ).toMatchObject({
+      status: 'succeeded',
+      conditionsMet: ['Movement succeeds.']
+    });
     expect(service.getBotStatuses(sessionId)[0].status).toBe('running');
 
     const unavailable = await service.guideBot({
@@ -929,6 +1043,40 @@ describe('SimulationService', () => {
     expect(stopped.status).toBe('stopped');
     expect(adapter.stoppedAll).toBe(true);
     expect((await service.getInstanceStatuses(adapterRunConfig.sessionId)).every((instance) => instance.status === 'stopped')).toBe(true);
+  });
+
+  it('completes shutdown and records an abnormal stop when adapter cleanup throws', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-abnormal-shutdown-'));
+    const adapter = new FailingStopAdapter();
+    const service = new SimulationService({
+      reportRoot,
+      now: () => new Date('2026-07-29T10:00:00.000Z').toISOString(),
+      systemSnapshot,
+      adapterFactory: { createAdapter: () => adapter }
+    });
+    const sessionConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-abnormal-shutdown',
+      useMockRuntime: false,
+      actionDelayMs: 10,
+      maxActionsPerBot: undefined
+    };
+    service.createSession({ runConfig: sessionConfig, gameProfile, botProfiles });
+    await service.startSession(sessionConfig.sessionId);
+
+    const snapshots = await service.shutdownAllSessions('test_app_shutdown');
+    const metadata = service.listSessions().find((item) => item.sessionId === sessionConfig.sessionId);
+    const saved = JSON.parse(await readFile(join(
+      metadata!.reportPaths.sessionDirectory,
+      'session.json'
+    ), 'utf8')) as { status: string };
+
+    expect(snapshots[0].status).toBe('failed');
+    expect(metadata?.status).toBe('failed');
+    expect(saved.status).toBe('failed');
+    expect(service.getLogs(sessionConfig.sessionId).some((log) =>
+      log.message.includes('Adapter shutdown failed')
+    )).toBe(true);
   });
 
   it('switches the watched bot, focuses its assigned instance, and falls back when it stops', async () => {
@@ -1428,8 +1576,7 @@ describe('SimulationService', () => {
     expect(sessionEvents.some((event) => event.eventType === 'session_stop')).toBe(true);
   });
 
-  it('attaches optional video evidence to issues when video capture is enabled', async () => {
-    vi.useFakeTimers();
+  it('rejects video capture because no production adapter implements it', async () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-video-'));
     const service = new SimulationService({
       reportRoot,
@@ -1446,24 +1593,25 @@ describe('SimulationService', () => {
     const videoRunConfig: SimulationRunConfig = {
       ...boundaryRunConfig,
       sessionId: 'session-critical-boundary-video',
-      saveVideo: true
+      saveVideo: true,
+      useMockRuntime: false
     };
 
-    service.createSession({
-      runConfig: videoRunConfig,
-      gameProfile: videoProfile,
-      botProfiles: boundaryBotProfiles
-    });
-    await service.startSession(videoRunConfig.sessionId);
+    const validation = service.validateSessionConfig({
+        runConfig: videoRunConfig,
+        gameProfile: videoProfile,
+        botProfiles: boundaryBotProfiles
+      });
 
-    await vi.advanceTimersByTimeAsync(350);
-    await vi.advanceTimersByTimeAsync(1000);
-
-    const issue = service.getIssues(videoRunConfig.sessionId).find((item) => item.category === 'world_boundary');
-
-    expect(issue?.videoPath).toBeDefined();
-    expect(issue?.videoPath ? existsSync(issue.videoPath) : false).toBe(true);
-    expect(issue?.evidencePaths).toContain(issue?.videoPath);
+    expect(validation.valid).toBe(false);
+    expect(validation.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: 'saveVideo',
+          message: expect.stringContaining('Video recording is unavailable')
+        })
+      ])
+    );
   });
 
   it('generates a build comparison report between sessions', async () => {
@@ -1604,6 +1752,104 @@ describe('SimulationService', () => {
     expect(comparisonContents).toContain('persisted-new-build');
   });
 
+  it('keeps persisted sessions read-only when listed or addressed by runtime controls', async () => {
+    vi.useFakeTimers();
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-read-only-session-'));
+    const sessionId = 'session-persisted-read-only';
+    const service = new SimulationService({
+      reportRoot,
+      now: () => new Date('2026-07-04T12:00:00.000Z').toISOString(),
+      systemSnapshot
+    });
+
+    service.createSession({
+      runConfig: { ...boundaryRunConfig, sessionId },
+      gameProfile,
+      botProfiles: boundaryBotProfiles
+    });
+    await service.startSession(sessionId);
+    await vi.advanceTimersByTimeAsync(1500);
+    await service.stopSession(sessionId);
+
+    const sessionDirectory = service.listSessions().find(
+      (session) => session.sessionId === sessionId
+    )!.reportPaths.sessionDirectory;
+    const metadataPath = join(sessionDirectory, 'session.json');
+    const statusBefore = service.getSessionStatus(sessionId).status;
+    const metadataBefore = await readFile(metadataPath, 'utf8');
+    const modifiedBefore = (await stat(metadataPath)).mtimeMs;
+    const restartedService = new SimulationService({
+      reportRoot,
+      now: () => new Date('2026-07-04T13:00:00.000Z').toISOString(),
+      systemSnapshot
+    });
+
+    restartedService.listSessions();
+    await restartedService.getStructuredLogs(sessionId);
+    await restartedService.shutdownAllSessions();
+    expect(await readFile(metadataPath, 'utf8')).toBe(metadataBefore);
+    expect((await stat(metadataPath)).mtimeMs).toBe(modifiedBefore);
+    await expect(restartedService.startSession(sessionId)).rejects.toThrow('read-only');
+    await expect(restartedService.stopSession(sessionId)).rejects.toThrow('read-only');
+    expect(() => restartedService.pauseSession(sessionId)).toThrow('read-only');
+    expect(() => restartedService.resumeSession(sessionId)).toThrow('read-only');
+    expect(restartedService.getSessionStatus(sessionId).status).toBe(statusBefore);
+  });
+
+  it('stores the exact used custom bot profile in the session config artifact', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-custom-profile-artifact-'));
+    const customProfile: BotProfile = {
+      ...botProfiles[0],
+      profileId: 'custom-inventory-reviewer',
+      displayName: 'Custom Inventory Reviewer',
+      botType: 'custom-inventory-reviewer',
+      preferredActions: ['open-inventory'],
+      avoidedActions: ['close-inventory']
+    };
+    const sessionId = 'session-custom-profile-artifact';
+    const service = new SimulationService({
+      reportRoot,
+      now: () => new Date('2026-07-04T14:00:00.000Z').toISOString(),
+      systemSnapshot
+    });
+
+    service.createSession({
+      runConfig: {
+        ...runConfig,
+        sessionId,
+        botPools: [{
+          ...runConfig.botPools[0],
+          profileId: customProfile.profileId,
+          minCount: 1,
+          desiredCount: 1
+        }]
+      },
+      gameProfile,
+      botProfiles: [customProfile, ...boundaryBotProfiles]
+    });
+
+    const sessionDirectory = service.listSessions().find(
+      (session) => session.sessionId === sessionId
+    )!.reportPaths.sessionDirectory;
+    const artifact = JSON.parse(
+      await readFile(join(sessionDirectory, 'config.json'), 'utf8')
+    ) as { botProfiles: BotProfile[] };
+    expect(artifact.botProfiles).toEqual([
+      expect.objectContaining({
+        profileId: customProfile.profileId,
+        preferredActions: ['open-inventory']
+      })
+    ]);
+
+    const restartedService = new SimulationService({ reportRoot, systemSnapshot });
+    expect(restartedService.getBotStatuses(sessionId)[0]).toMatchObject({
+      profileId: customProfile.profileId
+    });
+    expect(restartedService.getBotStatuses(sessionId)[0].displayName).toContain(
+      customProfile.displayName
+    );
+  });
+
   it('previews and exports GitHub issue markdown without a token', async () => {
     vi.useFakeTimers();
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-github-export-'));
@@ -1729,5 +1975,71 @@ describe('SimulationService', () => {
     expect(sessionEvents.some((event) => event.eventType === 'session_stop')).toBe(true);
     expect(summary).toContain('GameplaySimulator Session');
     expect(summary).toContain('session-interrupted');
+  });
+
+  it('does not open evidence outside the selected session directory', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-evidence-boundary-'));
+    const openedPaths: string[] = [];
+    const service = new SimulationService({
+      reportRoot,
+      systemSnapshot,
+      openPath: async (path) => {
+        openedPaths.push(path);
+        return '';
+      }
+    });
+    const sessionRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-evidence-boundary'
+    };
+    const created = service.createSession({
+      runConfig: sessionRunConfig,
+      gameProfile,
+      botProfiles
+    });
+    const sessionDirectory = service.listSessions()
+      .find((session) => session.sessionId === created.sessionId)!
+      .reportPaths.sessionDirectory;
+    const siblingPath = join(dirname(sessionDirectory), `${basename(sessionDirectory)}-copy`, 'issue.png');
+
+    const result = await service.openEvidence(created.sessionId, siblingPath);
+
+    expect(result.opened).toBe(false);
+    expect(result.message).toContain('not part of this session');
+    expect(openedPaths).toEqual([]);
+  });
+
+  it('opens only existing evidence files, not session directories', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-evidence-file-'));
+    const openedPaths: string[] = [];
+    const service = new SimulationService({
+      reportRoot,
+      systemSnapshot,
+      openPath: async (path) => {
+        openedPaths.push(path);
+        return '';
+      }
+    });
+    const created = service.createSession({
+      runConfig: {
+        ...runConfig,
+        sessionId: 'session-evidence-file'
+      },
+      gameProfile,
+      botProfiles
+    });
+    const sessionDirectory = service.listSessions()
+      .find((session) => session.sessionId === created.sessionId)!
+      .reportPaths.sessionDirectory;
+
+    const directoryResult = await service.openEvidence(created.sessionId, sessionDirectory);
+    const missingResult = await service.openEvidence(
+      created.sessionId,
+      join(sessionDirectory, 'screenshots', 'missing.png')
+    );
+
+    expect(directoryResult.opened).toBe(false);
+    expect(missingResult.opened).toBe(false);
+    expect(openedPaths).toEqual([]);
   });
 });

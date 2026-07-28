@@ -28,7 +28,6 @@ beforeEach(() => {
     runConfigs: [],
     lastValidatedRunConfig: null,
     runtimeObservation: defaultRuntimeObservationConfig,
-    advancedIntelligence: initialConfigState.advancedIntelligence,
     pendingSessionBotProfileId: null,
     pendingSessionBotProfileIds: []
   });
@@ -391,21 +390,14 @@ describe('New Session first-test templates', () => {
     expect((container?.querySelector('#session-observation-mode') as HTMLSelectElement).value).toBe('background');
   });
 
-  it('keeps long overnight mode background-first even when a smoke template is recommended', () => {
-    useConfigStore.setState({
-      advancedIntelligence: {
-        ...initialConfigState.advancedIntelligence,
-        longOvernightTestMode: true
-      }
-    });
-
+  it('does not expose unavailable video or mock-runtime controls in the beginner session form', () => {
     act(() => {
       root?.render(<NewSessionPage />);
     });
 
-    expect((container?.querySelector('#use-global-observation-settings') as HTMLInputElement).checked).toBe(false);
-    expect((container?.querySelector('#session-show-bot-gameplay') as HTMLInputElement).checked).toBe(false);
-    expect((container?.querySelector('#session-observation-mode') as HTMLSelectElement).value).toBe('background');
+    expect(container?.textContent).not.toContain('Save video');
+    expect(container?.textContent).not.toContain('Use mock runtime');
+    expect(container?.textContent).toContain('Session runtime state');
   });
 
   it('shows bot, total instance, visible instance, and background instance counts separately', async () => {

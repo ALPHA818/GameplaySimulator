@@ -1,91 +1,191 @@
 # GameplaySimulator
 
-GameplaySimulator is a desktop-first QA tool for running controlled AI/player-bot simulations against games you own, control, or have permission to test.
+GameplaySimulator is a desktop QA application for running controlled player-bot tests against games you own, control, or have permission to test. The desktop UI is the primary workflow for creating game profiles, choosing bots, starting sessions, watching live status, reviewing issues and evidence, and opening saved reports.
 
-It is game-agnostic by design. The core simulator is intended to work through adapters for many game types and engines, including Unity, Godot, Unreal, browser games, custom engines, RPG Maker, GameMaker, desktop games, and future adapter types.
+The simulator is game-agnostic. Browser, instrumented, desktop-window, Unity, Godot, Unreal, RPG Maker, GameMaker, and custom-engine workflows remain separated behind adapter boundaries.
 
-The UI is the main way to use GameplaySimulator. It will provide workflows for creating test sessions, selecting game profiles, choosing bot types, setting bot counts, starting and stopping simulations, watching live bot status, reviewing logs, inspecting issues, viewing screenshots or other evidence, and opening reports.
+GameplaySimulator is for legitimate development and QA. It is not a cheating tool. It does not bypass anti-cheat, inject into protected processes, automate public matchmaking, exploit public multiplayer games, or evade a game's protections.
 
-This project is for legitimate QA, regression testing, accessibility-style exploration, and reliability testing. It is not for cheating in public online games, bypassing anti-cheat, exploiting multiplayer systems, or violating a game's rules.
+## Install
 
-## Current Status
+Download the package for your operating system from the `v0.1.0` GitHub release.
 
-GameplaySimulator now has the desktop shell, shared data models, adapter-backed backend simulation service, bot pools, live session monitoring, issue/log viewers, readable reports, content coverage tracking, evidence capture, exploit detection, and placeholder adapter architecture. Mock runtime mode is available only as an explicit debug/demo option with `useMockRuntime: true`; normal sessions use the selected adapter.
+### Linux
 
-## Adapter Documentation
+The Linux release is an AppImage:
 
-Use the adapter docs to decide how to connect a game build:
+```bash
+chmod +x GameplaySimulator-0.1.0-linux-x86_64.AppImage
+./GameplaySimulator-0.1.0-linux-x86_64.AppImage
+```
 
-- [Adapter overview](docs/adapters/overview.md)
-- [Unity](docs/adapters/unity.md)
-- [Godot](docs/adapters/godot.md)
-- [Unreal](docs/adapters/unreal.md)
-- [Browser games](docs/adapters/browser.md)
-- [Desktop window fallback](docs/adapters/desktop-window.md)
-- [Custom engines](docs/adapters/custom-engine.md)
+The release also includes `linux-unpacked` for debugging. The installed application includes Electron and Chromium, so Node.js and Playwright are not required for normal use.
 
-In short: instrumented adapters give the best results, `DesktopWindowAdapter` works for many desktop games with weaker state awareness, and `BrowserAdapter` is only one adapter for browser-based games rather than the center of the architecture.
+### Windows
 
-## Scripts
+Run `GameplaySimulator-0.1.0-windows-x64.exe`. It is a portable application and does not require an installer. The release also includes `win-unpacked` for debugging.
 
-- `npm run dev` starts the Electron desktop app in development mode.
-- `npm run desktop` starts the same desktop app entry point.
-- `npm run build` type-checks and builds the desktop app and placeholder runner.
-- `npm run test` runs the Vitest test suite.
-- `npm run example:instrumented-server` starts the fake local instrumented game server.
+GameplaySimulator does not ship a macOS package in version `0.1.0`.
 
-## Usage Examples
+## Supported Systems
 
-### Testing a Unity Game
+| Operating system | Packaged application | Browser adapter | Instrumented adapter | Desktop-window adapter |
+| --- | --- | --- | --- | --- |
+| Linux x64 | AppImage | Chromium, visible or background | Local HTTP | Launch, health, focus/input with `xdotool`, screenshots with a supported screenshot tool |
+| Windows x64 | Portable executable | Chromium, visible or background | Local HTTP | Process launch, health, and safe stop only |
+| macOS | Not shipped | Not release-tested | Not release-tested | Not release-supported |
 
-Create a Game Profile with engine type `Unity`. Prefer the `InstrumentedAdapter` when your dev build can expose the GameplaySimulator instrumentation SDK over a local HTTP/WebSocket endpoint. If no instrumentation hook is available, use the Unity adapter in desktop-window fallback mode with launch path, working directory, and mapped controls.
+Windows desktop keyboard input, mouse input, window focus, and screenshot capture are not included in this release. Use the browser or Local HTTP instrumented adapter on Windows when bots need to perform actions.
 
-### Testing a Godot Game
+## Supported Adapters
 
-Create a Godot Game Profile and point the launch config at your exported debug build. Use instrumentation for scene, quest, inventory, UI, and performance state when possible. Use desktop-window fallback when only keyboard/mouse input and screenshots are available.
+- **Browser:** launches the bundled Chromium runtime through Playwright, reads optional game hooks or DOM clues, sends keyboard/mouse input, captures console and page errors, and takes screenshots. Firefox and WebKit are not included.
+- **Instrumented:** connects to the GameplaySimulator protocol over Local HTTP. It reads structured state, retrieves available actions, performs actions exposed by the game, and reads game logs. Local WebSocket, file/socket, and plugin transports are not included.
+- **Desktop window:** launches a local executable, monitors its process, stops it safely, and uses supported operating-system tools for focus, input, and screenshots. State awareness is limited without instrumentation.
+- **Unity, Godot, and Unreal:** use Local HTTP instrumentation when an endpoint is configured; otherwise they use the desktop-window adapter.
+- **RPG Maker and GameMaker:** use the desktop-window adapter.
+- **Custom engines:** use Local HTTP instrumentation when possible or desktop-window fallback. The generic custom-adapter runtime is not included.
 
-### Testing an Unreal Game
+Browser games use Chromium only in packaged builds. Users do not need to run `npx playwright install`.
 
-Create an Unreal Game Profile with the packaged dev executable and build ID. Instrumented Unreal dev builds should expose structured state and available actions through the SDK bridge. For black-box smoke tests, use desktop-window control mapping and screenshot evidence.
+## Linux Desktop Dependencies
 
-### Testing a Browser Game
+Desktop-window testing on Linux checks dependencies before a session:
 
-Create a Browser Game Profile with the local or staging URL. Select `browser` as the adapter type, configure whether multiple instances are supported, and choose bot pools such as explorer, UI tester, dialogue tester, and chaos monkey. Reports and evidence are written under `runs/`.
+- Install `xdotool` for window focus, keyboard input, and mouse input.
+- Install one of `gnome-screenshot`, `scrot`, or ImageMagick's `import` command for screenshots.
 
-### Testing a Generic Desktop Game
+The application can still launch and monitor a desktop process when these tools are missing, but it reports the missing capability and does not pretend input or screenshots succeeded.
 
-Create a Game Profile with engine type `custom` or `unknown`, launch platform `windows`, `linux`, or `mac`, and adapter type `desktop`. Map actions to controls such as `move up -> W`, `interact -> E`, `jump -> Space`, and `attack -> MouseLeft`. Desktop-window testing can launch the executable, send mapped input, capture screenshots, and collect limited process/window telemetry.
+## First Browser Test
 
-### Testing The Instrumented Adapter
+1. Start the browser game on a local or permitted test URL.
+2. Open **Game Profiles**, create a Browser profile, and enter the HTTP or HTTPS game URL.
+3. Keep the browser type set to Chromium. Add control mappings when the game does not expose browser instrumentation hooks.
+4. Use **Test Profile** to verify the page opens.
+5. Open **New Session** and apply **Browser Smoke Test**.
+6. Keep one bot, 20 actions, screenshots on, and video off.
+7. Enable **Show Bot Gameplay** to watch the first test, then start the session.
+8. Stop the session from **Live Session** if needed, then open the saved report from **Reports**.
 
-Start the fake local game server with `npm run example:instrumented-server`, then create an instrumented Game Profile with endpoint `http://127.0.0.1:4317` and transport `Local HTTP`. See [examples/instrumented-test-server](examples/instrumented-test-server/README.md) for the full setup.
+Browser instrumentation hooks are documented in [Browser Instrumentation Hooks](docs/adapters/browser-instrumentation.md).
 
-### Running Multiple Explorer Bots
+## First Desktop Test
 
-On the New Session screen, add or enable the explorer bot pool. Set a range such as min `1`, desired `8`, max `20`, then choose `auto` scaling. The ResourceManager estimates a safe final count from PC resources, adapter type, game instance limits, and user limits. The Live Session page shows the final resolved bots before and during the run.
+1. Use a local development or QA executable that you are allowed to test.
+2. Open **Game Profiles**, choose Desktop, and enter an absolute executable path and working directory.
+3. Add mappings for the controls the bot may use.
+4. Read the dependency report in the profile editor.
+5. On Linux, use **Test Profile**, then **Test Control** with a harmless control such as Menu.
+6. Open **New Session**, apply **Desktop Smoke Test**, and run one bot.
+7. Review process health, logs, screenshots when supported, and the final report.
 
-### Using Auto Scaling
+Desktop fallback has limited game-state awareness. For reliable scene, inventory, quest, UI, and progress data, use instrumentation instead.
 
-Use `auto` scaling for pools that can flex based on available CPU/RAM/GPU headroom. Use `fixed` scaling for bots that must run at the requested count. Fixed pools keep their desired count unless the request is impossible, and the viability panel explains warnings or blockers instead of silently dropping bots.
+## First Instrumented Test
 
-### Reading Reports
+The repository includes a controlled Local HTTP game server for integration testing:
 
-Open the Reports page after a run. Session summaries include bot counts, viability, actions, issues, coverage, stuck/crash status, and generated evidence paths. Bot reports live under each bot folder, issue markdown lives under `runs/session-.../issues/`, and optional GitHub issue markdown exports live under `runs/session-.../github-issues/`.
+```bash
+npm run example:instrumented-server
+```
+
+Then:
+
+1. Create a Custom-engine profile with adapter type Instrumented.
+2. Set the endpoint to `http://127.0.0.1:4317`.
+3. Keep the transport set to Local HTTP.
+4. Use **Test Profile** and confirm the health response and available actions.
+5. Create a one-bot smoke session and start it.
+6. Confirm actions change the structured state, then stop the session and open its report.
+
+Starting the included example server requires the source repository and Node.js. Games can implement the same protocol directly; see [Instrumented Test Server](examples/instrumented-test-server/README.md).
+
+## Application Data
+
+Packaged builds store generated data under Electron's per-user `userData` directory:
+
+| Data | Linux default | Windows default |
+| --- | --- | --- |
+| Workspace | `~/.config/GameplaySimulator/workspace/` | `%APPDATA%\GameplaySimulator\workspace\` |
+| Runs and reports | `~/.config/GameplaySimulator/runs/` | `%APPDATA%\GameplaySimulator\runs\` |
+| Application logs | `~/.config/GameplaySimulator/logs/` | `%APPDATA%\GameplaySimulator\logs\` |
+
+Linux honors `XDG_CONFIG_HOME` when it is set. The exact root can differ when the operating system redirects application data.
+
+Workspace data includes user-created game profiles, custom bot profiles, profile overrides, saved run configurations, observation settings, and issue review state. Workspace writes are validated and backed up. Packaged builds never write generated data into the installation directory, application resources, or the ASAR archive.
+
+Development sessions use the repository `runs/` folder. On first packaged launch, valid sessions found in known development run locations are copied into the packaged runs directory without deleting the originals. Duplicate session IDs are skipped.
+
+## Sessions And Results
+
+The simulator supports bot pools, resource viability estimates, parallel/sequential/hybrid instance planning, startup UI flows, user directives, live observation, stuck recovery, structured issue detection, content coverage, screenshots, logs, session comparison, and Markdown/HTML reports.
+
+Issues are automated findings, not guaranteed bugs. Review their confidence, last actions, state, logs, and screenshots before filing them. GitHub export creates a preview and Markdown by default; posting requires an explicit confirmation and token.
+
+Sessions loaded after an application crash are marked interrupted or failed. Their existing logs, evidence, and reports remain available and read-only.
 
 ## Known Limitations
 
-- Black-box desktop testing is weaker than instrumented testing because it has less direct access to game state.
-- Some games cannot safely run multiple instances, especially if they use shared save files, exclusive device locks, or singleton launchers.
-- Visual understanding is limited until vision model support is added; screenshot capture is evidence-first right now.
-- Anti-cheat-protected games should not be targeted. GameplaySimulator does not bypass anti-cheat, inject into protected processes, or evade multiplayer protections.
-- Public multiplayer games are out of scope unless you own/control the environment and have explicit permission to test.
+- Automated screenshot understanding, video recording, and controller/touch input simulation are not included.
+- Browser canvas and WebGL state is limited unless the game exposes the documented browser hooks.
+- Desktop fallback cannot reliably infer scene, inventory, quests, flags, or UI state.
+- Linux desktop focus/input depends on `xdotool`; screenshots depend on one supported screenshot command.
+- Windows desktop testing cannot send input or capture desktop screenshots in this release.
+- Some games cannot safely run multiple instances because they share saves, devices, launchers, or other resources.
+- Instrumented transport is Local HTTP only.
+- The generic custom-adapter runtime is unavailable; custom engines must use instrumentation or desktop fallback.
+- Video fields may exist in old saved data, but production session validation rejects video recording.
+- Public multiplayer and anti-cheat-protected games are out of scope.
 
-## Project Layout
+## Safety
 
-- `apps/desktop` contains the Electron main process, preload bridge, and React renderer UI.
-- `apps/runner` contains the placeholder backend runner package.
-- `packages/core` contains game-agnostic simulator types and future core services.
-- `packages/adapters` contains adapter boundaries for instrumented, desktop, browser, Unity, Godot, Unreal, and custom games.
-- `packages/ui-shared` contains shared UI constants and helpers.
-- `examples` contains sample game profile and run configuration files.
-- `runs` is reserved for generated run output and is ignored by git.
+Only test local, development, staging, private, or otherwise permitted game builds. Keep instrumentation endpoints bound to localhost and disabled in public builds. Do not use GameplaySimulator to bypass protections, inject code, manipulate unrelated processes, automate public matchmaking, or violate a game's terms.
+
+## Build From Source
+
+Source builds require Node.js `22.13.0` or newer in the Node 22 LTS line and npm 10 or newer:
+
+```bash
+nvm use
+npm ci
+npm test
+npm run test:e2e
+npm run build
+```
+
+Packaging commands:
+
+- `npm run package`: native unpacked application.
+- `npm run dist:linux`: Linux AppImage and unpacked directory; run on Linux.
+- `npm run dist:windows`: Windows portable executable and unpacked directory; run on Windows.
+- `npm run test:packaged`: packaged workspace, browser session, persistence, and report smoke test.
+
+Other development commands:
+
+- `npm run dev` or `npm run desktop`: desktop development mode.
+- `npm run example:instrumented-server`: controlled Local HTTP instrumented target.
+
+Release output is written to `release/`. Native packaging commands reject the wrong host operating system so the bundled Chromium runtime matches the package.
+
+## Documentation
+
+- [Adapter overview](docs/adapters/overview.md)
+- [Browser](docs/adapters/browser.md)
+- [Desktop window](docs/adapters/desktop-window.md)
+- [Unity](docs/adapters/unity.md)
+- [Godot](docs/adapters/godot.md)
+- [Unreal](docs/adapters/unreal.md)
+- [Custom engines](docs/adapters/custom-engine.md)
+- [Instrumentation SDK](packages/instrumentation-sdk/README.md)
+
+## Repository Layout
+
+- `apps/desktop`: Electron main process, preload bridge, and React renderer.
+- `packages/core`: game-agnostic types, bot runtime, detection, logging, reports, resources, and session services.
+- `packages/adapters`: the supported adapter implementations and engine wrappers.
+- `packages/instrumentation-sdk`: Local HTTP protocol types and client.
+- `packages/ui-shared`: shared UI helpers.
+- `examples`: sample profiles, configurations, and the controlled instrumented server.
+- `tests/e2e`: release-level real-adapter and persistence tests.
+- `runs`: ignored development run output.

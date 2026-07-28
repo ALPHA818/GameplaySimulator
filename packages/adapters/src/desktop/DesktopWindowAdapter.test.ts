@@ -153,6 +153,49 @@ describe('DesktopWindowAdapter', () => {
     expect(logs.some((log) => log.message.includes('graceful stop signal'))).toBe(true);
   });
 
+  it('rejects relative executables and working directories before launching', async () => {
+    const adapter = new DesktopWindowAdapter({
+      controlBindings: controls,
+      dependencyChecker
+    });
+
+    await expect(adapter.launchInstance({
+      ...instanceConfig,
+      launch: {
+        ...instanceConfig.launch,
+        executablePath: 'node'
+      }
+    })).rejects.toThrow('absolute executablePath');
+    await expect(adapter.launchInstance({
+      ...instanceConfig,
+      launch: {
+        ...instanceConfig.launch,
+        workingDirectory: './relative-game'
+      }
+    })).rejects.toThrow('workingDirectory must be an absolute path');
+  });
+
+  it('rejects a missing executable instead of reporting a launched instance', async () => {
+    const adapter = new DesktopWindowAdapter({
+      controlBindings: controls,
+      dependencyChecker
+    });
+    const executablePath = join(
+      tmpdir(),
+      `gameplay-simulator-missing-executable-${Date.now()}`
+    );
+
+    await expect(adapter.launchInstance({
+      ...instanceConfig,
+      launch: {
+        ...instanceConfig.launch,
+        executablePath,
+        arguments: []
+      }
+    })).rejects.toThrow(`Unable to launch desktop executable "${executablePath}"`);
+    expect(await adapter.isRunning(instanceConfig.instanceId)).toBe(false);
+  });
+
   it('maps GameAction objects to keyboard and mouse controls', async () => {
     const inputDriver = new RecordingInputDriver();
     const adapter = new DesktopWindowAdapter({

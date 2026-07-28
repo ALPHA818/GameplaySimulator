@@ -13,7 +13,7 @@ Use this simulator only for games you own, control, or have permission to test. 
 | Unreal | `InstrumentedAdapter` through a QA plugin/subsystem, optionally wrapped by `UnrealAdapter` | `DesktopWindowAdapter` | You can expose gameplay tags, level, pawn, UI, quest, and inventory state. |
 | Browser game | `BrowserAdapter` or `InstrumentedAdapter` for local/dev web builds | `DesktopWindowAdapter` for packaged/electron/webview builds | The game actually runs in a browser or local web runtime. |
 | Desktop game | `InstrumentedAdapter` if the game exposes a local API | `DesktopWindowAdapter` | The game is a normal executable with keyboard/mouse/controller input. |
-| Custom engine | `InstrumentedAdapter` over local HTTP/WebSocket/file bridge | `DesktopWindowAdapter` | You control the engine and can emit structured state/actions. |
+| Custom engine | `InstrumentedAdapter` over Local HTTP | `DesktopWindowAdapter` | You control the engine and can emit structured state/actions. |
 
 ## Best Results
 
@@ -26,7 +26,7 @@ Instrumented adapters give the best results because the simulator can read struc
 
 ## Fallback Results
 
-`DesktopWindowAdapter` works for many games but has weaker awareness. It can launch a process, focus a window where possible, send input, capture screenshots, and track basic process/window health. Without instrumentation, the simulator may only know:
+`DesktopWindowAdapter` has weaker awareness. It can launch and monitor a process on Linux and Windows. On Linux, it can focus a window and send input when `xdotool` is installed, and it can capture screenshots when a supported screenshot command is installed. Windows desktop input, focus, and screenshots are not included in this release. Without instrumentation, the simulator may only know:
 
 - Process status and window status.
 - Last action sent.
@@ -38,7 +38,7 @@ That is still useful for smoke tests, input loops, UI navigation, crash detectio
 
 ## Browser Is One Adapter
 
-`BrowserAdapter` exists for browser games, local web builds, and web-hosted prototypes. It is only one adapter among many. GameplaySimulator is not browser-first; it is intended to test Unity, Godot, Unreal, desktop games, custom engines, browser games, RPG Maker, GameMaker, and future adapter types.
+`BrowserAdapter` exists for browser games, local web builds, and web-hosted prototypes. It is only one adapter among many. GameplaySimulator is not browser-first; the shipped adapters also cover instrumented, desktop-window, Unity, Godot, Unreal, RPG Maker, GameMaker, and custom-engine fallback workflows.
 
 ## Common Game Profile Shape
 
@@ -137,4 +137,3 @@ Instrumented games should expose a compact but useful state object:
 - [Browser](./browser.md)
 - [Desktop Window](./desktop-window.md)
 - [Custom Engine](./custom-engine.md)
-

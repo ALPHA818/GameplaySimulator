@@ -3,7 +3,6 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { defaultRuntimeObservationConfig } from '@core/config/runtimeObservationConfig';
-import { defaultAdvancedIntelligenceConfig } from '@core/config/advancedIntelligenceConfig';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AppShell } from '../components/AppShell';
 import { useConfigStore } from '../store/configStore';
@@ -50,7 +49,6 @@ beforeEach(() => {
   window.localStorage.clear();
   useConfigStore.setState({
     currentPage: 'settings',
-    advancedIntelligence: defaultAdvancedIntelligenceConfig,
     runtimeObservation: defaultRuntimeObservationConfig
   });
 });
@@ -151,18 +149,21 @@ describe('SettingsPage live bot observation', () => {
       expect(page.querySelector('.sidebar')).not.toBeNull();
       expect(page.textContent).toContain('Real Runtime Readiness');
       expect(page.textContent).toContain('Adapter-first');
-      expect(page.textContent).toContain('Advanced Intelligence');
-      expect(page.textContent).toContain('0 enabled');
+      expect(page.textContent).toContain('Defaults');
+      expect(page.textContent).toContain('Enabled for default bot pools');
+      expect(page.textContent).toContain('Live Bot Observation');
+      expect(page.textContent).not.toContain('Advanced Intelligence');
+      expect(page.textContent).not.toContain('Long Overnight Test Mode');
 
       const notices = [...page.querySelectorAll('.settings-page .notice-list')];
       expect(notices.length).toBeGreaterThan(0);
       expect(notices.every((notice) => notice.closest('.form-section') !== null)).toBe(true);
 
-      const longToggle = Array.from(page.querySelectorAll('.toggle-row')).find((toggle) =>
-        toggle.textContent?.includes('Long Overnight Test Mode')
+      const observationToggle = Array.from(page.querySelectorAll('.toggle-row')).find((toggle) =>
+        toggle.textContent?.includes('Show Bot Gameplay')
       );
-      expect(longToggle?.querySelector('input')).not.toBeNull();
-      expect(longToggle?.querySelector('.field-label__text + .field-help')).not.toBeNull();
+      expect(observationToggle?.querySelector('input')).not.toBeNull();
+      expect(observationToggle?.querySelector('.field-label__text + .field-help')).not.toBeNull();
     }
   });
 });

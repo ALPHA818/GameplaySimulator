@@ -10,6 +10,7 @@ import {
   defaultRuntimeObservationConfig,
   type RuntimeObservationConfig
 } from '@core/config/runtimeObservationConfig';
+import { join } from 'node:path';
 import type { AdapterFactoryOptions } from './AdapterFactory';
 import type { AdapterCapabilities, ObservationCapability } from './base/GameAdapter';
 import { createExternalDesktopWindowFocusHandler } from './desktop/DesktopWindowAdapter';
@@ -43,12 +44,38 @@ export interface AdapterProfileOptionsResult {
   observationMessage: string;
 }
 
+export interface AdapterRuntimePathOptions {
+  runsRoot?: string;
+}
+
 const engineAdapterTypes = new Set<AdapterType>(['unity', 'godot', 'unreal']);
 const desktopAdapterTypes = new Set<AdapterType>(['desktop', 'rpg_maker', 'gamemaker']);
 
 function trimmed(value: string | undefined): string | undefined {
   const text = value?.trim();
   return text && text.length > 0 ? text : undefined;
+}
+
+function isHttpUrl(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  try {
+    return ['http:', 'https:'].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function isAbsoluteExecutablePath(value: string | undefined): boolean {
+  if (!value || value.includes('\0')) {
+    return false;
+  }
+
+  return value.startsWith('/') ||
+    value.startsWith('\\\\') ||
+    /^[a-zA-Z]:[\\/]/.test(value);
 }
 
 function cloneControlBindings(bindings: ControlBinding[]): ControlBinding[] {
@@ -191,6 +218,17 @@ function validateProfileAdapterSettings(input: {
     });
   }
 
+  if (
+    usesDesktopFallback &&
+    trimmed(gameProfile.launch.executablePath) &&
+    !isAbsoluteExecutablePath(trimmed(gameProfile.launch.executablePath))
+  ) {
+    errors.push({
+      path: 'launch.executablePath',
+      message: 'Desktop executable path must be an absolute file path, not a command name or relative path.'
+    });
+  }
+
   if (runtimeMode === 'browser' && !browserUrl) {
     errors.push({
       path: 'launch.url',
@@ -198,10 +236,46 @@ function validateProfileAdapterSettings(input: {
     });
   }
 
+  if (runtimeMode === 'browser' && browserUrl && !isHttpUrl(browserUrl)) {
+    errors.push({
+      path: 'launch.url',
+      message: 'Browser game URL must use http or https.'
+    });
+  }
+
   if (runtimeMode === 'instrumented' && !instrumentationEndpoint) {
     errors.push({
       path: 'adapter.instrumentationEndpoint',
       message: 'Instrumented adapter profiles need an instrumentation endpoint, like http://127.0.0.1:4555.'
+    });
+  }
+
+  if (
+    (runtimeMode === 'instrumented' || runtimeMode === 'engine-instrumented') &&
+    instrumentationEndpoint &&
+    !isHttpUrl(instrumentationEndpoint)
+  ) {
+    errors.push({
+      path: 'adapter.instrumentationEndpoint',
+      message: 'Local HTTP instrumentation endpoint must use http or https.'
+    });
+  }
+
+  if (
+    (runtimeMode === 'instrumented' || runtimeMode === 'engine-instrumented') &&
+    gameProfile.adapter.instrumentationTransport !== undefined &&
+    gameProfile.adapter.instrumentationTransport !== 'local-http'
+  ) {
+    errors.push({
+      path: 'adapter.instrumentationTransport',
+      message: 'Only Local HTTP instrumentation is available in this build.'
+    });
+  }
+
+  if (runtimeMode === 'custom') {
+    errors.push({
+      path: 'adapter.type',
+      message: 'Custom adapter runtime is unavailable in this build. Choose an instrumented or desktop adapter.'
     });
   }
 
@@ -219,10 +293,10 @@ function validateProfileAdapterSettings(input: {
     });
   }
 
-  if (runConfig.saveVideo && !gameProfile.adapter.supportsVideo) {
-    warnings.push({
-      path: 'adapter.supportsVideo',
-      message: 'Video is enabled for the run, but this game profile says the adapter cannot record video.'
+  if (runConfig.saveVideo) {
+    errors.push({
+      path: 'saveVideo',
+      message: 'Video recording is unavailable in this build. Turn off Save Video before starting the session.'
     });
   }
 
@@ -262,7 +336,8 @@ function validateProfileAdapterSettings(input: {
 export function createAdapterOptionsFromGameProfile(
   gameProfile: GameProfile,
   runConfig: SimulationRunConfig,
-  runtimeObservation: RuntimeObservationConfig = defaultRuntimeObservationConfig
+  runtimeObservation: RuntimeObservationConfig = defaultRuntimeObservationConfig,
+  runtimePaths: AdapterRuntimePathOptions = {}
 ): AdapterProfileOptionsResult {
   const adapterType = runConfig.adapterType;
   const instrumentationEndpoint = instrumentationEndpointFor(gameProfile, adapterType);
@@ -282,7 +357,9 @@ export function createAdapterOptionsFromGameProfile(
   );
   const controlBindings = cloneControlBindings(gameProfile.controls);
   const launchArguments = [...gameProfile.launch.arguments];
-  const screenshotDirectory = `runs/${runConfig.sessionId}/adapter-screenshots`;
+  const screenshotDirectory = runtimePaths.runsRoot
+    ? join(runtimePaths.runsRoot, runConfig.sessionId, 'adapter-screenshots')
+    : `runs/${runConfig.sessionId}/adapter-screenshots`;
   const desktopOptions = {
     executablePath: gameProfile.launch.executablePath,
     workingDirectory: gameProfile.launch.workingDirectory,

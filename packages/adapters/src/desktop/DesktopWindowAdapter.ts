@@ -13,8 +13,8 @@ import {
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
-import { totalmem } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { tmpdir, totalmem } from 'node:os';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { LogEntry } from '@core/logging/LogEntry';
 import { BaseGameAdapter } from '../base/BaseGameAdapter';
@@ -176,7 +176,17 @@ function ensureExecutablePath(path: string | undefined): string {
     throw new Error('DesktopWindowAdapter requires an executablePath to launch a game instance.');
   }
 
-  return path;
+  const executablePath = path.trim();
+
+  if (!isAbsolute(executablePath)) {
+    throw new Error('DesktopWindowAdapter requires an absolute executablePath.');
+  }
+
+  if (executablePath.includes('\0')) {
+    throw new Error('DesktopWindowAdapter executablePath contains a null character.');
+  }
+
+  return executablePath;
 }
 
 function safeNumber(value: string | undefined): number | undefined {
@@ -425,6 +435,7 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
   private readonly processStopTimeoutMs: number;
   private readonly runtimeObservation: RuntimeObservationConfig;
   private readonly desktopInstances = new Map<string, DesktopInstanceRuntime>();
+  private readonly stoppedInstanceLogs = new Map<string, LogEntry[]>();
   private followedBotId?: string;
   private dependencyReport?: DesktopAdapterDependencyReport;
 
@@ -457,7 +468,8 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     this.workingDirectory = options.workingDirectory;
     this.launchArguments = options.launchArguments ? [...options.launchArguments] : [];
     this.controlBindings = options.controlBindings ?? [];
-    this.screenshotDirectory = options.screenshotDirectory ?? join(process.cwd(), 'runs', 'screenshots');
+    this.screenshotDirectory = options.screenshotDirectory ??
+      join(tmpdir(), 'gameplay-simulator', 'desktop-screenshots');
     this.inputDriver = options.inputDriver ?? new PlatformDesktopInputDriver();
     this.screenshotDriver = options.screenshotDriver ?? new PlatformScreenshotDriver();
     this.dependencyChecker = options.dependencyChecker ?? new DesktopAdapterDependencyChecker();
@@ -471,10 +483,20 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
   }
 
   override async launchInstance(config: GameInstanceConfig): Promise<GameAdapterInstance> {
+    this.stoppedInstanceLogs.delete(config.instanceId);
     const dependencyReport = await this.checkDependencies();
     const executablePath = ensureExecutablePath(config.launch.executablePath ?? this.executablePath);
     const args = config.launch.arguments.length > 0 ? config.launch.arguments : this.launchArguments;
     const workingDirectory = config.launch.workingDirectory ?? this.workingDirectory;
+
+    if (args.some((argument) => argument.includes('\0'))) {
+      throw new Error('DesktopWindowAdapter launch arguments cannot contain null characters.');
+    }
+
+    if (workingDirectory && (!isAbsolute(workingDirectory) || workingDirectory.includes('\0'))) {
+      throw new Error('DesktopWindowAdapter workingDirectory must be an absolute path.');
+    }
+
     const child = spawn(executablePath, args, {
       cwd: workingDirectory,
       env: {
@@ -482,7 +504,17 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
         ...config.environment
       },
       windowsHide: false,
-      stdio: 'ignore'
+      stdio: 'ignore',
+      shell: false
+    });
+
+    await new Promise<void>((resolveLaunch, rejectLaunch) => {
+      child.once('spawn', resolveLaunch);
+      child.once('error', (error) => {
+        rejectLaunch(
+          new Error(`Unable to launch desktop executable "${executablePath}": ${error.message}`)
+        );
+      });
     });
 
     const startedAt = now();
@@ -531,7 +563,7 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
       }
     });
 
-    child.on('error', (error) => {
+    child.once('error', (error) => {
       const runtime = this.desktopInstances.get(config.instanceId);
 
       if (runtime) {
@@ -567,7 +599,21 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
       runtime.child.kill('SIGTERM');
 
       await new Promise<void>((resolveStop) => {
+        let resolved = false;
         let forcedKillSent = false;
+        let forceTimeout: NodeJS.Timeout | undefined;
+        const finish = (): void => {
+          if (resolved) {
+            return;
+          }
+
+          resolved = true;
+          clearTimeout(timeout);
+          if (forceTimeout) {
+            clearTimeout(forceTimeout);
+          }
+          resolveStop();
+        };
         const timeout = setTimeout(() => {
           if (runtime.child && !hasExited(runtime.child)) {
             forcedKillSent = true;
@@ -578,13 +624,14 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
               message: `Graceful stop timed out after ${this.processStopTimeoutMs} ms; sent forced kill signal.`
             });
             runtime.child.kill('SIGKILL');
+            forceTimeout = setTimeout(finish, 1_000);
+            return;
           }
 
-          resolveStop();
+          finish();
         }, this.processStopTimeoutMs);
 
         runtime.child?.once('exit', () => {
-          clearTimeout(timeout);
           runtime.stopEvents.push({
             eventType: forcedKillSent ? 'forced_kill_completed' : 'graceful_stop_completed',
             timestamp: now(),
@@ -593,18 +640,71 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
               ? 'Desktop game process exited after forced kill signal.'
               : 'Desktop game process exited after graceful stop signal.'
           });
-          resolveStop();
+          finish();
         });
       });
+
+      if (!hasExited(runtime.child) && pidIsAlive(runtime.processInfo.pid)) {
+        runtime.stopEvents.push({
+          eventType: 'stop_failed',
+          timestamp: now(),
+          message: 'Owned desktop process did not exit after graceful and forced stop attempts.'
+        });
+        throw new Error('Owned desktop process did not exit after forced stop.');
+      }
     }
 
     runtime.processInfo.alive = false;
     runtime.processInfo.exitedAt = runtime.processInfo.exitedAt ?? now();
+    this.archiveAndReleaseRuntime(instanceId, runtime);
     await super.stopInstance(instanceId);
   }
 
   override async stopAll(): Promise<void> {
     await Promise.all([...this.desktopInstances.keys()].map((instanceId) => this.stopInstance(instanceId)));
+  }
+
+  async forceStopAll(): Promise<void> {
+    const failures: string[] = [];
+
+    for (const [instanceId, runtime] of this.desktopInstances) {
+      if (runtime.child && !hasExited(runtime.child)) {
+        try {
+          runtime.child.kill('SIGKILL');
+        } catch {
+          // The owned process may have exited between the health check and the signal.
+        }
+
+        await new Promise<void>((resolveExit) => {
+          const timeout = setTimeout(resolveExit, 1_000);
+          runtime.child?.once('exit', () => {
+            clearTimeout(timeout);
+            resolveExit();
+          });
+        });
+      }
+
+      if (!hasExited(runtime.child) && pidIsAlive(runtime.processInfo.pid)) {
+        runtime.stopEvents.push({
+          eventType: 'stop_failed',
+          timestamp: now(),
+          message: 'Owned desktop process remained alive after the forced shutdown attempt.'
+        });
+        failures.push(instanceId);
+        continue;
+      }
+
+      runtime.processInfo.alive = false;
+      runtime.processInfo.exitedAt = runtime.processInfo.exitedAt ?? now();
+      this.archiveAndReleaseRuntime(instanceId, runtime);
+      await super.stopInstance(instanceId);
+    }
+
+    if (failures.length > 0) {
+      throw new Error(
+        `Unable to stop owned desktop process instances: ${failures.join(', ')}.`
+      );
+    }
   }
 
   override async isRunning(instanceId: string): Promise<boolean> {
@@ -948,9 +1048,13 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     const runtime = this.desktopInstances.get(instanceId);
 
     if (!runtime) {
-      return super.captureLogs(instanceId);
+      return this.stoppedInstanceLogs.get(instanceId) ?? super.captureLogs(instanceId);
     }
 
+    return this.logsForRuntime(instanceId, runtime);
+  }
+
+  private logsForRuntime(instanceId: string, runtime: DesktopInstanceRuntime): LogEntry[] {
     return runtime.stopEvents.map((event, index) => ({
       id: `${instanceId}-desktop-stop-${index + 1}`,
       level: event.eventType === 'forced_kill_requested' || event.eventType === 'stop_failed' ? 'warn' : 'info',
@@ -958,6 +1062,16 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
       timestamp: event.timestamp,
       source: this.id
     }));
+  }
+
+  private archiveAndReleaseRuntime(
+    instanceId: string,
+    runtime: DesktopInstanceRuntime
+  ): void {
+    this.stoppedInstanceLogs.set(instanceId, this.logsForRuntime(instanceId, runtime));
+    runtime.child?.removeAllListeners();
+    runtime.child = undefined;
+    this.desktopInstances.delete(instanceId);
   }
 
   private requireDesktopRuntime(instanceId: string): DesktopInstanceRuntime {

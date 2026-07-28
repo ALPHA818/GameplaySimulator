@@ -154,7 +154,7 @@ const fieldHelpText: Record<string, string> = {
   'Desktop Input Driver':
     'This shows whether the simulator can send keyboard or mouse input to desktop games. Bots use it to control the game like a player. For example, Linux uses xdotool. If it is missing, bots may launch the game but cannot press buttons. Beginners on Linux should install xdotool.',
   'Custom Test Method':
-    'This chooses how a custom engine should be tested. The simulator can use an instrumented endpoint, desktop fallback, or a custom adapter placeholder. For example, choose Instrumented endpoint if your engine can expose game state over HTTP. If this is wrong, the test may not control the game. Beginners should choose Instrumented when possible, then Desktop fallback.',
+    'This chooses how a custom engine should be tested. The simulator can use a working instrumented endpoint or desktop fallback. Custom adapter runtime is unavailable in this build. For example, choose Instrumented endpoint if your engine can expose game state over HTTP. If this is wrong, the test may not control the game. Beginners should choose Instrumented when possible, then Desktop fallback.',
   'Engine Type':
     'This is the game engine or game kind. The simulator uses it to suggest the right adapter. For example, Unity, Godot, Unreal, Browser, or Custom. If it is wrong, setup hints may be less useful. Beginners can choose Unknown if they are not sure.',
   'Engine Test Mode':
@@ -268,11 +268,11 @@ const fieldHelpText: Record<string, string> = {
   'Multiple Instances':
     'This says the game can safely run more than one copy at the same time. The simulator uses it for parallel bot testing. For example, two game windows can run side by side. If this is wrong, save files or windows may conflict. Beginners should turn it off unless they tested it.',
   'Browser Name':
-    'This chooses which browser to use when a browser adapter supports that choice. The simulator can use it later to pick Chrome, Edge, Firefox, or another browser. For example, chrome. If this is wrong, the adapter may use a browser you did not expect. Beginners can leave it blank.',
+    'This chooses which browser opens the game. The installed app includes Chromium. For example, enter chromium. Firefox and WebKit are not included in this release, so choosing them may fail unless a developer installed their browser files. Beginners should use chromium.',
   'Browser Context':
     'This is a private browser space for one game instance. The simulator uses it so each test copy has its own cookies, storage, and page. For example, two instances can open the same game without sharing login state. If this is shared by mistake, bots may affect each other. Beginners should use one context per instance.',
   'Browser Type':
-    'This chooses which Playwright browser opens the game. The simulator uses Chromium by default. For example, use chromium for most browser game testing. If this is wrong, the page may behave differently than expected or fail to open. Beginners should use chromium.',
+    'This chooses which Playwright browser opens the game. The installed app includes Chromium and uses it by default. For example, enter chromium. Firefox and WebKit are not included in this release. Beginners should use chromium.',
   'Mouse Input':
     'This shows whether the simulator can click mouse buttons for desktop games. Bots use it for actions like attack or select. For example, Attack might use MouseLeft. If this is unavailable, mouse controls will be skipped or fail. Beginners should map keyboard controls when possible.',
   Observed:
@@ -308,7 +308,9 @@ const fieldHelpText: Record<string, string> = {
   'Report Actions':
     'These are actions you can take for a saved session. The simulator uses them to open reports, inspect issues, view logs, compare runs, or export issue markdown. For example, choose View Issues to review bugs from an old run. If you pick the wrong row, you may open the wrong session. Beginners should start with Open Report.',
   'Archive session bundle':
-    'This saves a bundle archive manifest before cleanup. The simulator records the files that were in the run so you can see what existed later. For example, archive before deleting raw state logs. If you skip this, cleanup has less history. Beginners should turn this on before cleaning old runs.',
+    'This saves a list of the files in the session before cleanup. It does not copy or compress those files. For example, save the list before deleting raw state logs so you can see which files existed. If you skip it, cleanup has less history. Beginners should turn this on before cleaning old runs.',
+  'Save bundle file list':
+    'This saves a list of the files in the session before cleanup. It does not copy or compress those files. For example, save the list before deleting raw state logs so you can see which files existed. If you skip it, cleanup has less history. Beginners should turn this on before cleaning old runs.',
   'Full Logs':
     'This shows every structured log saved for the selected run. The simulator uses it when you need the complete timeline. For example, it includes session logs, bot actions, bot states, issues, and instance logs. If it feels too noisy, use Important Events. Beginners should start with Important Events.',
   'Important Events':
@@ -409,9 +411,9 @@ const fieldHelpText: Record<string, string> = {
     'This is how long the simulator waits for the startup flow, in seconds. It uses this limit so a stuck menu setup does not run forever. For example, 60 means wait up to one minute. If it is too short, slow loading may fail. Beginners should use 60.',
   'Continue if startup flow fails':
     'This lets normal bots start even if the setup flow fails. The simulator uses it when you want to inspect what happens after a bad setup. For example, turn it on during experiments. If it is off, the session stops when setup fails. Beginners should leave it off.',
-  'Test Startup Flow':
+  'Check Startup Flow':
     'This checks whether the selected startup flow is ready to use. The simulator checks the saved flow steps before starting a real session. For example, it confirms that Create World has steps. If this fails, edit the game profile UI flow. Beginners should run this before starting bots.',
-  'Startup Flow Test Result':
+  'Startup Flow Check Result':
     'This shows the result of checking the startup flow setup. The simulator uses it to tell you if the flow has steps and a timeout. For example, it may say the flow has six steps. If it reports a problem, fix the flow before starting. Beginners should look for a ready message.',
   Status:
     'This shows the current state of a bot or game instance. The simulator uses it to decide what can happen next. For example, running means active, stopped means finished, and failed means something went wrong. If the status is unhealthy, the run may need attention. Beginners should look for running during a test and stopped after it ends.',
@@ -425,8 +427,6 @@ const fieldHelpText: Record<string, string> = {
     'This says the adapter can take pictures of the game. The simulator uses screenshots as proof when bots find issues. For example, a screenshot can show a stuck menu. If this is wrong, screenshot capture may fail. Beginners should turn it on only if screenshots work for this game.',
   'Supports State Read':
     'This says the simulator can read real game state, like scene, player, quest, or inventory data. It is used for smarter bots and better issue reports. For example, the game can say the player is in Town. If this is wrong, bots may make poor choices. Beginners should turn it on only for instrumented builds.',
-  'Supports Video':
-    'This says the adapter can record video evidence. The simulator uses video to show what happened before an issue. For example, a video can show a crash or softlock. If this is wrong, video capture may fail. Beginners can leave it off.',
   'Supported Capabilities':
     'This shows what the selected adapter says it can do. The simulator uses these abilities to decide how bots launch, read state, send actions, and save evidence. For example, screenshots may be supported but video may not. If a needed ability says No, that feature may fail later. Beginners should make sure launch, actions, and screenshots match their plan.',
   'Stopped bots':
@@ -448,12 +448,12 @@ const fieldHelpText: Record<string, string> = {
   'Process Stop Timeout':
     'This is how long the simulator waits for a desktop game to close nicely before forcing it to stop. It protects the computer from stuck test processes. For example, 2500 means wait 2.5 seconds. If it is too short, the game may close too harshly. Beginners should keep the default.',
   'Transport Type':
-    'This is how the simulator talks to an instrumented game. The instrumented adapter uses it to choose local HTTP, WebSocket, file bridge, or plugin bridge. For example, local HTTP works with http://127.0.0.1:4555. If this is wrong, the simulator may not connect. Beginners should choose Local HTTP.',
+    'This is how the simulator talks to an instrumented game. Local HTTP is the available transport in this build. For example, it works with http://127.0.0.1:4555. Other listed transports are unavailable and cannot be selected. If the saved value is wrong, validation stops the session before launch. Beginners should choose Local HTTP.',
   'Total bots':
     'This is the full number of bots in the session. The simulator uses it to summarize how many testers are active or planned. For example, 8 total bots may include explorer and combat bots. If this is wrong, check the bot pools. Beginners should keep this modest at first.',
   'UI Flow JSON':
     'This describes a menu journey the UI Journey Bot should follow. The simulator uses it for multi-step flows like Play Game, Create Game, Game Settings, and Start World. For example, one step can press Enter on Play Game. If the JSON is wrong, the bot cannot follow the flow. Beginners should start with the sample flow and edit the labels and keys.',
-  'Flow Test Result':
+  'Flow Validation Result':
     'This shows whether the configured UI flow looks usable. The simulator checks the flow shape before bots run it. For example, it can confirm that the first step has an action and key. If this says failed, fix the flow before starting a session. Beginners should test the full flow after editing it.',
   'UI Journey Bot':
     'This bot follows the UI flows saved in the game profile. The simulator uses it to get through layered menus before normal bots explore gameplay. For example, it can click Play Game, Create Game, then Start World. If no flow is configured, it behaves like a normal rule-based bot. Beginners should add one UI Journey Bot when the game starts in menus.',
@@ -469,44 +469,12 @@ const fieldHelpText: Record<string, string> = {
     'This means the browser adapter can click inside the game page. Bots use it for actions like attack, select, or confirm. For example, Attack might use MouseLeft. If the click point or mapping is wrong, the bot may miss the target. Beginners should prefer keyboard controls when possible.',
   Version:
     'This is the game version. The simulator uses it in reports and comparisons. For example, 1.0.0 or demo-v2. If it is wrong, reports may point to the wrong version. Beginners should write the version shown in the game or launcher.',
-  Video:
-    'This records video evidence if the adapter supports it. The simulator uses it to show what happened before an issue. For example, a video can show a bot getting stuck. If this is on without support, it will stay disabled. Beginners can leave it off.',
-  'Save video':
-    'This tells the simulator to record video if the adapter supports it. The simulator uses video to show what happened before an issue. For example, video can show the steps before a crash. If this is on for an unsupported adapter, it will not record. Beginners can leave it off until screenshots are working.',
   'Adapter Evidence':
-    'This shows whether real screenshots or video proof can come from the adapter. The simulator uses this proof when it reports bugs. For example, a browser adapter can take a page screenshot. If this is not ready, reports may only have fallback proof. Beginners should get screenshots working before advanced features.',
-  'Advanced Intelligence Status':
-    'This shows whether smarter testing features are enabled. The simulator uses this to keep advanced tools behind the real game runtime. For example, vision should stay off until the app can launch and control your game. If this is ignored, settings may look smart but not help testing. Beginners should keep advanced features off at first.',
-  'Action Replay Scripts':
-    'This lets the simulator save a small script of actions that may repeat a bug. It uses the script to help you replay what the bot did. For example, move-forward, jump, then open-menu. If this is wrong, the replay may not match the real bug. Beginners should leave it off until normal reports are useful.',
-  'Bot Strategy Tuning':
-    'This changes how strongly bots follow certain habits. The simulator uses it to make bots more curious, careful, or bug-focused. For example, an explorer can try more unusual paths. If it is too extreme, bots may miss normal gameplay. Beginners should use the default profiles.',
-  'Bot Strategy Tuning Mode':
-    'This chooses the style used when strategy tuning is turned on. The simulator uses it to adjust bot choices after normal control works. For example, exploration-heavy makes bots search more places. If it is wrong, bots may test the wrong kind of behavior. Beginners should use Profile Defaults.',
-  'Bug Deduplication':
-    'This controls how repeated bugs are grouped. The simulator uses it to reduce duplicate reports. For example, three bots finding the same stuck menu can become one group. If this is too strict, different bugs may be grouped together. Beginners should use Basic until reports are easy to review.',
-  'Engine-Specific Plugins':
-    'This enables extra helpers for one game engine. The simulator may use them later for deeper Unity, Godot, or Unreal testing. For example, a Unity plugin could share better scene data. If the plugin is wrong, tests may fail or show confusing data. Beginners should use the normal adapter first.',
-  Heatmaps:
-    'This shows where bots spent time in the game. The simulator uses it to find tested and untested areas. For example, a map may show many visits near the start area. If position data is weak, the heatmap may be inaccurate. Beginners should use it after basic coverage works.',
-  'Long Overnight Test Mode':
-    'This prepares settings for a long test while you are away. The simulator uses it to favor safer limits, logs, and reports. For example, run bots overnight on a stable dev build. If your setup is not stable, it may waste time or disk space. Beginners should do short runs first.',
-  'Map Memory':
-    'This lets bots remember places they have visited. The simulator uses it for better exploration later. For example, a bot can avoid checking the same hallway too often. If the game state is weak, the map may be wrong. Beginners should leave it off until real state or screenshots are working.',
-  'Performance Graphs':
-    'This draws computer and game speed over time. The simulator uses it to spot slowdowns. For example, a graph can show memory rising every minute. If performance data is missing, the graph may be incomplete. Beginners should use it after normal sessions run cleanly.',
+    'This shows whether real screenshot proof can come from the adapter. The simulator uses this proof when it reports bugs. For example, a browser adapter can take a page screenshot. If this is not ready, reports may only have fallback proof. Beginners should get screenshots working before longer tests.',
   'Persistent Reports':
     'This shows whether old sessions and reports are saved on disk. The simulator uses saved runs so results survive app restarts. For example, yesterday’s session can still be opened from Reports. If this is not ready, advanced comparisons may lose data. Beginners should check reports after a short run.',
-  'Quest Inference':
-    'This lets bots guess what a quest wants next. The simulator uses it later when the game does not give perfect quest data. For example, it may guess that Find the Key needs a locked door. If the guess is wrong, bots may waste time. Beginners should keep it off until quest data is reliable.',
   'Real Adapter Runtime':
-    'This shows whether the app has the real adapter path available. The simulator uses adapters to launch, control, and read real games. For example, DesktopWindowAdapter can launch an executable. If this is not ready, smart features would only decorate mock data. Beginners should test a real profile first.',
-  'Real Runtime Prerequisite':
-    'This confirms that real game launch, control, state, evidence, and reports work before smarter features are enabled. The simulator uses it as a safety gate. For example, turn it on after a real adapter session starts and stops correctly. If you turn it on too early, advanced settings may not help. Beginners should leave it off until a simple real run works.',
-  'Vision Model':
-    'This lets the simulator understand screenshots better. It can help bots notice menus, buttons, enemies, stuck screens, or visual bugs. This is advanced and may use more computer power. If it is wrong or too heavy, testing may slow down. Beginners should leave it off until normal testing works.',
-  'Vision Model Mode':
-    'This chooses where screenshot understanding will run. The simulator may later use a local model or an external service. For example, local means it runs on your computer. If this is wrong, it may be slow, fail, or use the wrong tool. Beginners should keep it Off.',
+    'This shows whether the app has the real adapter path available. The simulator uses adapters to launch, control, and read real games. For example, DesktopWindowAdapter can launch an executable. If this is not ready, the game cannot be tested. Beginners should test a real profile first.',
   'With issues':
     'This shows how much tested content had problems. The simulator uses it to connect coverage with bugs. For example, one scene with issues may need closer review. If this number is high, open the Issues page. Beginners should fix critical issues first.',
   'Working Directory':

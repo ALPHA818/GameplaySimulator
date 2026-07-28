@@ -57,6 +57,14 @@ describe('AdapterFactory', () => {
     });
   });
 
+  it('fails explicitly instead of starting a synthetic custom adapter instance', async () => {
+    const adapter = AdapterFactory.createAdapter('custom');
+
+    await expect(adapter.launchInstance(instanceConfig)).rejects.toThrow(
+      /Custom adapter runtime is unavailable/
+    );
+  });
+
   it('uses instrumented capabilities for engine adapters when an instrumentation endpoint is provided', () => {
     const adapter = AdapterFactory.createAdapter('unity', {
       unity: {
@@ -69,7 +77,7 @@ describe('AdapterFactory', () => {
     expect(adapter.capabilities.supportsDirectActions).toBe(true);
   });
 
-  it('tracks placeholder lifecycle through the generic interface', async () => {
+  it('tracks the engine fallback lifecycle through the generic interface', async () => {
     const adapter = AdapterFactory.createAdapter('godot');
     const instance = await adapter.launchInstance(instanceConfig);
 

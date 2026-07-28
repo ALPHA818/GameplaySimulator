@@ -21,6 +21,7 @@ import { FieldLabel, SelectInput } from '../components/FormFields';
 import { LiveBotGuidancePanel } from '../components/LiveBotGuidancePanel';
 import { useConfigStore } from '../store/configStore';
 import { useSessionStore } from '../store/sessionStore';
+import { pollRuntimeDetails } from '../runtimePolling';
 
 function formatRuntime(startedAt?: string, stoppedAt?: string): string {
   if (!startedAt) {
@@ -68,8 +69,10 @@ export function LiveSessionPage() {
   const coverage = useSessionStore((state) => state.coverage);
   const liveObservation = useSessionStore((state) => state.liveObservation);
   const selectedIssueId = useSessionStore((state) => state.reviewIssueId);
+  const setReviewSessionId = useSessionStore((state) => state.setReviewSessionId);
   const applySessionSnapshot = useSessionStore((state) => state.applySessionSnapshot);
   const applyRuntimeDetails = useSessionStore((state) => state.applyRuntimeDetails);
+  const setRuntimeWarnings = useSessionStore((state) => state.setRuntimeWarnings);
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
   const [selectedPoolId, setSelectedPoolId] = useState<string | null>(null);
   const [directiveState, setDirectiveState] = useState<BotDirectiveManagerSnapshot | null>(null);
@@ -225,25 +228,12 @@ export function LiveSessionPage() {
   }, [activeDirective, selectedBot?.botId]);
 
   async function refreshSession(sessionId: string) {
-    const [snapshot, nextBots, nextInstances, nextIssues, nextLogs, nextCoverage, nextObservation] = await Promise.all([
-      window.gameplaySimulator.simulation.getSessionStatus(sessionId),
-      window.gameplaySimulator.simulation.getBotStatuses(sessionId),
-      window.gameplaySimulator.simulation.getInstanceStatuses(sessionId),
-      window.gameplaySimulator.simulation.getIssues(sessionId),
-      window.gameplaySimulator.simulation.getLogs(sessionId),
-      window.gameplaySimulator.simulation.getCoverage(sessionId),
-      window.gameplaySimulator.simulation.getLiveObservationState(sessionId)
-    ]);
+    const snapshot = await window.gameplaySimulator.simulation.getSessionStatus(sessionId);
+    const result = await pollRuntimeDetails(window.gameplaySimulator.simulation, sessionId);
 
     applySessionSnapshot(snapshot);
-    applyRuntimeDetails({
-      botStatuses: nextBots,
-      instanceStatuses: nextInstances,
-      issues: nextIssues,
-      logs: nextLogs,
-      coverage: nextCoverage,
-      liveObservation: nextObservation
-    });
+    applyRuntimeDetails(result.details);
+    setRuntimeWarnings(result.warnings);
   }
 
   async function startSession() {
@@ -307,9 +297,10 @@ export function LiveSessionPage() {
     await refreshSession(activeSessionId);
   }
 
-  async function openLogs() {
+  function openLogs() {
     if (activeSessionId) {
-      await window.gameplaySimulator.simulation.openLogs(activeSessionId);
+      setReviewSessionId(activeSessionId);
+      navigate('logs');
     }
   }
 
@@ -917,7 +908,7 @@ export function LiveSessionPage() {
                 <span>{instance.instanceId}</span>
                 <span>
                   {instance.status}
-                  <small>{instance.processId ? `pid ${instance.processId}` : 'mock process'}</small>
+                  <small>{instance.processId ? `pid ${instance.processId}` : 'No process ID reported'}</small>
                 </span>
                 <span>{instance.assignedBots.join(', ') || 'None'}</span>
                 <span>

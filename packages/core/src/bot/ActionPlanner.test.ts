@@ -206,6 +206,25 @@ describe('ActionPlanner', () => {
     }
   });
 
+  it('routes every specialized profile through a named planner rule', () => {
+    for (const specialist of defaultBotProfiles.filter(
+      (candidate) => candidate.profileGroup === 'specialized'
+    )) {
+      const preferredAction = specialist.preferredActions?.[0];
+      expect(preferredAction, specialist.profileId).toEqual(expect.any(String));
+
+      const selected = chooseAction(specialist.profileId, 100, 0, {
+        availableActions: [
+          { actionType: preferredAction!, label: preferredAction },
+          { actionType: 'unrelated-noop', label: 'Unrelated Noop' }
+        ]
+      });
+
+      expect(selected?.type, specialist.profileId).toBe(preferredAction);
+      expect(selected?.payload.profileKey, specialist.profileId).not.toBe('default');
+    }
+  });
+
   it('is deterministic when given the same seed', () => {
     const first = [0, 1, 2, 3].map((index) => choose('explorer-bot', 4242, index));
     const second = [0, 1, 2, 3].map((index) => choose('explorer-bot', 4242, index));
@@ -315,6 +334,28 @@ describe('ActionPlanner', () => {
     expect(action?.payload.score).toBeGreaterThan(action?.payload.originalProfilePlannerScore as number);
   });
 
+  it('marks later repeat-until-condition attempts as directive retries', () => {
+    const botId = 'ui-tester-bot-001';
+    const directive = activeDirective({
+      directiveMode: 'repeat-until-condition',
+      actionKeywords: ['sort-inventory'],
+      successConditions: ['Inventory order changes.']
+    });
+    const action = chooseAction('ui-tester-bot', 100, 1, {
+      botId,
+      availableActions: [
+        { actionType: 'sort-inventory', label: 'Sort Inventory' },
+        { actionType: 'open-settings-menu', label: 'Open Settings' }
+      ],
+      activeDirective: directive,
+      directiveProgress: directiveProgress(directive, botId, { attempts: 1 })
+    });
+
+    expect(action?.type).toBe('sort-inventory');
+    expect(action?.payload.quality).toBe('directive-retry');
+    expect(action?.payload.directiveMode).toBe('repeat-until-condition');
+  });
+
   it('executes an exact forced action only when the adapter reports it', () => {
     const botId = 'ui-tester-bot-001';
     const directive = activeDirective({
@@ -392,7 +433,7 @@ describe('ActionPlanner', () => {
           actionKeywords: ['sort'],
           successCondition: 'The inventory is sorted.',
           maxAttempts: 2,
-          waitAfterMs: 0
+          waitAfterMs: 250
         }
       ]
     });
@@ -411,6 +452,7 @@ describe('ActionPlanner', () => {
     expect(action?.type).toBe('sort-inventory');
     expect(action?.payload.directiveStepId).toBe('sort-inventory');
     expect(action?.payload.expectedCondition).toBe('The inventory is sorted.');
+    expect(action?.payload.directiveWaitAfterMs).toBe(250);
     expect(action?.payload.quality).toBe('directive-sequence');
   });
 

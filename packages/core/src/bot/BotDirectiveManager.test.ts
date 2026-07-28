@@ -253,6 +253,28 @@ describe('BotDirectiveManager', () => {
     expect(subject.getActiveDirectiveForBot('explorer-001')).toBeUndefined();
   });
 
+  it('expires an active per-bot directive when its runtime timeout is reached', () => {
+    let now = '2026-07-22T10:01:00.000Z';
+    const subject = new BotDirectiveManager({
+      sessionId: 'session-001',
+      bots,
+      now: () => now
+    });
+    subject.createDirective(directive('timed', { timeoutMs: 30_000 }));
+    subject.assignDirective('timed', [bots[0]]);
+    subject.activateDirective('timed', 'explorer-001');
+
+    now = '2026-07-22T10:01:31.000Z';
+
+    expect(subject.expireDirectives()).toHaveLength(1);
+    expect(subject.getDirective('timed')?.status).toBe('expired');
+    expect(subject.getProgress('timed', 'explorer-001')[0]).toMatchObject({
+      status: 'expired',
+      failureReason: 'Directive exceeded its 30000 ms time limit.'
+    });
+    expect(subject.getActiveDirectiveForBot('explorer-001')).toBeUndefined();
+  });
+
   it('reassigns stopped-bot work to another valid target', () => {
     const subject = manager();
     subject.createDirective(directive('reassign'));

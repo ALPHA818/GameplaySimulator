@@ -4,3 +4,5 @@ out
 runs
 .env
 .vite
+build/playwright
+release

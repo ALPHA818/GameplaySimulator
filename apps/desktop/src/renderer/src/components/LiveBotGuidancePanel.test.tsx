@@ -370,6 +370,70 @@ describe('LiveBotGuidancePanel', () => {
     expect(container.textContent).toContain('Normal profile behavior restored.');
   });
 
+  it('lets the user confirm an active directive that requires manual review', async () => {
+    const manualDirective = {
+      ...activeDirective,
+      manualSuccessConfirmation: true
+    };
+    const confirmBotDirectiveSuccess = vi.fn(async () => ({
+      snapshot: {
+        sessionId: 'session-001',
+        directives: [{ ...manualDirective, status: 'succeeded' as const }],
+        progress: [],
+        events: []
+      },
+      message: 'Test movement was confirmed.'
+    }));
+    Object.defineProperty(window, 'gameplaySimulator', {
+      configurable: true,
+      value: { simulation: { confirmBotDirectiveSuccess } }
+    });
+    const onMutation = vi.fn();
+
+    act(() => {
+      root.render(
+        <LiveBotGuidancePanel
+          sessionId="session-001"
+          selectedBot={bot}
+          currentGoal="Explore the map"
+          currentDirective={manualDirective}
+          currentProgress={{
+            directiveId: manualDirective.directiveId,
+            botId: bot.botId,
+            instanceId: 'instance-001',
+            status: 'active',
+            actionsAttempted: 2,
+            attempts: 1,
+            matchedActions: ['move-forward'],
+            updatedAt: '2026-07-22T10:00:02.000Z'
+          }}
+          queuedDirectives={[]}
+          availableActions={[]}
+          onMutation={onMutation}
+        />
+      );
+    });
+    act(() => {
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.includes('Guide This Bot')
+      )?.click();
+    });
+    await act(async () => {
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Confirm Direction Succeeded'
+      )?.click();
+      await Promise.resolve();
+    });
+
+    expect(confirmBotDirectiveSuccess).toHaveBeenCalledWith(
+      'session-001',
+      'explorer-001',
+      'active-direction'
+    );
+    expect(onMutation).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('Test movement was confirmed.');
+  });
+
   it('updates directive progress displayed in the live queue', () => {
     const renderProgress = (actionsAttempted: number, progressMessage: string) => {
       act(() => {

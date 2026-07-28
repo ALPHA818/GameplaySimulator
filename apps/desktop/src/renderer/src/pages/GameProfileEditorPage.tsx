@@ -30,7 +30,7 @@ const engineOptions: Array<{ value: EngineType; label: string }> = [
   { value: 'unknown', label: 'Unknown' }
 ];
 
-const adapterOptions: Array<{ value: AdapterType; label: string }> = [
+const adapterOptions: Array<{ value: AdapterType; label: string; disabled?: boolean }> = [
   { value: 'instrumented', label: 'Instrumented' },
   { value: 'desktop', label: 'Desktop' },
   { value: 'browser', label: 'Browser' },
@@ -39,7 +39,7 @@ const adapterOptions: Array<{ value: AdapterType; label: string }> = [
   { value: 'unreal', label: 'Unreal' },
   { value: 'rpg_maker', label: 'RPG Maker' },
   { value: 'gamemaker', label: 'GameMaker' },
-  { value: 'custom', label: 'Custom' }
+  { value: 'custom', label: 'Custom adapter (unavailable)', disabled: true }
 ];
 
 const platformOptions: Array<{ value: LaunchPlatform; label: string }> = [
@@ -49,11 +49,11 @@ const platformOptions: Array<{ value: LaunchPlatform; label: string }> = [
   { value: 'browser', label: 'Browser' }
 ];
 
-const transportOptions: Array<{ value: InstrumentationTransportType; label: string }> = [
+const transportOptions: Array<{ value: InstrumentationTransportType; label: string; disabled?: boolean }> = [
   { value: 'local-http', label: 'Local HTTP' },
-  { value: 'local-websocket', label: 'Local WebSocket' },
-  { value: 'local-file-bridge', label: 'Local file/socket bridge' },
-  { value: 'plugin-bridge', label: 'Plugin bridge' }
+  { value: 'local-websocket', label: 'Local WebSocket (unavailable)', disabled: true },
+  { value: 'local-file-bridge', label: 'Local file/socket bridge (unavailable)', disabled: true },
+  { value: 'plugin-bridge', label: 'Plugin bridge (unavailable)', disabled: true }
 ];
 
 const browserDomScanModeOptions: Array<{ value: BrowserDomScanMode; label: string }> = [
@@ -169,7 +169,7 @@ interface UIFlowTestViewResult {
 
 type ProfileWizardKind = 'desktop' | 'instrumented' | 'engine' | 'browser' | 'custom';
 type EngineWizardMode = 'instrumented' | 'desktop-fallback';
-type CustomWizardMode = 'instrumented' | 'desktop-fallback' | 'custom-adapter';
+type CustomWizardMode = 'instrumented' | 'desktop-fallback';
 
 const desktopAdapterTypes = new Set<AdapterType>(['desktop', 'rpg_maker', 'gamemaker']);
 const engineAdapterTypes = new Set<AdapterType>(['unity', 'godot', 'unreal']);
@@ -189,8 +189,7 @@ const engineModeOptions: Array<{ value: EngineWizardMode; label: string }> = [
 
 const customModeOptions: Array<{ value: CustomWizardMode; label: string }> = [
   { value: 'instrumented', label: 'Instrumented endpoint' },
-  { value: 'desktop-fallback', label: 'Desktop fallback' },
-  { value: 'custom-adapter', label: 'Custom adapter placeholder' }
+  { value: 'desktop-fallback', label: 'Desktop fallback' }
 ];
 
 function controlBindingText(binding: ControlBinding): string {
@@ -477,10 +476,6 @@ function missingWizardFields(
     missing.push('Add the browser game URL so Playwright can open the page.');
   }
 
-  if (wizardKind === 'custom' && customMode === 'custom-adapter') {
-    missing.push('Custom adapters are placeholders. Use instrumentation or desktop fallback for real testing today.');
-  }
-
   return missing;
 }
 
@@ -514,7 +509,7 @@ function buildProfile(form: GameProfileFormState): GameProfile {
       supportsStateRead: form.supportsStateRead,
       supportsDirectActions: form.supportsDirectActions,
       supportsScreenshots: form.supportsScreenshots,
-      supportsVideo: form.supportsVideo,
+      supportsVideo: false,
       supportsSaveIsolation: form.supportsSaveIsolation,
       instrumentationEndpoint: optionalText(form.instrumentationEndpoint),
       instrumentationTransport: form.instrumentationTransport,
@@ -680,9 +675,7 @@ export function GameProfileEditorPage() {
   const [customMode, setCustomModeState] = useState<CustomWizardMode>(() =>
     form.adapterType === 'instrumented'
       ? 'instrumented'
-      : desktopAdapterTypes.has(form.adapterType)
-        ? 'desktop-fallback'
-        : 'custom-adapter'
+      : 'desktop-fallback'
   );
   const [profileTestResult, setProfileTestResult] = useState<GameProfileTestResult | null>(null);
   const [profileTestError, setProfileTestError] = useState<string | null>(null);
@@ -773,7 +766,7 @@ export function GameProfileEditorPage() {
           supportsStateRead: true,
           supportsDirectActions: true,
           supportsScreenshots: true,
-          supportsVideo: true,
+          supportsVideo: false,
           supportsSaveIsolation: true
         };
       }
@@ -813,10 +806,11 @@ export function GameProfileEditorPage() {
       return {
         ...current,
         engineType: 'custom',
-        adapterType: customMode === 'instrumented' ? 'instrumented' : customMode === 'desktop-fallback' ? 'desktop' : 'custom',
+        adapterType: customMode === 'instrumented' ? 'instrumented' : 'desktop',
         supportsStateRead: customMode === 'instrumented',
         supportsDirectActions: customMode === 'instrumented',
-        supportsScreenshots: customMode !== 'custom-adapter'
+        supportsScreenshots: true,
+        supportsVideo: false
       };
     });
   }
@@ -847,10 +841,11 @@ export function GameProfileEditorPage() {
     setProfileTestError(null);
     setForm((current) => ({
       ...current,
-      adapterType: mode === 'instrumented' ? 'instrumented' : mode === 'desktop-fallback' ? 'desktop' : 'custom',
+      adapterType: mode === 'instrumented' ? 'instrumented' : 'desktop',
       supportsStateRead: mode === 'instrumented',
       supportsDirectActions: mode === 'instrumented',
-      supportsScreenshots: mode !== 'custom-adapter'
+      supportsScreenshots: true,
+      supportsVideo: false
     }));
   }
 
@@ -987,7 +982,7 @@ export function GameProfileEditorPage() {
     });
   }
 
-  function testFirstFlowStep() {
+  function validateFirstFlowStep() {
     try {
       const flows = parseUiFlowsText(form.uiFlowsText);
       const flow = flows[0];
@@ -1012,13 +1007,13 @@ export function GameProfileEditorPage() {
     } catch (error) {
       setFlowTestResult({
         status: 'failed',
-        message: error instanceof Error ? error.message : 'The first flow step could not be tested.',
+        message: error instanceof Error ? error.message : 'The first flow step could not be validated.',
         recordedAt: new Date().toISOString()
       });
     }
   }
 
-  function testFullFlow() {
+  function validateFullFlow() {
     try {
       const flows = parseUiFlowsText(form.uiFlowsText);
       const stepCount = flows.reduce((total, flow) => total + flow.steps.length, 0);
@@ -1045,7 +1040,7 @@ export function GameProfileEditorPage() {
     } catch (error) {
       setFlowTestResult({
         status: 'failed',
-        message: error instanceof Error ? error.message : 'The full UI flow could not be tested.',
+        message: error instanceof Error ? error.message : 'The full UI flow could not be validated.',
         recordedAt: new Date().toISOString()
       });
     }
@@ -1152,7 +1147,7 @@ export function GameProfileEditorPage() {
               onChange={(event) => update('adapterType', event.target.value as AdapterType)}
             >
               {adapterOptions.map((option) => (
-                <option key={option.value} value={option.value}>
+                <option disabled={option.disabled} key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
@@ -1233,7 +1228,7 @@ export function GameProfileEditorPage() {
                   }
                 >
                   {transportOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
+                    <option disabled={option.disabled} key={option.value} value={option.value}>
                       {option.label}
                     </option>
                   ))}
@@ -1372,7 +1367,7 @@ export function GameProfileEditorPage() {
               </div>
               <div className="notice-list notice-list--warning">
                 <FieldLabel label="Adapter Limitations" />
-                <span>Custom adapter plugins are placeholders in this build. Instrumentation or desktop fallback is the safest real setup today.</span>
+                <span>Custom adapter runtime is unavailable in this build. Choose instrumentation or desktop fallback for a working test.</span>
               </div>
             </div>
           ) : null}
@@ -1598,12 +1593,6 @@ export function GameProfileEditorPage() {
               onChange={(event) => update('supportsScreenshots', event.target.checked)}
             />
             <ToggleInput
-              label="Supports Video"
-              helpText="This says the adapter can record video of the game. The simulator uses it when you ask for video evidence. For example, an instrumented or browser adapter may support recording. If this is wrong, video capture may fail. Beginners can leave it off."
-              checked={form.supportsVideo}
-              onChange={(event) => update('supportsVideo', event.target.checked)}
-            />
-            <ToggleInput
               label="Supports Save Isolation"
               checked={form.supportsSaveIsolation}
               onChange={(event) => {
@@ -1713,18 +1702,18 @@ export function GameProfileEditorPage() {
               <Plus size={18} aria-hidden="true" />
               <span>Add Sample Flow</span>
             </button>
-            <button className="secondary-button" type="button" onClick={testFirstFlowStep}>
+            <button className="secondary-button" type="button" onClick={validateFirstFlowStep}>
               <Activity size={18} aria-hidden="true" />
-              <span>Test First Step</span>
+              <span>Validate First Step</span>
             </button>
-            <button className="secondary-button" type="button" onClick={testFullFlow}>
+            <button className="secondary-button" type="button" onClick={validateFullFlow}>
               <Play size={18} aria-hidden="true" />
-              <span>Test Full Flow</span>
+              <span>Validate Full Flow</span>
             </button>
           </div>
           {flowTestResult ? (
             <div className={flowTestResult.status === 'failed' ? 'notice-list notice-list--blocker' : 'notice-list'}>
-              <FieldLabel label="Flow Test Result" />
+              <FieldLabel label="Flow Validation Result" />
               <span>
                 {flowTestResult.status}: {flowTestResult.message}
               </span>

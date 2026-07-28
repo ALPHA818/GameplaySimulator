@@ -521,11 +521,11 @@ export class BotDirectiveManager {
     const atTime = Date.parse(at);
 
     for (const { directive } of this.sortedManagedDirectives()) {
-      if (
-        directive.expiresAt &&
-        !isTerminal(directive.status) &&
-        Date.parse(directive.expiresAt) <= atTime
-      ) {
+      if (isTerminal(directive.status)) {
+        continue;
+      }
+
+      if (directive.expiresAt && Date.parse(directive.expiresAt) <= atTime) {
         this.completeProgress(
           directive.directiveId,
           undefined,
@@ -540,6 +540,30 @@ export class BotDirectiveManager {
           completedAt: at
         };
         expired.push(cloneDirective(managed.directive));
+        continue;
+      }
+
+      if (directive.timeoutMs) {
+        const timedOutProgress = this.getProgress(directive.directiveId).filter(
+          (progress) =>
+            progress.status === 'active' &&
+            progress.startedAt !== undefined &&
+            Date.parse(progress.startedAt) + directive.timeoutMs! <= atTime
+        );
+
+        for (const progress of timedOutProgress) {
+          this.completeProgress(
+            directive.directiveId,
+            progress.botId,
+            'expired',
+            'directive_expired',
+            `Directive exceeded its ${directive.timeoutMs} ms time limit.`
+          );
+        }
+
+        if (timedOutProgress.length > 0) {
+          expired.push(this.getDirective(directive.directiveId)!);
+        }
       }
     }
 

@@ -519,8 +519,8 @@ const focusedTemplateInput = [
     backgroundPreferred: false,
     whatItDoes: 'Creates a focused reproduction attempt using the selected issue ID and a specialist that favors unusual action sequences.',
     requiredCapabilities: ['selected issue evidence', 'actions related to the reproduction steps'],
-    limitations: 'The default action words are placeholders until the user reviews the issue actions and edits the direction.',
-    beginnerRecommendation: 'Select an issue first, then replace the placeholder action words with its last actions before starting.',
+    limitations: 'The default action words are editable starting values until the user reviews the issue actions and edits the direction.',
+    beginnerRecommendation: 'Select an issue first, then replace the starting action words with its last actions before starting.',
     directive: {
       name: 'Reproduce the selected issue',
       description: 'Repeat the actions and state conditions recorded for the selected issue and capture fresh evidence if it happens again.',

@@ -9,14 +9,14 @@ Use `InstrumentedAdapter` with a Godot autoload singleton or editor/dev-only plu
 Recommended Godot implementation:
 
 - Create an autoload singleton such as `GameplaySimulatorBridge`.
-- Start a local HTTP or WebSocket endpoint in QA builds.
+- Start a Local HTTP endpoint in QA builds.
 - Serialize current scene, node paths, player state, resources, signals, quest data, UI focus, inventory, and performance data.
 - Register direct actions as safe callables.
 - Emit coverage events from signals, scene transitions, quest updates, UI screens, item changes, dialogue branches, and minigames.
 
 ## Fallback Method
 
-Use `DesktopWindowAdapter` for exported Godot desktop builds. This supports launching, focus, input simulation, screenshots, and process status, but it cannot see Godot nodes or resources unless the game exposes them.
+Use `DesktopWindowAdapter` for exported Godot desktop builds. Linux supports focus, input, and screenshots when the required tools are installed. Windows fallback is limited to process launch, health, and safe stop. The adapter cannot see Godot nodes or resources unless the game exposes them.
 
 ## Data The Simulator Can Read
 
@@ -143,4 +143,3 @@ With desktop fallback:
 - Use per-instance user data directories.
 - Include a protocol version in `/health`.
 - Keep direct actions deterministic and side-effect limited.
-

@@ -102,6 +102,7 @@ export interface StructuredRunLoggerOptions {
 export interface SessionConfigArtifact {
   runConfig: SimulationRunConfig;
   gameProfile: GameProfile;
+  botProfiles?: BotProfile[];
 }
 
 export interface BotReportInput {

@@ -2628,6 +2628,57 @@ h2 {
   color: #fecaca;
 }
 
+.runtime-connection-warning {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.app-error-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #111318;
+  color: #e8edf5;
+}
+
+.app-error-panel {
+  width: min(100%, 720px);
+  display: grid;
+  gap: 18px;
+  border: 1px solid #343946;
+  border-radius: 8px;
+  padding: clamp(18px, 4vw, 32px);
+  background: #191b20;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+}
+
+.app-error-panel h1,
+.app-error-panel p {
+  margin: 0;
+}
+
+.app-error-summary {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-left: 3px solid #f87171;
+  background: #202229;
+  overflow-wrap: anywhere;
+}
+
+.app-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.app-error-actions button {
+  min-width: 0;
+}
+
 .logs-page .page-header {
   min-width: 0;
   max-width: 100%;

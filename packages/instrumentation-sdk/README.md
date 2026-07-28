@@ -14,4 +14,4 @@ Default base path: `/gsi/v1`.
 - `POST /gsi/v1/actions` performs a direct action.
 - `POST /gsi/v1/events` emits game events, warnings, errors, content coverage, quest updates, inventory updates, player position, UI state, or performance samples.
 
-Supported transport descriptors also include local WebSocket, local file/socket bridge, and future plugin bridge. The first implemented client is local HTTP.
+The shipped client implements Local HTTP only. Other transport values may appear in older protocol data, but profile validation rejects them in version `0.1.0`.
