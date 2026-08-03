@@ -99,6 +99,7 @@ describe('release packaging configuration', () => {
       expect(packageJson.build?.appImage?.executableArgs ?? []).not.toContain(argument);
     }
     expect(packagedSmoke).toContain('delete env.APPIMAGE_EXTRACT_AND_RUN');
+    expect(packagedSmoke).toContain('chromiumSandbox: true');
 
     const sandboxValidator = readFileSync(
       resolve(projectRoot, 'scripts/validate-packaged-sandbox.mjs'),

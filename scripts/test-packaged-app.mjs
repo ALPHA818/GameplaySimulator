@@ -3,7 +3,14 @@ import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, copyFile, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { constants, createReadStream } from 'node:fs';
-import { platform as osPlatform, release as osRelease, tmpdir, version as osVersion } from 'node:os';
+import {
+  availableParallelism,
+  loadavg,
+  platform as osPlatform,
+  release as osRelease,
+  tmpdir,
+  version as osVersion
+} from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { chromium, _electron as electron } from 'playwright';
@@ -595,8 +602,8 @@ function runConfig() {
         ]
       : undefined,
     resourceLimits: {
-      maxCpuPercent: 90,
-      maxRamPercent: 90,
+      maxCpuPercent: 100,
+      maxRamPercent: 100,
       reserveRamMb: 256,
       maxGameInstances: 1,
       allowAutoScaling: false
@@ -682,7 +689,8 @@ async function launchApplication(executablePath, userDataPath) {
 
   return electron.launch({
     executablePath,
-    env
+    env,
+    chromiumSandbox: true
   });
 }
 
@@ -779,6 +787,18 @@ async function waitForCondition(check, description, timeoutMs = 20_000) {
   }
 
   throw new Error(`Timed out waiting for ${description}. Last value: ${JSON.stringify(lastValue)}`);
+}
+
+async function waitForReleaseCpuHeadroom() {
+  if (process.platform !== 'linux') {
+    return;
+  }
+
+  await waitForCondition(() => {
+    const coreCount = Math.max(1, availableParallelism());
+    const currentLoadPercent = Math.min(100, (loadavg()[0] / coreCount) * 100);
+    return currentLoadPercent <= 80;
+  }, 'host CPU load to leave room for the packaged smoke session', 120_000);
 }
 
 async function removeTemporaryDirectory(directory) {
@@ -970,6 +990,7 @@ let fourthApplication;
 let fifthApplication;
 
 try {
+  await waitForReleaseCpuHeadroom();
   firstApplication = await launchApplication(executablePath, userDataPath);
   const firstWindow = await firstApplication.firstWindow();
   await firstWindow.waitForFunction(
@@ -1355,6 +1376,7 @@ try {
     throw new Error(`The packaged app did not write workspace data to ${workspacePath}.`);
   }
 
+  await waitForReleaseCpuHeadroom();
   secondApplication = await launchApplication(executablePath, userDataPath);
   const secondWindow = await secondApplication.firstWindow();
   await secondWindow.waitForFunction(
@@ -1379,8 +1401,8 @@ try {
   await secondWindow.getByLabel('Action Delay Ms', { exact: true }).fill('1000');
   await secondWindow.getByLabel('Max Actions Per Bot', { exact: true }).fill('10');
   await secondWindow.getByLabel('Screenshot Every N Actions', { exact: true }).fill('1');
-  await secondWindow.getByLabel('CPU Percent', { exact: true }).fill('95');
-  await secondWindow.getByLabel('RAM Percent', { exact: true }).fill('95');
+  await secondWindow.getByLabel('CPU Percent', { exact: true }).fill('100');
+  await secondWindow.getByLabel('RAM Percent', { exact: true }).fill('100');
   await secondWindow.getByLabel('Reserve RAM MB', { exact: true }).fill('256');
 
   const useGlobalObservation = secondWindow.getByLabel(
