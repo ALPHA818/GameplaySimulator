@@ -21,6 +21,7 @@ $testRoot = Join-Path $env:PUBLIC "GameplaySimulator Standard User Test With Spa
 $portablePath = Join-Path $testRoot $expectedName
 $userDataPath = Join-Path $testRoot 'Writable User Data'
 $markerPath = Join-Path $userDataPath 'standard-user-release-smoke.json'
+$launcherPath = Join-Path $testRoot 'launch-standard-user-smoke.ps1'
 $childProcess = $null
 $ownedProcessIds = @()
 
@@ -49,13 +50,11 @@ try {
 & '$escapedPortable'
 exit `$LASTEXITCODE
 "@
-  $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
-  $childProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
-    '-NoProfile',
-    '-NonInteractive',
-    '-EncodedCommand',
-    $encodedCommand
-  ) -Credential $credential -LoadUserProfile -WorkingDirectory $testRoot -PassThru
+  Set-Content -LiteralPath $launcherPath -Value $childCommand -Encoding utf8BOM
+  $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $launcherArguments = "-NoProfile -NonInteractive -File `"$launcherPath`""
+  $childProcess = Start-Process -FilePath $windowsPowerShell -ArgumentList $launcherArguments `
+    -Credential $credential -LoadUserProfile -WorkingDirectory $testRoot -PassThru
 
   $deadline = [DateTime]::UtcNow.AddSeconds(90)
   while (-not (Test-Path -LiteralPath $markerPath) -and [DateTime]::UtcNow -lt $deadline) {
