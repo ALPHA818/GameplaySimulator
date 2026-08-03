@@ -129,6 +129,8 @@ describe('release packaging configuration', () => {
     expect(packagedSmoke).toContain('chromium.connectOverCDP');
     expect(packagedSmoke).toContain('remote-debugging-address=127.0.0.1');
     expect(packagedSmoke).toContain("if (process.platform === 'win32')");
+    expect(packagedSmoke).toContain('diagnosticLogs');
+    expect(packagedSmoke).toContain('adapter_launch_failed');
     expect(packagedSmoke).toContain('windowsLaunchIdentity');
     expect(packagedSmoke).toContain('active-shutdown session');
     expect(packagedSmoke).toContain('startInstrumentedExample');

@@ -1142,8 +1142,19 @@ try {
     }
   }
   if (firstResult.status?.status !== 'stopped') {
+    const diagnosticLogs = firstResult.structuredLogs.logs.filter((log) =>
+      ['error', 'warn'].includes(log.level) ||
+      ['adapter_launch_failed', 'instance_crash', 'instance_health_warning', 'session_failed']
+        .includes(log.eventType)
+    ).slice(-30);
     throw new Error(
-      `Packaged browser session did not stop successfully: ${JSON.stringify(firstResult.status)}`
+      `Packaged browser session did not stop successfully: ${JSON.stringify({
+        status: firstResult.status,
+        started: firstResult.started,
+        botStatuses: firstResult.botStatuses,
+        instances: firstResult.instances,
+        diagnosticLogs
+      })}`
     );
   }
   if (firstResult.createdStatus.status !== 'created' || firstResult.started.status !== 'running') {
