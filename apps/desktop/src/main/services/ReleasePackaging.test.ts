@@ -144,6 +144,9 @@ describe('release packaging configuration', () => {
     expect(standardUserSmoke).toContain('GAMEPLAY_SIMULATOR_STANDARD_USER_SMOKE');
     expect(standardUserSmoke).toContain('GameplaySimulator Standard User Test With Spaces');
     expect(standardUserSmoke).toContain("Get-LocalGroupMember -Group 'Administrators'");
+    expect(standardUserSmoke).toContain('launch-standard-user-smoke.ps1');
+    expect(standardUserSmoke).toContain("-File `\"$launcherPath`\"");
+    expect(standardUserSmoke).not.toContain('-EncodedCommand');
     expect(standardUserSmoke).toContain('standardUserLaunch = \'passed\'');
   });
 
