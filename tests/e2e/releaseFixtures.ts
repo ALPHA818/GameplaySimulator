@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http';
+import { rm } from 'node:fs/promises';
 import type {
   BotProfile,
   BotTestDirective,
@@ -22,6 +23,15 @@ export const releaseSystemSnapshot: SystemResourceSnapshot = {
   platform: process.platform,
   osRelease: 'release-e2e'
 };
+
+export function removeTemporaryDirectory(path: string): Promise<void> {
+  return rm(path, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === 'win32' ? 20 : 0,
+    retryDelay: 100
+  });
+}
 
 export const releaseBotProfile: BotProfile = BotProfileSchema.parse({
   profileId: 'release-e2e-bot',
