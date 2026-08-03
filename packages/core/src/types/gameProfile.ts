@@ -68,14 +68,32 @@ export const UIFlowStepSchema = z.object({
   maxRetries: z.number().int().min(0).optional()
 });
 
-export const UIFlowSchema = z.object({
-  flowId: z.string().min(1),
-  name: z.string().min(1),
-  description: z.string().optional(),
-  startState: z.string().min(1).optional(),
-  endState: z.string().min(1).optional(),
-  steps: z.array(UIFlowStepSchema).default([])
-});
+export const UIFlowSchema = z
+  .object({
+    flowId: z.string().min(1),
+    name: z.string().min(1),
+    description: z.string().optional(),
+    startState: z.string().min(1).optional(),
+    endState: z.string().min(1).optional(),
+    steps: z.array(UIFlowStepSchema).default([])
+  })
+  .superRefine((flow, context) => {
+    const stepIds = new Set<string>();
+    flow.steps.forEach((step, index) => {
+      if (!step.stepId) {
+        return;
+      }
+
+      if (stepIds.has(step.stepId)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['steps', index, 'stepId'],
+          message: 'UI flow step IDs must be unique within a flow.'
+        });
+      }
+      stepIds.add(step.stepId);
+    });
+  });
 
 export const KnownContentSchema = z.object({
   scenes: z.array(z.string().min(1)).default([]),
@@ -137,37 +155,63 @@ const emptyKnownContent = {
   notes: []
 };
 
-export const GameProfileSchema = z.object({
-  gameId: z.string().min(1),
-  gameName: z.string().min(1),
-  version: z.string().min(1),
-  buildId: z.string().min(1).optional(),
-  engine: z.object({
-    type: EngineTypeSchema,
-    version: z.string().min(1).optional()
-  }),
-  launch: LaunchConfigSchema,
-  adapter: z.object({
-    type: AdapterTypeSchema,
-    supportsMultipleInstances: z.boolean(),
-    supportsStateRead: z.boolean(),
-    supportsDirectActions: z.boolean(),
-    supportsScreenshots: z.boolean(),
-    supportsVideo: z.boolean(),
-    supportsSaveIsolation: z.boolean(),
-    instrumentationEndpoint: z.string().min(1).optional(),
-    instrumentationTransport: InstrumentationTransportSchema.optional(),
-    browserName: z.string().min(1).optional(),
-    browserDomScanMode: BrowserDomScanModeSchema.optional()
-  }),
-  controls: z.array(ControlBindingSchema).default([]),
-  testingTargets: z.array(TestingTargetSchema).default([]),
-  progressSignals: z.array(SignalDefinitionSchema).default([]),
-  failureSignals: z.array(SignalDefinitionSchema).default([]),
-  uiFlows: z.array(UIFlowSchema).default([]),
-  saveIsolation: SaveIsolationConfigSchema.optional(),
-  knownContent: KnownContentSchema.default(emptyKnownContent)
-});
+export const GameProfileSchema = z
+  .object({
+    gameId: z.string().min(1),
+    gameName: z.string().min(1),
+    version: z.string().min(1),
+    buildId: z.string().min(1).optional(),
+    engine: z.object({
+      type: EngineTypeSchema,
+      version: z.string().min(1).optional()
+    }),
+    launch: LaunchConfigSchema,
+    adapter: z.object({
+      type: AdapterTypeSchema,
+      supportsMultipleInstances: z.boolean(),
+      supportsStateRead: z.boolean(),
+      supportsDirectActions: z.boolean(),
+      supportsScreenshots: z.boolean(),
+      supportsVideo: z.boolean(),
+      supportsSaveIsolation: z.boolean(),
+      instrumentationEndpoint: z.string().min(1).optional(),
+      instrumentationTransport: InstrumentationTransportSchema.optional(),
+      browserName: z.string().min(1).optional(),
+      browserDomScanMode: BrowserDomScanModeSchema.optional()
+    }),
+    controls: z.array(ControlBindingSchema).default([]),
+    testingTargets: z.array(TestingTargetSchema).default([]),
+    progressSignals: z.array(SignalDefinitionSchema).default([]),
+    failureSignals: z.array(SignalDefinitionSchema).default([]),
+    uiFlows: z.array(UIFlowSchema).default([]),
+    saveIsolation: SaveIsolationConfigSchema.optional(),
+    knownContent: KnownContentSchema.default(emptyKnownContent)
+  })
+  .superRefine((profile, context) => {
+    const controlIds = new Set<string>();
+    profile.controls.forEach((control, index) => {
+      if (controlIds.has(control.controlId)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['controls', index, 'controlId'],
+          message: 'Control IDs must be unique within a game profile.'
+        });
+      }
+      controlIds.add(control.controlId);
+    });
+
+    const flowIds = new Set<string>();
+    profile.uiFlows.forEach((flow, index) => {
+      if (flowIds.has(flow.flowId)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['uiFlows', index, 'flowId'],
+          message: 'UI flow IDs must be unique within a game profile.'
+        });
+      }
+      flowIds.add(flow.flowId);
+    });
+  });
 
 export type ControlBinding = z.infer<typeof ControlBindingSchema>;
 export type InstrumentationTransportType = z.infer<typeof InstrumentationTransportSchema>;

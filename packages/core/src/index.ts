@@ -27,5 +27,6 @@ export type { IssueEventLoggerContext, RichIssueEventPayload } from './logging/S
 export * from './reports/Report';
 export * from './resources/ResourceBudget';
 export * from './resources/ResourceManager';
+export * from './security/pathContainment';
 export * from './sessions/GameInstanceManager';
 export * from './sessions/Session';

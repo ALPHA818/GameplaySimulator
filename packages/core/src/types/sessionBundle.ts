@@ -21,7 +21,7 @@ export const SessionBundlePathsSchema = z.object({
   screenshotsDirectory: z.string().min(1),
   reportsDirectory: z.string().min(1),
   exportsDirectory: z.string().min(1),
-  replayDirectory: z.string().min(1)
+  replayDirectory: z.string().min(1).optional()
 });
 
 export const SessionBundleCountsSchema = z.object({

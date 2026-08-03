@@ -1,10 +1,24 @@
 # Phase 77 Production Control Audit
 
-Temporary internal release-work document. Audited 2026-07-28.
+Temporary internal release-work document. Originally audited 2026-07-28 and corrected during the final v0.1.0 release gate.
+
+## Historical Correction
+
+The version committed at `8bdf676` and tagged locally as `v0.1.0` used broad "working" rows for New Session limits and runtime settings. Those rows were incorrect: the UI accepted several values that did not yet control runtime or saved artifacts. The local tag is therefore not a verified release tag and must not be published or reused.
+
+| Blocker | Behavior at `8bdf676` | Current correction | Fix commit |
+| --- | --- | --- | --- |
+| `maxRuntimeMinutes` | Accepted by the UI but did not enforce a session deadline. | Uses an active-runtime deadline, excludes paused time, logs `max_runtime_reached`, and finalizes normally. | **Not committed - release blocker** |
+| `runUntilStopped` | Did not prevent normal bot action limits from ending a run. | Keeps bot runtime active after ordinary action limits while retaining the hard runtime and safety stops. | **Not committed - release blocker** |
+| `saveActionTimeline` | Did not reliably prevent action timeline artifacts or report paths. | Gates action timeline writes and omits disabled paths from reports. | **Not committed - release blocker** |
+| `saveStateSnapshots` | Did not reliably prevent persisted state snapshots or report paths. | Keeps runtime state transient while gating snapshot files and report paths. | **Not committed - release blocker** |
+| `allowAutoScaling` | Resource allocation could reduce requested auto pools even when disabled. | Preserves exact requested counts or returns a blocker when disabled; reduction is allowed only when enabled. | **Not committed - release blocker** |
+
+Before release, every `Not committed` value above must be replaced by the exact commit containing the tested fix. A worktree result or local test run is not a commit reference.
 
 Status meanings:
 
-- **working**: the visible control reaches its intended application or runtime behavior.
+- **working**: in the current worktree, the visible control reaches its intended application or runtime behavior. It is not release-verified until the correction table names a tested commit.
 - **partially working**: the control works within its stated scope, but a limitation is recorded below.
 - **placeholder**: visible behavior claims work that is not implemented. There are no remaining production controls in this state.
 - **dead**: unused code or a removed production control.
@@ -50,6 +64,9 @@ Status meanings:
 | --- | --- | --- | --- | --- |
 | First-test and focused-test templates | `pages/NewSessionPage.tsx` | Template application to bot pool, directive, limits, evidence, and observation form state | `NewSessionPage.templates.test.tsx`, template tests | working |
 | Game profile, run mode, limits, evidence, resource limits, and observation fields | `NewSessionPage.tsx` | `SimulationRunConfigSchema`, backend validation, resource manager | schema, resource, observation, and page tests | working |
+| Maximum runtime and Run Until Stopped | `NewSessionPage.tsx` | active-runtime deadline in `SimulationService`; per-bot action limit handling in `BotManager` | simulation service and bot manager runtime-setting tests | working: paused time is excluded; the hard runtime limit still applies when ordinary action limits are ignored |
+| Action timeline and state snapshot persistence | `NewSessionPage.tsx` | conditional structured session and bot loggers | structured logger and simulation service artifact tests | working: disabled artifacts and replay paths are not created or advertised |
+| Allow Auto Scaling | `NewSessionPage.tsx` | `ResourceManager` viability allocation | resource manager tests | working: auto pools may be reduced only when enabled; otherwise exact requested counts fit or create a blocker |
 | Bot pool add/remove/count/scaling controls | `NewSessionPage.tsx` | `BotPoolResolver` and `ResourceManager` | pool resolver, resource manager, and page tests | working |
 | Pre-run directives and directive templates | `NewSessionPage.tsx` | `BotTestDirectiveSchema` saved with run config | directive schema/manager/planner and page tests | working |
 | Check Startup Flow | `NewSessionPage.tsx` | Local readiness check for configured flow and timeout | startup-flow regression tests | working as a readiness check only |

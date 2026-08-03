@@ -75,6 +75,23 @@ describe('browser UI awareness', () => {
     expect(state?.dom).toMatchObject({ headings: ['Main Menu'], hasCanvas: true, canvasCount: 1 });
   });
 
+  it('distinguishes a create-new-world screen from the main menu', () => {
+    installDom(`
+      <h2>Create New World</h2>
+      <button>Start World</button>
+      <button>Back</button>
+      <canvas></canvas>
+    `);
+
+    const state = normalizeBrowserUIState(scanBrowserDom(), 'dom');
+
+    expect(state).toMatchObject({
+      currentScreen: 'create-new-world',
+      canStartGame: true,
+      isInGameplay: false
+    });
+  });
+
   it('clicks a visible control by its hook or DOM label', () => {
     installDom('<button id="create-world">Create World</button>');
     let clicks = 0;

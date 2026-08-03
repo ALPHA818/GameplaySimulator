@@ -69,6 +69,7 @@ export interface SessionReportPaths {
 
 export interface PersistedSessionMetadata {
   sessionId: string;
+  sessionName?: string;
   gameName: string;
   gameId?: string;
   version?: string;
@@ -81,10 +82,17 @@ export interface PersistedSessionMetadata {
   createdAt: string;
   startedAt?: string;
   stoppedAt?: string;
+  shutdownReason?: string;
   status: SimulationRuntimeStatus;
   issueCounts: SessionIssueCounts;
   botCounts: SessionBotCounts;
   coveragePercentage?: number;
+  coverageSummary?: ContentCoverageSummary;
+  logIntegrity?: {
+    validRecordCount: number;
+    corruptLineCount: number;
+    incomplete: boolean;
+  };
   reportPaths: SessionReportPaths;
 }
 
@@ -112,6 +120,7 @@ export interface SessionRepositoryWriteInput {
   createdAt: string;
   startedAt?: string;
   stoppedAt?: string;
+  shutdownReason?: string;
   issues: DetectedIssue[];
   botStatuses: SimulationBotStatus[];
   coverageSummary?: ContentCoverageSummary;
@@ -127,6 +136,12 @@ interface SessionConfigArtifact {
   runConfig: SimulationRunConfig;
   gameProfile: GameProfile;
   botProfiles: BotProfile[];
+}
+
+interface JsonlIntegrityCounter {
+  validRecordCount: number;
+  corruptLineCount: number;
+  scannedPaths: Set<string>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -145,9 +160,17 @@ function readJsonFileIfExists(path: string): unknown | undefined {
   return readJsonFile(path);
 }
 
-function readJsonl(path: string): Record<string, unknown>[] {
+function readJsonl(
+  path: string,
+  integrity?: JsonlIntegrityCounter
+): Record<string, unknown>[] {
   if (!existsSync(path)) {
     return [];
+  }
+
+  const countThisFile = integrity ? !integrity.scannedPaths.has(resolve(path)) : false;
+  if (integrity && countThisFile) {
+    integrity.scannedPaths.add(resolve(path));
   }
 
   return readFileSync(path, 'utf8')
@@ -157,8 +180,14 @@ function readJsonl(path: string): Record<string, unknown>[] {
     .flatMap((line) => {
       try {
         const parsed = JSON.parse(line) as unknown;
-        return isRecord(parsed) ? [parsed] : [];
+        if (isRecord(parsed)) {
+          if (integrity && countThisFile) integrity.validRecordCount += 1;
+          return [parsed];
+        }
+        if (integrity && countThisFile) integrity.corruptLineCount += 1;
+        return [];
       } catch {
+        if (integrity && countThisFile) integrity.corruptLineCount += 1;
         return [];
       }
     });
@@ -447,6 +476,7 @@ export class SessionRepository {
 
     const metadata: PersistedSessionMetadata = {
       sessionId: input.sessionId,
+      sessionName: input.runConfig.sessionName,
       gameName: input.gameProfile.gameName,
       gameId: input.gameProfile.gameId,
       version: input.gameProfile.version,
@@ -459,10 +489,12 @@ export class SessionRepository {
       createdAt: input.createdAt,
       startedAt: input.startedAt,
       stoppedAt: input.stoppedAt,
+      shutdownReason: input.shutdownReason,
       status: input.status,
       issueCounts: issueCounts(input.issues),
       botCounts: botCounts(input.runConfig, input.botStatuses),
       coveragePercentage: input.coverageSummary?.percentage,
+      coverageSummary: input.coverageSummary,
       reportPaths: input.reportPaths
     };
 
@@ -485,14 +517,36 @@ export class SessionRepository {
         botAllocation: []
       }
     );
-    const sessionEvents = readJsonl(join(sessionDir, 'session-log.jsonl'));
-    const issues = this.readIssues(sessionDir);
-    let botStatuses = this.readBotStatuses(sessionDir, config.runConfig, issues);
-    let instanceStatuses = this.readInstanceStatuses(sessionDir, config.runConfig, config.gameProfile);
+    const logIntegrity: JsonlIntegrityCounter = {
+      validRecordCount: 0,
+      corruptLineCount: 0,
+      scannedPaths: new Set()
+    };
+    const sessionEvents = readJsonl(join(sessionDir, 'session-log.jsonl'), logIntegrity);
+    const issues = this.readIssues(sessionDir, logIntegrity);
+    let botStatuses = this.readBotStatuses(sessionDir, config.runConfig, issues, logIntegrity);
+    let instanceStatuses = this.readInstanceStatuses(sessionDir, config.runConfig, config.gameProfile, logIntegrity);
     let metadata = this.readMetadata(sessionDir, config, viabilityReport, issues, botStatuses, sessionEvents);
     let logs = logEntriesFromEvents(sessionEvents, metadata.sessionId);
-    const actions = this.readActions(sessionDir);
-    const states = this.readStates(sessionDir);
+    const actions = metadata.coverageSummary ? [] : this.readActions(sessionDir, logIntegrity);
+    const states = metadata.coverageSummary ? [] : this.readStates(sessionDir, logIntegrity);
+    metadata = {
+      ...metadata,
+      logIntegrity: {
+        validRecordCount: logIntegrity.validRecordCount,
+        corruptLineCount: logIntegrity.corruptLineCount,
+        incomplete: logIntegrity.corruptLineCount > 0
+      }
+    };
+    if (logIntegrity.corruptLineCount > 0) {
+      logs.push({
+        id: `${metadata.sessionId}-corrupt-jsonl`,
+        level: 'warn',
+        message: `${logIntegrity.corruptLineCount} corrupt structured log line(s) were skipped. Persisted data is incomplete and should not be treated as a complete result.`,
+        timestamp: this.now(),
+        source: 'session-repository'
+      });
+    }
 
     if (
       this.reconcileInterruptedSessions &&
@@ -523,6 +577,7 @@ export class SessionRepository {
         ...metadata,
         status: 'failed',
         stoppedAt: metadata.stoppedAt ?? interruptedAt,
+        shutdownReason: metadata.shutdownReason ?? 'application_closed_before_clean_stop',
         botCounts: {
           ...metadata.botCounts,
           running: 0,
@@ -565,7 +620,7 @@ export class SessionRepository {
       instanceStatuses,
       issues,
       logs,
-      coverageSummary: undefined,
+      coverageSummary: metadata.coverageSummary,
       actions,
       states,
       botProfiles: config.botProfiles
@@ -647,6 +702,10 @@ export class SessionRepository {
 
       return {
         sessionId: String(metadata.sessionId ?? config.runConfig.sessionId),
+        sessionName:
+          typeof metadata.sessionName === 'string'
+            ? metadata.sessionName
+            : config.runConfig.sessionName,
         gameName: String(metadata.gameName ?? config.gameProfile.gameName),
         gameId: typeof metadata.gameId === 'string' ? metadata.gameId : config.gameProfile.gameId,
         version: typeof metadata.version === 'string' ? metadata.version : config.gameProfile.version,
@@ -665,6 +724,9 @@ export class SessionRepository {
         issueCounts: isRecord(metadata.issueCounts) ? metadata.issueCounts as unknown as SessionIssueCounts : issueCounts(issues),
         botCounts: isRecord(metadata.botCounts) ? metadata.botCounts as unknown as SessionBotCounts : botCounts(config.runConfig, botStatuses),
         coveragePercentage: typeof metadata.coveragePercentage === 'number' ? metadata.coveragePercentage : undefined,
+        coverageSummary: isRecord(metadata.coverageSummary)
+          ? metadata.coverageSummary as unknown as ContentCoverageSummary
+          : undefined,
         reportPaths
       };
     }
@@ -676,6 +738,7 @@ export class SessionRepository {
 
     return {
       sessionId: config.runConfig.sessionId,
+      sessionName: config.runConfig.sessionName,
       gameName: config.gameProfile.gameName,
       gameId: config.gameProfile.gameId,
       version: config.gameProfile.version,
@@ -695,7 +758,10 @@ export class SessionRepository {
     };
   }
 
-  private readIssues(sessionDir: string): DetectedIssue[] {
+  private readIssues(
+    sessionDir: string,
+    integrity?: JsonlIntegrityCounter
+  ): DetectedIssue[] {
     const byId = new Map<string, DetectedIssue>();
     const issuesArtifact = readJsonFileIfExists(join(sessionDir, 'issues.json'));
 
@@ -716,7 +782,7 @@ export class SessionRepository {
     }
 
     for (const botDirName of readdirSync(botsDir)) {
-      const issueEvents = readJsonl(join(botsDir, botDirName, 'issues.jsonl'));
+      const issueEvents = readJsonl(join(botsDir, botDirName, 'issues.jsonl'), integrity);
 
       for (const event of issueEvents) {
         const issueValue = event.issue;
@@ -739,7 +805,8 @@ export class SessionRepository {
   private readBotStatuses(
     sessionDir: string,
     runConfig: SimulationRunConfig,
-    issues: DetectedIssue[]
+    issues: DetectedIssue[],
+    integrity?: JsonlIntegrityCounter
   ): SimulationBotStatus[] {
     const botsDir = join(sessionDir, 'bots');
     const botIds = existsSync(botsDir) ? readdirSync(botsDir) : [];
@@ -747,8 +814,8 @@ export class SessionRepository {
     return botIds.map((botId) => {
       const botDir = join(botsDir, botId);
       const report = parseBotReport(join(botDir, 'bot-report.md'), botId);
-      const actionEvents = readJsonl(join(botDir, 'actions.jsonl'));
-      const stateEvents = readJsonl(join(botDir, 'states.jsonl'));
+      const actionEvents = readJsonl(join(botDir, 'actions.jsonl'), integrity);
+      const stateEvents = readJsonl(join(botDir, 'states.jsonl'), integrity);
       const lastAction = actionEvents.at(-1);
       const parsedAction = GameActionSchema.safeParse(isRecord(lastAction?.action) ? lastAction.action : undefined);
       const action = parsedAction.success ? parsedAction.data : undefined;
@@ -791,14 +858,15 @@ export class SessionRepository {
   private readInstanceStatuses(
     sessionDir: string,
     runConfig: SimulationRunConfig,
-    gameProfile: GameProfile
+    gameProfile: GameProfile,
+    integrity?: JsonlIntegrityCounter
   ): GameInstanceStatus[] {
     const instancesDir = join(sessionDir, 'instances');
     const statuses: GameInstanceStatus[] = [];
 
     if (existsSync(instancesDir)) {
       for (const instanceDirName of readdirSync(instancesDir)) {
-        const events = readJsonl(join(instancesDir, instanceDirName, 'instance-log.jsonl'));
+        const events = readJsonl(join(instancesDir, instanceDirName, 'instance-log.jsonl'), integrity);
         const status = [...events].reverse().find((event) => isRecord(event.status))?.status;
 
         if (isRecord(status)) {
@@ -824,7 +892,10 @@ export class SessionRepository {
     ];
   }
 
-  private readActions(sessionDir: string): GameAction[] {
+  private readActions(
+    sessionDir: string,
+    integrity?: JsonlIntegrityCounter
+  ): GameAction[] {
     const botsDir = join(sessionDir, 'bots');
 
     if (!existsSync(botsDir)) {
@@ -832,14 +903,17 @@ export class SessionRepository {
     }
 
     return readdirSync(botsDir).flatMap((botDirName) =>
-      readJsonl(join(botsDir, botDirName, 'actions.jsonl'))
+      readJsonl(join(botsDir, botDirName, 'actions.jsonl'), integrity)
         .map((event) => event.action)
         .filter(isRecord)
         .map((action) => action as unknown as GameAction)
     );
   }
 
-  private readStates(sessionDir: string): GameStateSnapshot[] {
+  private readStates(
+    sessionDir: string,
+    integrity?: JsonlIntegrityCounter
+  ): GameStateSnapshot[] {
     const botsDir = join(sessionDir, 'bots');
 
     if (!existsSync(botsDir)) {
@@ -847,7 +921,7 @@ export class SessionRepository {
     }
 
     return readdirSync(botsDir).flatMap((botDirName) =>
-      readJsonl(join(botsDir, botDirName, 'states.jsonl'))
+      readJsonl(join(botsDir, botDirName, 'states.jsonl'), integrity)
         .map((event) => event.snapshot)
         .filter(isRecord)
         .map((snapshot) => snapshot as unknown as GameStateSnapshot)

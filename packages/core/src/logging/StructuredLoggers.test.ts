@@ -200,6 +200,34 @@ async function readJsonl(path: string): Promise<unknown[]> {
 }
 
 describe('StructuredRunLogger', () => {
+  it('appends a large event set incrementally and flushes every queued record', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'gameplay-simulator-large-jsonl-'));
+    const logger = new StructuredRunLogger({
+      rootDir,
+      sessionId: 'large-session',
+      createdAt: '2026-07-29T10:00:00.000Z'
+    });
+
+    for (let index = 0; index < 5_000; index += 1) {
+      logger.logSession('resource_warning', {
+        warning: `Generated warning ${index}`
+      });
+    }
+    await logger.flush();
+
+    const sessionLines = (await readFile(logger.sessionLogPath, 'utf8')).trim().split('\n');
+    const fullLines = (await readFile(logger.sessionLogger.fullStructuredLogsPath, 'utf8')).trim().split('\n');
+    const importantLines = (await readFile(logger.sessionLogger.importantEventsPath, 'utf8')).trim().split('\n');
+
+    expect(sessionLines).toHaveLength(5_000);
+    expect(fullLines).toHaveLength(5_000);
+    expect(importantLines).toHaveLength(5_000);
+    expect(JSON.parse(fullLines[4_999])).toEqual(expect.objectContaining({
+      eventType: 'resource_warning',
+      payload: { warning: 'Generated warning 4999' }
+    }));
+  });
+
   it('creates the session folder structure and valid JSONL logs', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'gameplay-simulator-structured-'));
     const logger = new StructuredRunLogger({
@@ -449,7 +477,7 @@ describe('StructuredRunLogger', () => {
 	      startedAt: '2026-07-04T10:11:12.000Z'
 	    });
 
-    expect(basename(logger.sessionDir)).toBe('session-2026-07-04-10-11-12');
+    expect(basename(logger.sessionDir)).toBe('session-session-test');
     expect(existsSync(logger.sessionLogger.configPath)).toBe(true);
     expect(existsSync(logger.sessionLogger.viabilityReportPath)).toBe(true);
 	    expect(existsSync(logger.sessionLogger.summaryPath)).toBe(true);
@@ -639,5 +667,82 @@ describe('StructuredRunLogger', () => {
     expect(markdown).toContain('Controlled network test confirmation is required');
     expect(summaryJson.technicalTesting.readiness[0].status).toBe('Unsupported');
     expect(summaryJson.technicalTesting.readiness[0].details.join(' ')).toContain('No bot from this technical profile launched');
+  });
+
+  it('does not create or advertise disabled action and state artifacts', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'gameplay-simulator-disabled-artifacts-'));
+    const disabledRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'disabled-artifacts',
+      saveActionTimeline: false,
+      saveStateSnapshots: false
+    };
+    const logger = new StructuredRunLogger({
+      rootDir,
+      sessionId: disabledRunConfig.sessionId,
+      createdAt: '2026-07-04T10:11:12.000Z',
+      saveActionTimeline: false,
+      saveStateSnapshots: false
+    });
+
+    logger.ensureBot('explorer-001');
+    const actionEvent = logger.logSession('action_performed', { actionId: action.actionId });
+    const stateEvent = logger.logSession('state_snapshot', { snapshotId: state.snapshotId });
+    logger.logAction(actionEvent, action, result);
+    logger.logState(stateEvent, state);
+    logger.writeBotReports([{
+      botId: 'explorer-001',
+      displayName: 'Explorer',
+      profileId: 'explorer',
+      status: 'completed',
+      actionCount: 1,
+      issueCount: 0,
+      areasVisited: ['Start'],
+      issues: [],
+      lastActions: [action.type],
+      recoveryAttempts: []
+    }]);
+    logger.writeSummary({
+      status: 'stopped',
+      runConfig: disabledRunConfig,
+      gameProfile,
+      viabilityReport,
+      bots: [],
+      instances: [],
+      issues: [],
+      contentCoveragePercent: 0,
+      testedContent: [],
+      untestedContent: [],
+      contentWithIssues: [],
+      contentByBotType: []
+    });
+
+    const botDirectory = join(logger.sessionDir, 'bots', 'explorer-001');
+    const markdown = await readFile(logger.summaryPath, 'utf8');
+    const botMarkdown = await readFile(join(botDirectory, 'bot-report.md'), 'utf8');
+    const summaryJson = JSON.parse(
+      await readFile(join(logger.sessionDir, 'session-summary.json'), 'utf8')
+    ) as {
+      bundlePaths: { replayDirectory?: string };
+      effectiveSettings: {
+        saveActionTimeline: boolean;
+        saveStateSnapshots: boolean;
+      };
+    };
+
+    expect(existsSync(join(botDirectory, 'actions.jsonl'))).toBe(false);
+    expect(existsSync(join(botDirectory, 'states.jsonl'))).toBe(false);
+    expect(existsSync(join(logger.sessionDir, 'replay'))).toBe(false);
+    expect(summaryJson.bundlePaths.replayDirectory).toBeUndefined();
+    expect(summaryJson.effectiveSettings).toMatchObject({
+      saveActionTimeline: false,
+      saveStateSnapshots: false
+    });
+    expect(markdown).toContain('Action timeline artifacts: disabled');
+    expect(markdown).toContain('State snapshot artifacts: disabled');
+    expect(botMarkdown).toContain('Actions log: Disabled by session setting');
+    expect(botMarkdown).toContain('States log: Disabled by session setting');
+    expect(botMarkdown).not.toContain(join(botDirectory, 'actions.jsonl'));
+    expect(botMarkdown).not.toContain(join(botDirectory, 'states.jsonl'));
   });
 });

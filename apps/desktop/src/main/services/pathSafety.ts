@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
+import { isResolvedPathWithin } from '@core/security/pathContainment';
 
 function canonicalPath(path: string): string {
   let existingAncestor = resolve(path);
@@ -22,15 +23,7 @@ function canonicalPath(path: string): string {
 export function isPathWithin(rootPath: string, candidatePath: string, allowRoot = true): boolean {
   const root = canonicalPath(rootPath);
   const candidate = canonicalPath(candidatePath);
-  const relativePath = relative(root, candidate);
-
-  if (relativePath === '') {
-    return allowRoot;
-  }
-
-  return relativePath !== '..' &&
-    !relativePath.startsWith(`..${sep}`) &&
-    !isAbsolute(relativePath);
+  return isResolvedPathWithin(root, candidate, allowRoot);
 }
 
 export function assertPathWithin(

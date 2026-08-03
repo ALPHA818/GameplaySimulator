@@ -115,6 +115,23 @@ describe('WorkspaceRepository', () => {
     expect(backupFiles.some((name) => name.startsWith('workspace-v1-backup-'))).toBe(true);
   });
 
+  it('retains only the newest approved workspace backups', async () => {
+    const userData = await mkdtemp(join(tmpdir(), 'gameplay-simulator-workspace-retention-'));
+    const repository = new WorkspaceRepository(userData, { maxBackups: 2 });
+
+    repository.save(createDefaultWorkspaceData());
+    for (let index = 0; index < 6; index += 1) {
+      repository.save(WorkspaceDataSchema.parse({
+        ...createDefaultWorkspaceData(),
+        reviewedIssueIds: [`issue-${index}`]
+      }));
+    }
+
+    const backups = (await readdir(repository.backupsDirectory))
+      .filter((name) => name.startsWith('workspace-v1-backup-'));
+    expect(backups).toHaveLength(2);
+  });
+
   it('preserves corrupt data and restores the newest valid backup', async () => {
     const userData = await mkdtemp(join(tmpdir(), 'gameplay-simulator-workspace-recovery-'));
     const repository = new WorkspaceRepository(userData);
@@ -150,5 +167,40 @@ describe('WorkspaceRepository', () => {
     expect(recovered.recoveredFromBackup).toBe(false);
     expect(recovered.warning).toContain('safe defaults');
     expect(recovered.data).toEqual(createDefaultWorkspaceData());
+  });
+
+  it('rejects duplicate game, bot-profile, and saved run configuration IDs', () => {
+    expect(() =>
+      WorkspaceDataSchema.parse({
+        ...createDefaultWorkspaceData(),
+        gameProfiles: [gameProfile, { ...gameProfile }]
+      })
+    ).toThrow(/Game profile IDs must be unique/);
+
+    const customBot = {
+      profileId: 'custom-workspace-bot',
+      displayName: 'Custom Workspace Bot',
+      botType: 'custom',
+      profileGroup: 'custom' as const,
+      goals: [],
+      recommendedMinCount: 1,
+      recommendedMaxCount: 1,
+      defaultResourceWeight: 'light' as const,
+      tags: [],
+      config: {}
+    };
+    expect(() =>
+      WorkspaceDataSchema.parse({
+        ...createDefaultWorkspaceData(),
+        customBotProfiles: [customBot, { ...customBot }]
+      })
+    ).toThrow(/bot profile.*IDs must be unique/i);
+
+    expect(() =>
+      WorkspaceDataSchema.parse({
+        ...createDefaultWorkspaceData(),
+        runConfigs: [runConfig, { ...runConfig }]
+      })
+    ).toThrow(/run configuration IDs must be unique/i);
   });
 });

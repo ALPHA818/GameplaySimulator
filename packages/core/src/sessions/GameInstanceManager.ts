@@ -6,6 +6,7 @@ import type {
   GameInstanceRuntimeStatus,
   GameInstanceStatus,
   GameProfile,
+  InstanceConnectionState,
   SaveIsolationConfig,
   SaveIsolationMode,
   SaveIsolationRuntimeInfo,
@@ -447,8 +448,14 @@ function configForInstance(input: {
   const environment: Record<string, string> = {
     GAMEPLAY_SIMULATOR_SESSION_ID: runConfig.sessionId,
     GAMEPLAY_SIMULATOR_INSTANCE_ID: instanceId,
-    GAMEPLAY_SIMULATOR_ASSIGNED_BOTS: assignedBots.map((bot) => bot.botId).join(',')
+    GAMEPLAY_SIMULATOR_ASSIGNED_BOTS: assignedBots.map((bot) => bot.botId).join(','),
+    GAMEPLAY_SIMULATOR_GAME_ID: gameProfile.gameId,
+    GAMEPLAY_SIMULATOR_GAME_VERSION: gameProfile.version
   };
+
+  if (gameProfile.buildId) {
+    environment.GAMEPLAY_SIMULATOR_BUILD_ID = gameProfile.buildId;
+  }
 
   if (saveIsolation?.profileId) {
     environment.GAMEPLAY_SIMULATOR_SAVE_PROFILE_ID = saveIsolation.profileId;
@@ -532,6 +539,17 @@ function extractResourceUsage(health: ManagedAdapterHealth): GameInstanceResourc
   }
 
   return Object.keys(usage).length > 0 ? usage : undefined;
+}
+
+function extractConnectionState(
+  health: ManagedAdapterHealth | undefined
+): InstanceConnectionState | undefined {
+  const connectionState = health?.details.connectionState;
+
+  return typeof connectionState === 'string' &&
+    ['connecting', 'connected', 'failed', 'disconnected', 'stopping', 'stopped'].includes(connectionState)
+    ? connectionState as InstanceConnectionState
+    : undefined;
 }
 
 function cloneStatus(status: GameInstanceStatus): GameInstanceStatus {
@@ -880,6 +898,11 @@ export class GameInstanceManager {
     const startedAt = this.now();
     this.setStatus(instanceId, {
       status: 'starting',
+      connectionState:
+        this.adapter.adapterType === 'instrumented' ||
+        Boolean(this.gameProfile.adapter.instrumentationEndpoint)
+          ? 'connecting'
+          : current.connectionState,
       startTime: startedAt,
       lastHeartbeat: startedAt
     });
@@ -900,13 +923,27 @@ export class GameInstanceManager {
       });
 
       const launched = await this.adapter.launchInstance(launchConfig);
-      const timestamp = launched.startedAt || this.now();
+      const running = await this.adapter.isRunning(instanceId);
+      const health = await this.adapter.getHealth(instanceId);
+      const healthy = running && ['ready', 'running'].includes(health.status);
+
+      if (!healthy) {
+        await this.adapter.stopInstance(instanceId).catch(() => undefined);
+        throw new Error(
+          health.message ??
+          `Adapter health gate failed for ${instanceId}: running=${String(running)}, health=${health.status}.`
+        );
+      }
+
+      const timestamp = health.checkedAt || launched.startedAt || this.now();
 
       this.setStatus(instanceId, {
         status: 'running',
+        connectionState: extractConnectionState(health),
         startTime: timestamp,
         lastHeartbeat: timestamp,
-        processId: extractProcessId(launched, undefined),
+        processId: extractProcessId(launched, health),
+        resourceUsage: extractResourceUsage(health),
         saveProfileId: launchConfig.saveProfileId,
         isolatedSaveDirectory: launchConfig.isolatedSaveDirectory,
         saveIsolationMode: launchConfig.saveIsolation?.mode,
@@ -916,6 +953,7 @@ export class GameInstanceManager {
         adapterInstance: cloneAdapterInstance(launched),
         config: cloneConfig(launchConfig),
         status: this.requireStatus(instanceId),
+        health: cloneHealth(health),
         launchedAt: timestamp,
         lastError: undefined
       });
@@ -930,7 +968,9 @@ export class GameInstanceManager {
           assignedBots: planned.assignedBots.map((bot) => bot.botId),
           saveProfileId: launchConfig.saveProfileId,
           isolatedSaveDirectory: launchConfig.isolatedSaveDirectory,
-          saveIsolation: launchConfig.saveIsolation
+          saveIsolation: launchConfig.saveIsolation,
+          healthStatus: health.status,
+          connectionState: extractConnectionState(health)
         }
       });
     } catch (error) {
@@ -939,6 +979,7 @@ export class GameInstanceManager {
       const timestamp = this.now();
       this.setStatus(instanceId, {
         status: 'failed',
+        connectionState: this.requireStatus(instanceId).connectionState ? 'failed' : undefined,
         lastHeartbeat: timestamp,
         saveProfileId: launchConfig.saveProfileId,
         isolatedSaveDirectory: launchConfig.isolatedSaveDirectory,
@@ -974,6 +1015,7 @@ export class GameInstanceManager {
     const timestamp = this.now();
     this.setStatus(instanceId, {
       status: 'stopping',
+      connectionState: this.requireStatus(instanceId).connectionState ? 'stopping' : undefined,
       lastHeartbeat: timestamp
     });
 
@@ -982,6 +1024,7 @@ export class GameInstanceManager {
     const stoppedAt = this.now();
     this.setStatus(instanceId, {
       status: 'stopped',
+      connectionState: this.requireStatus(instanceId).connectionState ? 'stopped' : undefined,
       lastHeartbeat: stoppedAt,
       saveProfileId: planned.config.saveProfileId,
       isolatedSaveDirectory: planned.config.isolatedSaveDirectory,
@@ -1032,6 +1075,14 @@ export class GameInstanceManager {
         continue;
       }
 
+      const liveRecord = this.records.get(current.instanceId);
+      if (current.status === 'starting' && !liveRecord?.adapterInstance) {
+        // launchInstance owns the initial health gate. External status polling may
+        // arrive while a slower visible process is still opening; it must not
+        // interpret that not-yet-registered instance as a crash.
+        continue;
+      }
+
       let running = false;
       let health: ManagedAdapterHealth | undefined;
       let healthError: string | undefined;
@@ -1044,11 +1095,19 @@ export class GameInstanceManager {
         healthError = error instanceof Error ? error.message : 'Instance health check failed.';
       }
 
+      const latestStatus = this.requireStatus(current.instanceId).status;
+      if (latestStatus === 'stopping' || latestStatus === 'stopped') {
+        continue;
+      }
+
       const nextStatus = mapHealthStatus(current.status, running, health);
       const timestamp = health?.checkedAt ?? this.now();
 
       this.setStatus(current.instanceId, {
         status: nextStatus,
+        connectionState:
+          extractConnectionState(health) ??
+          (healthError ? 'disconnected' : current.connectionState),
         lastHeartbeat: timestamp,
         processId: extractProcessId(undefined, health) ?? current.processId,
         resourceUsage: health ? extractResourceUsage(health) : current.resourceUsage

@@ -1,8 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { cp, mkdir, rm } from 'node:fs/promises';
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import {
   AdapterFactory,
@@ -75,6 +77,7 @@ import {
   resolveDirectiveActionAvailability,
   RuntimeViabilityReportSchema,
   SeveritySchema,
+  SessionNameSchema,
   SimulationRunConfigSchema
 } from '@core/types';
 import {
@@ -90,6 +93,7 @@ import {
   type ObservationSelectionChange
 } from './RuntimeObservationManager';
 import { assertPathWithin, isPathWithin } from './pathSafety';
+import { SerializedDebouncedTask } from './SerializedDebouncedTask';
 
 export type SimulationRuntimeStatus =
   | 'idle'
@@ -100,6 +104,14 @@ export type SimulationRuntimeStatus =
   | 'stopping'
   | 'stopped'
   | 'failed';
+
+const ACTIVE_SESSION_STATUSES = new Set<SimulationRuntimeStatus>([
+  'created',
+  'starting',
+  'running',
+  'paused',
+  'stopping'
+]);
 
 export interface SimulationValidationError {
   path: string;
@@ -384,6 +396,16 @@ export interface StructuredLogItem {
 export interface StructuredLogReadResult {
   sessionId: string;
   logs: StructuredLogItem[];
+  totalValidRecords: number;
+  corruptLineCount: number;
+  incomplete: boolean;
+  nextCursor?: number;
+  pageSize: number;
+}
+
+export interface StructuredLogPageRequest {
+  before?: number;
+  limit?: number;
 }
 
 export interface SimulationServiceOptions {
@@ -393,14 +415,32 @@ export interface SimulationServiceOptions {
   systemSnapshot?: SystemResourceSnapshot;
   adapterFactory?: Pick<AdapterFactory, 'createAdapter'>;
   useMockRuntime?: boolean;
+  generateSessionId?: () => string;
+  desktopDependencyChecker?: DesktopAdapterDependencyChecker;
+  shutdownStageTimeoutMs?: number;
+  shutdownHardTimeoutMs?: number;
 }
 
-export const SimulationSessionRequestSchema = z.object({
-  runConfig: SimulationRunConfigSchema,
-  gameProfile: GameProfileSchema,
-  botProfiles: z.array(BotProfileSchema).default([]),
-  runtimeObservation: RuntimeObservationConfigSchema.default(defaultRuntimeObservationConfig)
-});
+export const SimulationSessionRequestSchema = z
+  .object({
+    runConfig: SimulationRunConfigSchema,
+    gameProfile: GameProfileSchema,
+    botProfiles: z.array(BotProfileSchema).default([]),
+    runtimeObservation: RuntimeObservationConfigSchema.default(defaultRuntimeObservationConfig)
+  })
+  .superRefine((request, context) => {
+    const profileIds = new Set<string>();
+    request.botProfiles.forEach((profile, index) => {
+      if (profileIds.has(profile.profileId)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['botProfiles', index, 'profileId'],
+          message: 'Bot profile IDs must be unique in a session request.'
+        });
+      }
+      profileIds.add(profile.profileId);
+    });
+  });
 
 export const DesktopControlTestRequestSchema = z.object({
   gameProfile: GameProfileSchema,
@@ -486,6 +526,7 @@ interface SimulationSessionRecord {
   loggedRecoverySuccessIds: Set<string>;
   loggedRecoveryFailedIds: Set<string>;
   loggedEvidenceKeys: Set<string>;
+  screenshotCaptureScopes: Set<string>;
   loggedFlowStartIds: Set<string>;
   loggedFlowStepActionIds: Set<string>;
   loggedFlowCompletionIds: Set<string>;
@@ -506,9 +547,19 @@ interface SimulationSessionRecord {
   persistedCoverageSummary?: ContentCoverageSummary;
   finalizing?: boolean;
   adapterShutdownFailed?: boolean;
+  acceptingDirectives: boolean;
+  shutdownReason?: string;
+  stopPromise?: Promise<SimulationSessionStatusSnapshot>;
   startupTimer?: NodeJS.Timeout;
   startupFlowTimeoutTimer?: NodeJS.Timeout;
   instanceHealthTimer?: NodeJS.Timeout;
+  runtimeDeadlineTimer?: NodeJS.Timeout;
+  runtimeDeadlineStartedAtMs?: number;
+  runtimeRemainingMs?: number;
+  instanceHealthRefreshPromise?: Promise<void>;
+  reportPersistence: SerializedDebouncedTask;
+  reportInitialized: boolean;
+  reportMilestone?: string;
 }
 
 type StartupFlowRuntimeStatus =
@@ -1360,13 +1411,14 @@ class PersistedSessionBotAdapter implements BotAdapter {
 
 function statusLabel(record: SimulationSessionRecord): string {
   const botCount = record.botStatuses.length;
+  const sessionName = record.request.runConfig.sessionName ?? record.request.runConfig.sessionId;
 
   if (record.status === 'created') {
     return `Session ready (${botCount} bots)`;
   }
 
   if (record.status === 'starting') {
-    return `Starting ${record.request.runConfig.sessionId}`;
+    return `Starting ${sessionName}`;
   }
 
   if (record.status === 'running') {
@@ -1374,22 +1426,22 @@ function statusLabel(record: SimulationSessionRecord): string {
       return `Running startup flow "${record.startupFlow.flowName}"`;
     }
 
-    return `Running ${record.request.runConfig.sessionId} (${botCount} bots)`;
+    return `Running ${sessionName} (${botCount} bots)`;
   }
 
   if (record.status === 'paused') {
-    return `Paused ${record.request.runConfig.sessionId}`;
+    return `Paused ${sessionName}`;
   }
 
   if (record.status === 'stopping') {
-    return `Stopping ${record.request.runConfig.sessionId}`;
+    return `Stopping ${sessionName}`;
   }
 
   if (record.status === 'stopped') {
-    return `Stopped ${record.request.runConfig.sessionId}`;
+    return `Stopped ${sessionName}`;
   }
 
-  return `Failed ${record.request.runConfig.sessionId}`;
+  return `Failed ${sessionName}`;
 }
 
 function createIdleSnapshot(): SimulationSessionStatusSnapshot {
@@ -1419,7 +1471,12 @@ export class SimulationService {
   private readonly systemSnapshot?: SystemResourceSnapshot;
   private readonly adapterFactory: Pick<AdapterFactory, 'createAdapter'>;
   private readonly useMockRuntime: boolean;
+  private readonly generateSessionId: () => string;
+  private readonly desktopDependencyChecker: DesktopAdapterDependencyChecker;
+  private readonly shutdownStageTimeoutMs: number;
+  private readonly shutdownHardTimeoutMs: number;
   private readonly sessionRepository: SessionRepository;
+  private shutdownPromise?: Promise<SimulationSessionStatusSnapshot[]>;
 
   constructor(options: SimulationServiceOptions = {}) {
     this.now = options.now ?? (() => new Date().toISOString());
@@ -1428,6 +1485,11 @@ export class SimulationService {
     this.systemSnapshot = options.systemSnapshot;
     this.adapterFactory = options.adapterFactory ?? new AdapterFactory();
     this.useMockRuntime = options.useMockRuntime ?? false;
+    this.generateSessionId = options.generateSessionId ?? randomUUID;
+    this.desktopDependencyChecker =
+      options.desktopDependencyChecker ?? new DesktopAdapterDependencyChecker();
+    this.shutdownStageTimeoutMs = options.shutdownStageTimeoutMs ?? 2_000;
+    this.shutdownHardTimeoutMs = options.shutdownHardTimeoutMs ?? 12_000;
     this.sessionRepository = new SessionRepository(this.reportRoot);
     this.loadPersistedSessions();
   }
@@ -1537,6 +1599,62 @@ export class SimulationService {
     };
   }
 
+  async validateSessionConfigWithDependencies(payload: unknown): Promise<SimulationValidationResult> {
+    const validation = this.validateSessionConfig(payload);
+    if (!validation.valid) {
+      return validation;
+    }
+
+    const requestResult = SimulationSessionRequestSchema.safeParse(payload);
+    if (!requestResult.success) {
+      return validation;
+    }
+    const request = requestResult.data;
+    if (request.runConfig.useMockRuntime ?? this.useMockRuntime) {
+      return validation;
+    }
+
+    const adapterOptions = createAdapterOptionsFromGameProfile(
+      request.gameProfile,
+      request.runConfig,
+      resolveRuntimeObservationConfig(request.runConfig, request.runtimeObservation),
+      { runsRoot: this.reportRoot }
+    );
+    if (
+      adapterOptions.runtimeMode !== 'desktop-window' &&
+      adapterOptions.runtimeMode !== 'engine-desktop-fallback'
+    ) {
+      return validation;
+    }
+
+    try {
+      const preflight = await this.preflightDesktopRuntime(request);
+      return {
+        valid: true,
+        errors: [],
+        warnings: [
+          ...validation.warnings,
+          ...preflight.warnings.map((message) => ({
+            path: 'desktopDependencies',
+            message
+          }))
+        ]
+      };
+    } catch (error) {
+      return {
+        valid: false,
+        errors: [
+          ...validation.errors,
+          {
+            path: 'desktopDependencies',
+            message: error instanceof Error ? error.message : 'Desktop dependency validation failed.'
+          }
+        ],
+        warnings: validation.warnings
+      };
+    }
+  }
+
   estimateViability(payload: unknown): RuntimeViabilityReport {
     const request = SimulationSessionRequestSchema.parse(payload);
     const report = resourceManager.estimateViabilitySync({
@@ -1572,7 +1690,161 @@ export class SimulationService {
   }
 
   async getDesktopAdapterDependencies(): Promise<DesktopAdapterDependencyReport> {
-    return new DesktopAdapterDependencyChecker().checkDependencies();
+    return this.desktopDependencyChecker.checkDependencies();
+  }
+
+  private async preflightDesktopRuntime(
+    request: Required<SimulationSessionRequest>
+  ): Promise<{ request: Required<SimulationSessionRequest>; warnings: string[] }> {
+    const report = await this.desktopDependencyChecker.checkDependencies();
+    const hasEnabledBots = request.runConfig.botPools.some(
+      (pool) => pool.enabled && pool.desiredCount > 0
+    );
+    const requiresKeyboard =
+      hasEnabledBots && request.gameProfile.controls.some((control) => control.inputType === 'keyboard');
+    const requiresMouse =
+      hasEnabledBots && request.gameProfile.controls.some((control) => control.inputType === 'mouse');
+
+    if (
+      (requiresKeyboard && !report.canSendKeyboardInput) ||
+      (requiresMouse && !report.canSendMouseInput)
+    ) {
+      const dependency = report.checks.find((item) =>
+        ['input-driver', 'platform-input'].includes(item.id)
+      );
+      throw new Error(
+        [
+          'Desktop session cannot start because its bots require keyboard or mouse input.',
+          dependency?.message,
+          dependency?.installHint
+        ].filter(Boolean).join(' ')
+      );
+    }
+
+    if (!request.runConfig.saveScreenshots) {
+      return { request, warnings: [] };
+    }
+
+    const fullDesktopOnly =
+      report.screenshotScope === 'full-desktop' && !report.canCaptureGameWindow;
+    const captureAllowed =
+      report.canCaptureGameWindow ||
+      (fullDesktopOnly && request.runConfig.allowFullDesktopCapture);
+
+    if (!captureAllowed) {
+      const dependency = report.checks.find((item) => item.id === 'screenshot-tool');
+      const reason = fullDesktopOnly
+        ? 'Only full-desktop capture is available, and this session did not grant privacy consent.'
+        : [
+            dependency?.message ?? 'No supported desktop screenshot tool is available.',
+            dependency?.installHint
+          ].filter(Boolean).join(' ');
+
+      if (request.runConfig.requireScreenshotEvidence) {
+        throw new Error(`Required screenshot evidence is unavailable. ${reason}`);
+      }
+
+      return {
+        request: SimulationSessionRequestSchema.parse({
+          ...request,
+          runConfig: {
+            ...request.runConfig,
+            saveScreenshots: false,
+            screenshotEveryNActions: undefined
+          }
+        }),
+        warnings: [
+          `Desktop screenshot capture was disabled before launch. ${reason}`
+        ]
+      };
+    }
+
+    return {
+      request,
+      warnings: fullDesktopOnly
+        ? [
+            'Privacy warning: this session explicitly allows full-desktop screenshots. Captures may include other visible applications and private desktop content.'
+          ]
+        : []
+    };
+  }
+
+  async createSessionWithPreflight(payload: unknown): Promise<SimulationSessionCreateResult> {
+    let request = SimulationSessionRequestSchema.parse(payload);
+    const useMockRuntime = request.runConfig.useMockRuntime ?? this.useMockRuntime;
+    const preflightWarnings: string[] = [];
+
+    if (!useMockRuntime) {
+      const runtimeObservation = resolveRuntimeObservationConfig(
+        request.runConfig,
+        request.runtimeObservation
+      );
+      const adapterOptions = createAdapterOptionsFromGameProfile(
+        request.gameProfile,
+        request.runConfig,
+        runtimeObservation,
+        { runsRoot: this.reportRoot }
+      );
+      const usesInstrumentation =
+        adapterOptions.runtimeMode === 'instrumented' ||
+        adapterOptions.runtimeMode === 'engine-instrumented';
+      const usesDesktop =
+        adapterOptions.runtimeMode === 'desktop-window' ||
+        adapterOptions.runtimeMode === 'engine-desktop-fallback';
+
+      if (usesDesktop) {
+        const desktopPreflight = await this.preflightDesktopRuntime(request);
+        request = desktopPreflight.request;
+        preflightWarnings.push(...desktopPreflight.warnings);
+      }
+
+      if (usesInstrumentation) {
+        if (adapterOptions.errors.length > 0) {
+          throw new Error(formatSimulationValidationErrors(adapterOptions.errors));
+        }
+
+        const adapter = createGameAdapterForProfile(this.adapterFactory, adapterOptions);
+        const instanceId = `session-preflight-${randomUUID()}`;
+
+        try {
+          await adapter.launchInstance({
+            instanceId,
+            gameProfileId: request.gameProfile.gameId,
+            launch: request.gameProfile.launch,
+            maxBots: 1,
+            environment: this.instrumentedIdentityEnvironment(request.gameProfile, {
+              GAMEPLAY_SIMULATOR_SESSION_PREFLIGHT: '1'
+            })
+          });
+          const running = await adapter.isRunning(instanceId);
+          const health = await adapter.getHealth(instanceId);
+
+          if (!running || !['ready', 'running'].includes(health.status)) {
+            throw new Error(
+              health.message ??
+              `Instrumented endpoint preflight failed with health status "${health.status}".`
+            );
+          }
+        } finally {
+          await adapter.stopAll().catch(() => undefined);
+        }
+      }
+    }
+
+    const result = this.createSession(request);
+    if (preflightWarnings.length > 0) {
+      const record = this.requireSession(result.sessionId);
+      for (const warning of preflightWarnings) {
+        record.logs.push(this.createLog(result.sessionId, 'warn', warning));
+      }
+      this.writeStructuredReports(record);
+      return {
+        ...result,
+        status: this.snapshotFor(record),
+        logs: this.getLogs(result.sessionId)
+      };
+    }
+    return result;
   }
 
   async testGameProfile(payload: unknown): Promise<GameProfileTestResult> {
@@ -1626,9 +1898,9 @@ export class SimulationService {
         gameProfileId: request.gameProfile.gameId,
         launch: request.gameProfile.launch,
         maxBots: 1,
-        environment: {
+        environment: this.instrumentedIdentityEnvironment(request.gameProfile, {
           GAMEPLAY_SIMULATOR_PROFILE_TEST: '1'
-        }
+        })
       });
       launched = true;
       instanceMetadata = instance.metadata;
@@ -1724,16 +1996,19 @@ export class SimulationService {
       typeof instanceMetadata?.instrumentationHealth === 'object' && instanceMetadata.instrumentationHealth !== null
         ? instanceMetadata.instrumentationHealth as { ok?: boolean; message?: string }
         : undefined;
+    const initialInstrumentationHealthOk =
+      !instrumentationHealth || instrumentationHealth.ok === true;
+    const currentHealthOk =
+      !health || ['ready', 'running', 'stopped'].includes(health.status);
     const healthOk =
       !instrumentationError &&
-      (instrumentationHealth
-        ? instrumentationHealth.ok === true
-        : !health || ['ready', 'running', 'stopped'].includes(health.status));
+      initialInstrumentationHealthOk &&
+      currentHealthOk;
     const ok = launched && healthOk;
     const failureMessage =
       instrumentationError ??
-      instrumentationHealth?.message ??
-      health?.message ??
+      (!currentHealthOk ? health?.message : undefined) ??
+      (!initialInstrumentationHealthOk ? instrumentationHealth?.message : undefined) ??
       'Adapter health is not ready.';
 
     return {
@@ -1920,13 +2195,27 @@ export class SimulationService {
     }
 
     const parsedRequest = SimulationSessionRequestSchema.parse(payload);
+    this.assertNoOtherActiveSession('new session', 'create', false);
+    const sessionId = this.createInternalSessionId();
+    const sessionName = SessionNameSchema.parse(
+      parsedRequest.runConfig.sessionName ?? parsedRequest.runConfig.sessionId
+    );
     const runtimeObservation = resolveRuntimeObservationConfig(
       parsedRequest.runConfig,
       parsedRequest.runtimeObservation
     );
+    const authoritativeRunConfig = SimulationRunConfigSchema.parse({
+      ...applyRuntimeObservationToRunConfig(parsedRequest.runConfig, runtimeObservation),
+      sessionId,
+      sessionName,
+      directives: parsedRequest.runConfig.directives?.map((directive) => ({
+        ...directive,
+        sessionId
+      }))
+    });
     const request = {
       ...parsedRequest,
-      runConfig: applyRuntimeObservationToRunConfig(parsedRequest.runConfig, runtimeObservation),
+      runConfig: authoritativeRunConfig,
       runtimeObservation
     };
     const useMockRuntime = request.runConfig.useMockRuntime ?? this.useMockRuntime;
@@ -1936,6 +2225,9 @@ export class SimulationService {
       request.runtimeObservation,
       { runsRoot: this.reportRoot }
     );
+    if (adapterOptions.options.desktop) {
+      adapterOptions.options.desktop.dependencyChecker = this.desktopDependencyChecker;
+    }
 
     if (!useMockRuntime && adapterOptions.errors.length > 0) {
       throw new Error(formatSimulationValidationErrors(adapterOptions.errors));
@@ -1959,7 +2251,6 @@ export class SimulationService {
       botProfiles,
       viabilityReport
     });
-    const sessionId = request.runConfig.sessionId;
     const plannedLaunchPlans = prependStartupLaunchPlan(resolvedLaunchPlans, startupFlow, sessionId);
     const createdAt = this.now();
     const profilesById = new Map(botProfiles.map((profile) => [profile.profileId, profile]));
@@ -1967,7 +2258,9 @@ export class SimulationService {
       rootDir: this.reportRoot,
       sessionId,
       createdAt,
-      now: this.now
+      now: this.now,
+      saveActionTimeline: request.runConfig.saveActionTimeline,
+      saveStateSnapshots: request.runConfig.saveStateSnapshots
     });
     const gameAdapter = useMockRuntime
       ? undefined
@@ -2004,6 +2297,7 @@ export class SimulationService {
     const coverageTracker = new CoverageTracker(request.gameProfile);
     const evidenceCaptureService = new EvidenceCaptureService({
       adapter: gameAdapter,
+      approvedSessionRoot: structuredLogger.sessionDir,
       now: this.now
     });
     let record!: SimulationSessionRecord;
@@ -2141,6 +2435,7 @@ export class SimulationService {
       loggedRecoverySuccessIds: new Set(),
       loggedRecoveryFailedIds: new Set(),
       loggedEvidenceKeys: new Set(),
+      screenshotCaptureScopes: new Set(),
       loggedFlowStartIds: new Set(),
       loggedFlowStepActionIds: new Set(),
       loggedFlowCompletionIds: new Set(),
@@ -2166,7 +2461,11 @@ export class SimulationService {
       gameInstanceManager,
       observationManager: new RuntimeObservationManager(request.runtimeObservation),
       useMockRuntime,
-      persisted: false
+      persisted: false,
+      acceptingDirectives: true,
+      reportPersistence: new SerializedDebouncedTask(),
+      reportInitialized: false,
+      reportMilestone: undefined
     };
 
     for (const event of pendingDirectiveEvents) {
@@ -2214,6 +2513,7 @@ export class SimulationService {
   async startSession(sessionId: string): Promise<SimulationSessionStatusSnapshot> {
     const record = this.requireSession(sessionId);
     this.assertMutableSession(record, 'start');
+    this.assertSessionStatus(record, ['created', 'stopped', 'failed'], 'start');
 
     if (record.viabilityReport.blockers.length > 0) {
       record.status = 'failed';
@@ -2222,12 +2522,15 @@ export class SimulationService {
       return this.snapshotFor(record);
     }
 
+    record.acceptingDirectives = true;
+    record.shutdownReason = undefined;
     if (record.useMockRuntime) {
       return this.startMockSession(record);
     }
 
     this.activeSessionId = sessionId;
     record.status = 'starting';
+    this.resetRuntimeDeadline(record);
     record.startedAt = record.startedAt ?? this.now();
     record.stoppedAt = undefined;
     record.botStatuses = record.botStatuses.map((bot) => ({
@@ -2250,14 +2553,53 @@ export class SimulationService {
     this.clearSessionTimer(sessionId);
 
     try {
+      const adapterOptions = createAdapterOptionsFromGameProfile(
+        record.request.gameProfile,
+        record.request.runConfig,
+        record.request.runtimeObservation,
+        { runsRoot: this.reportRoot }
+      );
+      if (
+        adapterOptions.runtimeMode === 'desktop-window' ||
+        adapterOptions.runtimeMode === 'engine-desktop-fallback'
+      ) {
+        const desktopPreflight = await this.preflightDesktopRuntime(record.request);
+        record.request = desktopPreflight.request;
+        record.structuredLogger.writeConfig({
+          runConfig: record.request.runConfig,
+          gameProfile: record.request.gameProfile,
+          botProfiles: this.sessionBotProfiles(record)
+        });
+        for (const warning of desktopPreflight.warnings) {
+          record.logs.push(this.createLog(sessionId, 'warn', warning));
+        }
+      }
+
       if (!record.gameInstanceManager) {
         throw new Error('Adapter-backed session is missing a game instance manager.');
       }
 
       record.instanceStatuses = await record.gameInstanceManager.startAllInstances();
       this.logInstanceManagerEvents(record);
+      record.instanceStatuses = await record.gameInstanceManager.refreshHealth();
+      this.logInstanceManagerEvents(record);
+
+      const unavailableInstances = record.instanceStatuses.filter(
+        (instance) => instance.status !== 'running'
+      );
+      if (unavailableInstances.length > 0) {
+        throw new Error(
+          `Game instance health gate failed: ${unavailableInstances
+            .map((instance) =>
+              `${instance.instanceId} is ${instance.status}` +
+              (instance.connectionState ? ` (${instance.connectionState})` : '')
+            )
+            .join(', ')}. Bots were not started.`
+        );
+      }
 
       record.status = 'running';
+      this.startRuntimeDeadline(record);
       record.botStatuses = record.botStatuses.map((bot) => ({
         ...bot,
         status:
@@ -2307,44 +2649,31 @@ export class SimulationService {
     return this.snapshotFor(record);
   }
 
-  async stopSession(sessionId: string): Promise<SimulationSessionStatusSnapshot> {
-    const record = this.requireSession(sessionId);
-    this.assertMutableSession(record, 'stop');
-    const wasStopped = record.status === 'stopped';
-    const runtimeKind = record.useMockRuntime ? 'mock' : 'adapter-backed';
-
-    record.status = 'stopping';
-    record.label = statusLabel(record);
-    record.logs.push(this.createLog(sessionId, 'info', `Stopping ${runtimeKind} simulation session.`));
-    this.clearSessionTimer(sessionId);
-    record.botManager.stopAll();
-    await this.stopObservationTracking(record);
-
-    if (!wasStopped) {
-      record.structuredLogger.logSession('manual_stop', {
-        scope: 'session',
-        reason: 'Stop Session requested from UI or backend API.'
-      });
+  stopSession(sessionId: string): Promise<SimulationSessionStatusSnapshot> {
+    let record: SimulationSessionRecord;
+    try {
+      record = this.requireSession(sessionId);
+      this.assertMutableSession(record, 'stop');
+    } catch (error) {
+      return Promise.reject(error);
     }
 
-    await this.stopGameInstances(record, 'manual_stop');
+    if (record.stopPromise) {
+      return record.stopPromise;
+    }
 
-    record.status = record.adapterShutdownFailed ? 'failed' : 'stopped';
-    record.stoppedAt = this.now();
-    record.botStatuses = record.botStatuses.map((bot) => ({
-      ...bot,
-      status: 'stopped',
-      progressState: record.adapterShutdownFailed ? 'Stopped with cleanup errors' : 'Stopped',
-      message: record.adapterShutdownFailed
-        ? 'Session stopped, but one or more owned runtime resources reported cleanup errors.'
-        : `${record.useMockRuntime ? 'Mock' : 'Adapter-backed'} session stopped.`
-    }));
-    record.logs.push(this.createLog(sessionId, 'info', `${record.useMockRuntime ? 'Mock' : 'Adapter-backed'} simulation stopped.`));
-    record.label = statusLabel(record);
-    this.logSessionStop(record, 'manual_stop');
-    this.writeStructuredReports(record);
+    if (record.status === 'stopped' || record.status === 'failed') {
+      return Promise.resolve(this.snapshotFor(record));
+    }
 
-    return this.snapshotFor(record);
+    const stopPromise = this.shutdownSessionRecord(record, 'manual_stop', false)
+      .finally(() => {
+        if (record.stopPromise === stopPromise) {
+          record.stopPromise = undefined;
+        }
+      });
+    record.stopPromise = stopPromise;
+    return stopPromise;
   }
 
   pauseSession(sessionId: string): SimulationSessionStatusSnapshot {
@@ -2356,6 +2685,7 @@ export class SimulationService {
     }
 
     this.clearSessionTimer(sessionId);
+    this.pauseRuntimeDeadline(record);
     record.botManager.pauseAll();
     record.status = 'paused';
     const runtimeKind = record.useMockRuntime ? 'Mock' : 'Adapter-backed';
@@ -2395,6 +2725,7 @@ export class SimulationService {
     record.logs.push(this.createLog(sessionId, 'info', `${runtimeKind} simulation resumed.`));
     record.label = statusLabel(record);
     record.botManager.resumeAll();
+    this.startRuntimeDeadline(record);
 
     return this.snapshotFor(record);
   }
@@ -2453,6 +2784,7 @@ export class SimulationService {
     const request = GuideBotDirectiveRequestSchema.parse(input);
     const record = this.requireSession(request.sessionId);
     this.assertMutableSession(record, 'guide bots in');
+    this.assertAcceptingDirectives(record);
     const bot = record.botStatuses.find((item) => item.botId === request.botId);
 
     if (!bot || !bot.gameInstanceId) {
@@ -2554,6 +2886,7 @@ export class SimulationService {
   ): LiveDirectiveMutationResult {
     const record = this.requireSession(sessionId);
     this.assertMutableSession(record, 'cancel directives in');
+    this.assertAcceptingDirectives(record);
     const progress = record.directiveManager.getProgress(directiveId, botId)[0];
     if (!progress) {
       throw new Error(`Directive ${directiveId} is not assigned to bot ${botId}.`);
@@ -2580,6 +2913,7 @@ export class SimulationService {
   ): LiveDirectiveMutationResult {
     const record = this.requireSession(sessionId);
     this.assertMutableSession(record, 'confirm directives in');
+    this.assertAcceptingDirectives(record);
     const directive = record.directiveManager.getDirective(directiveId);
     const progress = record.directiveManager.getProgress(directiveId, botId)[0];
 
@@ -2624,6 +2958,7 @@ export class SimulationService {
     const request = ReorderBotDirectivesRequestSchema.parse(input);
     const record = this.requireSession(request.sessionId);
     this.assertMutableSession(record, 'reorder directives in');
+    this.assertAcceptingDirectives(record);
     const queuedForBot = record.directiveManager.getQueuedDirectives(request.botId);
     const expected = new Set(queuedForBot.map((directive) => directive.directiveId));
 
@@ -2801,7 +3136,12 @@ export class SimulationService {
 
   async getInstanceStatuses(sessionId: string): Promise<GameInstanceStatus[]> {
     const record = this.requireSession(sessionId);
-    await this.refreshInstanceHealth(record);
+    if (
+      !record.persisted &&
+      ['starting', 'running', 'paused'].includes(record.status)
+    ) {
+      await this.refreshInstanceHealth(record, true);
+    }
     return record.instanceStatuses.map(cloneStatus);
   }
 
@@ -2822,69 +3162,59 @@ export class SimulationService {
     return this.coverageSummaryForRecord(this.requireSession(sessionId));
   }
 
-  async shutdownAllSessions(reason = 'app_shutdown'): Promise<SimulationSessionStatusSnapshot[]> {
-    const snapshots: SimulationSessionStatusSnapshot[] = [];
-
-    for (const record of this.sessions.values()) {
-      if (record.persisted) {
-        snapshots.push(this.snapshotFor(record));
-        continue;
-      }
-
-      try {
-        snapshots.push(await this.shutdownSessionRecord(record, reason));
-      } catch (error) {
-        record.status = 'failed';
-        record.stoppedAt = record.stoppedAt ?? this.now();
-        record.logs.push(this.createLog(
-          record.request.runConfig.sessionId,
-          'error',
-          `Abnormal shutdown: ${error instanceof Error ? error.message : String(error)}`
-        ));
-        try {
-          this.writeStructuredReports(record);
-        } catch {
-          this.metadataForRecord(record);
-        }
-        snapshots.push(this.snapshotFor(record));
-      }
+  shutdownAllSessions(reason = 'app_shutdown'): Promise<SimulationSessionStatusSnapshot[]> {
+    if (this.shutdownPromise) {
+      return this.shutdownPromise;
     }
 
-    return snapshots;
+    const shutdownPromise = this.performShutdownAllSessions(reason)
+      .finally(() => {
+        if (this.shutdownPromise === shutdownPromise) {
+          this.shutdownPromise = undefined;
+        }
+      });
+    this.shutdownPromise = shutdownPromise;
+    return shutdownPromise;
   }
 
   async forceCleanupOwnedProcesses(reason = 'forced_shutdown'): Promise<void> {
     const records = [...this.sessions.values()].filter((record) => !record.persisted);
 
-    for (const record of records) {
+    await Promise.allSettled(records.map(async (record) => {
       const sessionId = record.request.runConfig.sessionId;
+      record.acceptingDirectives = false;
       this.clearSessionTimer(sessionId);
+      this.clearRuntimeDeadline(record);
       this.clearInstanceHealthTimer(sessionId);
       record.botManager.stopAll();
       record.observationManager.stopFollowing();
       record.adapterShutdownFailed = true;
       record.status = 'failed';
+      record.shutdownReason = reason;
       record.stoppedAt = record.stoppedAt ?? this.now();
       record.logs.push(this.createLog(
         sessionId,
         'error',
-        `Forced cleanup of adapter-owned processes was requested: ${reason}.`
+        `Forced cleanup of adapter-owned resources was requested: ${reason}.`
       ));
-      record.label = statusLabel(record);
       try {
-        this.writeStructuredReports(record);
-      } catch {
-        this.metadataForRecord(record);
-      }
-    }
-
-    await Promise.allSettled(records.map(async (record) => {
-      const sessionId = record.request.runConfig.sessionId;
-      try {
+        await this.runShutdownOperationWithTimeout(
+          () => record.gameAdapter?.abortActiveRequests?.(),
+          this.shutdownStageTimeoutMs,
+          'Abort adapter requests'
+        );
         if (record.gameAdapter?.forceStopAll) {
-          await record.gameAdapter.forceStopAll();
+          await this.runShutdownOperationWithTimeout(
+            () => record.gameAdapter!.forceStopAll!(),
+            this.shutdownStageTimeoutMs,
+            'Forced owned-resource cleanup'
+          );
         } else {
-          await record.gameAdapter?.stopAll();
+          await this.runShutdownOperationWithTimeout(
+            () => record.gameAdapter?.stopAll(),
+            this.shutdownStageTimeoutMs,
+            'Owned-resource cleanup'
+          );
         }
       } catch (error) {
         record.logs.push(this.createLog(
@@ -2896,9 +3226,18 @@ export class SimulationService {
         this.markInstancesStopped(record);
         record.label = statusLabel(record);
         try {
-          this.writeStructuredReports(record);
-        } catch {
+          this.performStructuredReportWrite(record);
+        } catch (error) {
+          record.logs.push(this.createLog(
+            sessionId,
+            'error',
+            `Forced-cleanup report finalization failed: ${error instanceof Error ? error.message : String(error)}`
+          ));
+        }
+        try {
           this.metadataForRecord(record);
+        } catch {
+          // Application-level shutdown logging records failures outside the run directory.
         }
       }
     }));
@@ -2906,7 +3245,7 @@ export class SimulationService {
 
   async openReport(sessionId: string): Promise<OpenReportResult> {
     const record = this.requireSession(sessionId);
-    this.writeStructuredReports(record);
+    await this.flushStructuredReports(record);
     const reportPath = this.approvedSessionPath(record, record.structuredLogger.summaryPath);
 
     const openError = await this.openPath(reportPath);
@@ -2921,7 +3260,7 @@ export class SimulationService {
 
   async openLogs(sessionId: string): Promise<OpenLogsResult> {
     const record = this.requireSession(sessionId);
-    this.writeStructuredReports(record);
+    await this.flushStructuredReports(record);
     const logsPath = this.approvedSessionPath(record, existsSync(record.structuredLogger.sessionLogger.fullStructuredLogsPath)
       ? record.structuredLogger.sessionLogger.fullStructuredLogsPath
       : record.structuredLogger.sessionLogPath);
@@ -2938,26 +3277,26 @@ export class SimulationService {
 
   async openSessionFolder(sessionId: string): Promise<OpenSessionPathResult> {
     const record = this.requireSession(sessionId);
-    this.writeStructuredReports(record);
+    await this.flushStructuredReports(record);
     return this.openSessionPath(record, record.structuredLogger.sessionDir, 'Session folder opened.');
   }
 
   async openIssueFolder(sessionId: string): Promise<OpenSessionPathResult> {
     const record = this.requireSession(sessionId);
-    this.writeStructuredReports(record);
+    await this.flushStructuredReports(record);
     return this.openSessionPath(record, join(record.structuredLogger.sessionDir, 'issues'), 'Issue folder opened.');
   }
 
   async openScreenshotsFolder(sessionId: string): Promise<OpenSessionPathResult> {
     const record = this.requireSession(sessionId);
-    this.writeStructuredReports(record);
+    await this.flushStructuredReports(record);
     return this.openSessionPath(record, record.structuredLogger.sessionLogger.screenshotsDir, 'Screenshots folder opened.');
   }
 
   async cleanupSessionBundle(payload: unknown): Promise<SessionCleanupResult> {
     const options = SessionCleanupOptionsSchema.parse(payload);
     const record = this.requireSession(options.sessionId);
-    this.writeStructuredReports(record);
+    await this.flushStructuredReports(record);
     this.approvedSessionPath(record, record.structuredLogger.sessionDir);
 
     const deletedPaths: string[] = [];
@@ -3126,69 +3465,24 @@ export class SimulationService {
     });
   }
 
-  async getStructuredLogs(sessionId: string): Promise<StructuredLogReadResult> {
+  async getStructuredLogs(
+    sessionId: string,
+    page: StructuredLogPageRequest = {}
+  ): Promise<StructuredLogReadResult> {
     const record = this.requireSession(sessionId);
-    this.writeStructuredReports(record);
-
-    const logs: StructuredLogItem[] = [];
+    await record.structuredLogger.flush();
     const bundleLogsPath = record.structuredLogger.sessionLogger.fullStructuredLogsPath;
-
-    if (existsSync(bundleLogsPath)) {
-      logs.push(
-        ...(await this.readStructuredLogFile(bundleLogsPath, {
-          source: 'session'
-        }))
-      );
-      logs.sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
-
-      return {
-        sessionId,
-        logs
-      };
-    }
-
-    logs.push(
-      ...(await this.readStructuredLogFile(record.structuredLogger.sessionLogPath, {
-        source: 'session'
-      }))
+    const sourcePath =
+      existsSync(bundleLogsPath) && statSync(bundleLogsPath).size > 0
+        ? bundleLogsPath
+        : record.structuredLogger.sessionLogPath;
+    const result = await this.readStructuredLogPage(
+      sourcePath,
+      { source: 'session' },
+      page
     );
 
-    for (const bot of record.botStatuses) {
-      const botDirectory = join(record.structuredLogger.sessionDir, 'bots', safePathSegment(bot.botId));
-      logs.push(
-        ...(await this.readStructuredLogFile(join(botDirectory, 'actions.jsonl'), {
-          source: 'bot-actions',
-          botId: bot.botId
-        })),
-        ...(await this.readStructuredLogFile(join(botDirectory, 'states.jsonl'), {
-          source: 'bot-states',
-          botId: bot.botId
-        })),
-        ...(await this.readStructuredLogFile(join(botDirectory, 'issues.jsonl'), {
-          source: 'bot-issues',
-          botId: bot.botId
-        }))
-      );
-    }
-
-    for (const instance of record.instanceStatuses) {
-      logs.push(
-        ...(await this.readStructuredLogFile(
-          join(record.structuredLogger.sessionDir, 'instances', safePathSegment(instance.instanceId), 'instance-log.jsonl'),
-          {
-            source: 'instance',
-            instanceId: instance.instanceId
-          }
-        ))
-      );
-    }
-
-    logs.sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
-
-    return {
-      sessionId,
-      logs
-    };
+    return { sessionId, ...result };
   }
 
   async openEvidence(sessionId: string, evidencePath: string): Promise<OpenEvidenceResult> {
@@ -4065,7 +4359,9 @@ export class SimulationService {
       sessionId,
       createdAt: artifacts.metadata.createdAt,
       sessionDir: artifacts.metadata.reportPaths.sessionDirectory,
-      now: this.now
+      now: this.now,
+      saveActionTimeline: artifacts.runConfig.saveActionTimeline,
+      saveStateSnapshots: artifacts.runConfig.saveStateSnapshots
     });
 
     for (const bot of artifacts.botStatuses) {
@@ -4089,6 +4385,7 @@ export class SimulationService {
       createdAt: artifacts.metadata.createdAt,
       startedAt: artifacts.metadata.startedAt,
       stoppedAt: artifacts.metadata.stoppedAt,
+      shutdownReason: artifacts.metadata.shutdownReason,
       botStatuses: artifacts.botStatuses,
       instanceStatuses: artifacts.instanceStatuses,
       issues: artifacts.issues,
@@ -4110,6 +4407,7 @@ export class SimulationService {
       loggedRecoverySuccessIds: new Set(),
       loggedRecoveryFailedIds: new Set(),
       loggedEvidenceKeys: new Set(),
+      screenshotCaptureScopes: new Set(),
       loggedFlowStartIds: new Set(),
       loggedFlowStepActionIds: new Set(),
       loggedFlowCompletionIds: new Set(),
@@ -4125,7 +4423,11 @@ export class SimulationService {
       observationManager: new RuntimeObservationManager(resolveRuntimeObservationConfig(artifacts.runConfig)),
       useMockRuntime: false,
       persisted: true,
-      persistedCoverageSummary: artifacts.coverageSummary
+      acceptingDirectives: false,
+      persistedCoverageSummary: artifacts.coverageSummary,
+      reportPersistence: new SerializedDebouncedTask(),
+      reportInitialized: true,
+      reportMilestone: undefined
     };
 
     record.label = statusLabel(record);
@@ -4144,6 +4446,7 @@ export class SimulationService {
       createdAt: record.createdAt,
       startedAt: record.startedAt,
       stoppedAt: record.stoppedAt,
+      shutdownReason: record.shutdownReason,
       issues: record.issues,
       botStatuses: record.botStatuses,
       coverageSummary: coverage,
@@ -4168,7 +4471,11 @@ export class SimulationService {
       screenshotsDirectory: record.structuredLogger.sessionLogger.screenshotsDir,
       reportsDirectory: record.structuredLogger.sessionLogger.reportsDir,
       exportsDirectory: record.structuredLogger.sessionLogger.exportsDir,
-      replayDirectory: record.structuredLogger.sessionLogger.replayDir,
+      replayDirectory:
+        record.request.runConfig.saveActionTimeline &&
+        existsSync(record.structuredLogger.sessionLogger.replayDir)
+          ? record.structuredLogger.sessionLogger.replayDir
+          : undefined,
       issueDirectory: join(sessionDir, 'issues'),
       config: record.structuredLogger.sessionLogger.configPath,
       viabilityReport: record.structuredLogger.sessionLogger.viabilityReportPath,
@@ -4201,6 +4508,7 @@ export class SimulationService {
 
     this.activeSessionId = sessionId;
     record.status = 'starting';
+    this.resetRuntimeDeadline(record);
     record.startedAt = record.startedAt ?? this.now();
     record.stoppedAt = undefined;
     record.botStatuses = record.botStatuses.map((bot) => ({
@@ -4229,6 +4537,7 @@ export class SimulationService {
       }
 
       current.status = 'running';
+      this.startRuntimeDeadline(current);
       current.botStatuses = current.botStatuses.map((bot) => ({
         ...bot,
         status:
@@ -4343,10 +4652,11 @@ export class SimulationService {
       const stopMessage = stopError instanceof Error ? stopError.message : 'Adapter cleanup failed.';
       record.logs.push(this.createLog(sessionId, 'warn', `Adapter cleanup after launch failure failed: ${stopMessage}`));
     }
+    await this.refreshAdapterLogs(record);
 
     record.label = statusLabel(record);
     this.logSessionStop(record, 'adapter_startup_failed');
-    this.writeStructuredReports(record);
+    await this.flushStructuredReports(record);
   }
 
   private startInstanceHealthMonitor(record: SimulationSessionRecord): void {
@@ -4379,7 +4689,29 @@ export class SimulationService {
     }
   }
 
-  private async refreshInstanceHealth(record: SimulationSessionRecord): Promise<void> {
+  private async refreshInstanceHealth(
+    record: SimulationSessionRecord,
+    refreshAfterPending = false
+  ): Promise<void> {
+    if (record.instanceHealthRefreshPromise) {
+      await record.instanceHealthRefreshPromise;
+      if (!refreshAfterPending) {
+        return;
+      }
+    }
+
+    const refreshPromise = this.performInstanceHealthRefresh(record);
+    record.instanceHealthRefreshPromise = refreshPromise;
+    try {
+      await refreshPromise;
+    } finally {
+      if (record.instanceHealthRefreshPromise === refreshPromise) {
+        record.instanceHealthRefreshPromise = undefined;
+      }
+    }
+  }
+
+  private async performInstanceHealthRefresh(record: SimulationSessionRecord): Promise<void> {
     if (record.useMockRuntime || !record.gameInstanceManager) {
       return;
     }
@@ -4391,6 +4723,85 @@ export class SimulationService {
     try {
       record.instanceStatuses = await record.gameInstanceManager.refreshHealth();
       this.logInstanceManagerEvents(record);
+      const unavailableInstances = record.instanceStatuses.filter((instance) =>
+        ['crashed', 'failed', 'unresponsive'].includes(instance.status)
+      );
+      const allInstancesUnavailable =
+        record.instanceStatuses.length > 0 &&
+        record.instanceStatuses.every((instance) =>
+          ['crashed', 'failed', 'unresponsive'].includes(instance.status)
+        );
+      const shouldFinalizeConnectionFailure =
+        allInstancesUnavailable &&
+        record.status !== 'failed' &&
+        !record.finalizing;
+      const terminalFailures = shouldFinalizeConnectionFailure
+        ? new Map(unavailableInstances.map((instance) => [instance.instanceId, cloneStatus(instance)]))
+        : undefined;
+
+      if (shouldFinalizeConnectionFailure) {
+        // Reserve terminal-state ownership before stopBot emits status/idle callbacks.
+        // Those callbacks must not convert an adapter failure into a normal idle stop.
+        record.finalizing = true;
+        this.clearRuntimeDeadline(record);
+        record.status = 'stopping';
+        record.logs.push(this.createLog(
+          record.request.runConfig.sessionId,
+          'error',
+          'All game instances became unavailable. Stopping the session.'
+        ));
+      }
+
+      for (const instance of unavailableInstances) {
+        for (const botId of instance.assignedBots) {
+          const bot = record.botStatuses.find((candidate) => candidate.botId === botId);
+
+          if (!bot || ['blocked', 'completed', 'failed', 'stopped'].includes(bot.status)) {
+            continue;
+          }
+
+          record.botManager.stopBot(botId);
+          record.botStatuses = record.botStatuses.map((candidate) =>
+            candidate.botId === botId
+              ? {
+                  ...candidate,
+                  status: 'failed',
+                  progressState: 'Game instance connection lost',
+                  message: `Stopped because ${instance.instanceId} is ${instance.status}.`
+                }
+              : candidate
+          );
+          record.logs.push(this.createLog(
+            record.request.runConfig.sessionId,
+            'error',
+            `Stopped bot ${botId} because assigned instance ${instance.instanceId} is ${instance.status}.`
+          ));
+          this.logBotStop(record, botId, 'instance_connection_lost');
+        }
+      }
+
+      if (shouldFinalizeConnectionFailure && terminalFailures) {
+        await this.stopObservationTracking(record);
+        await this.stopGameInstances(record, 'instance_connection_lost');
+        record.instanceStatuses = record.instanceStatuses.map((instance) => {
+          const failure = terminalFailures.get(instance.instanceId);
+
+          return failure
+            ? {
+                ...instance,
+                status: failure.status,
+                connectionState: failure.connectionState,
+                lastHeartbeat: failure.lastHeartbeat,
+                resourceUsage: failure.resourceUsage
+              }
+            : instance;
+        });
+        record.status = 'failed';
+        record.stoppedAt = this.now();
+        record.finalizing = false;
+        this.logSessionStop(record, 'instance_connection_lost');
+      }
+
       await this.refreshAdapterLogs(record);
       record.label = statusLabel(record);
       this.writeStructuredReports(record);
@@ -4483,11 +4894,14 @@ export class SimulationService {
       return;
     }
 
-    const observationEventTypes = new Set<StructuredLogEventType>([
+    const adapterEventTypes = new Set<StructuredLogEventType>([
       'visible_window_started',
       'visible_window_stopped',
       'observation_bot_changed',
-      'observation_limit_reached'
+      'observation_limit_reached',
+      'adapter_request_timeout',
+      'adapter_request_aborted',
+      'adapter_response_too_large'
     ]);
 
     for (const instance of record.instanceStatuses) {
@@ -4502,7 +4916,7 @@ export class SimulationService {
         record.logs.push(entry);
         const eventType = entry.message.split(':', 1)[0] as StructuredLogEventType;
 
-        if (observationEventTypes.has(eventType)) {
+        if (adapterEventTypes.has(eventType)) {
           const event = record.structuredLogger.logSession(
             eventType,
             {
@@ -4660,6 +5074,114 @@ export class SimulationService {
     }
   }
 
+  private startRuntimeDeadline(record: SimulationSessionRecord): void {
+    const maxRuntimeMinutes = record.request.runConfig.maxRuntimeMinutes;
+
+    if (
+      maxRuntimeMinutes === undefined ||
+      record.runtimeDeadlineTimer ||
+      record.status !== 'running'
+    ) {
+      return;
+    }
+
+    record.runtimeRemainingMs ??= maxRuntimeMinutes * 60_000;
+
+    if (record.runtimeRemainingMs <= 0) {
+      void this.handleMaxRuntimeReached(record.request.runConfig.sessionId);
+      return;
+    }
+
+    record.runtimeDeadlineStartedAtMs = Date.now();
+    const timer = setTimeout(() => {
+      void this.handleMaxRuntimeReached(record.request.runConfig.sessionId);
+    }, record.runtimeRemainingMs);
+    timer.unref?.();
+    record.runtimeDeadlineTimer = timer;
+  }
+
+  private resetRuntimeDeadline(record: SimulationSessionRecord): void {
+    this.clearRuntimeDeadline(record);
+    record.runtimeRemainingMs = record.request.runConfig.maxRuntimeMinutes === undefined
+      ? undefined
+      : record.request.runConfig.maxRuntimeMinutes * 60_000;
+  }
+
+  private pauseRuntimeDeadline(record: SimulationSessionRecord): void {
+    if (record.runtimeDeadlineStartedAtMs !== undefined) {
+      const elapsedMs = Math.max(0, Date.now() - record.runtimeDeadlineStartedAtMs);
+      record.runtimeRemainingMs = Math.max(0, (record.runtimeRemainingMs ?? 0) - elapsedMs);
+    }
+
+    if (record.runtimeDeadlineTimer) {
+      clearTimeout(record.runtimeDeadlineTimer);
+      record.runtimeDeadlineTimer = undefined;
+    }
+    record.runtimeDeadlineStartedAtMs = undefined;
+  }
+
+  private clearRuntimeDeadline(record: SimulationSessionRecord): void {
+    if (record.runtimeDeadlineTimer) {
+      clearTimeout(record.runtimeDeadlineTimer);
+      record.runtimeDeadlineTimer = undefined;
+    }
+    record.runtimeDeadlineStartedAtMs = undefined;
+  }
+
+  private async handleMaxRuntimeReached(sessionId: string): Promise<void> {
+    const record = this.sessions.get(sessionId);
+
+    if (
+      !record ||
+      record.persisted ||
+      record.finalizing ||
+      !['running', 'paused'].includes(record.status)
+    ) {
+      return;
+    }
+
+    record.finalizing = true;
+    this.clearRuntimeDeadline(record);
+    this.clearSessionTimer(sessionId);
+    record.status = 'stopping';
+    record.logs.push(
+      this.createLog(
+        sessionId,
+        'info',
+        `Maximum active runtime of ${record.request.runConfig.maxRuntimeMinutes} minute(s) reached.`
+      )
+    );
+    record.structuredLogger.logSession('max_runtime_reached', {
+      maxRuntimeMinutes: record.request.runConfig.maxRuntimeMinutes,
+      clock: 'active-running-time',
+      pausedTimeExcluded: true
+    });
+    record.label = statusLabel(record);
+    record.botManager.stopAll();
+    await this.stopObservationTracking(record);
+
+    try {
+      await this.stopGameInstances(record, 'max_runtime_reached');
+      record.status = record.adapterShutdownFailed ? 'failed' : 'stopped';
+      record.stoppedAt = this.now();
+      record.botStatuses = record.botStatuses.map((bot) => ({
+        ...bot,
+        status: ['blocked', 'completed', 'failed'].includes(bot.status) ? bot.status : 'stopped',
+        progressState: ['blocked', 'completed', 'failed'].includes(bot.status)
+          ? bot.progressState
+          : 'Maximum runtime reached',
+        message: ['blocked', 'completed', 'failed'].includes(bot.status)
+          ? bot.message
+          : 'The session reached its configured active-runtime limit.'
+      }));
+      record.label = statusLabel(record);
+      this.logSessionStop(record, 'max_runtime_reached');
+      this.writeStructuredReports(record);
+    } finally {
+      record.finalizing = false;
+    }
+  }
+
   private startStartupFlowTimeout(record: SimulationSessionRecord): void {
     const startupFlow = record.startupFlow;
 
@@ -4811,6 +5333,7 @@ export class SimulationService {
 
     record.logs.push(this.createLog(record.request.runConfig.sessionId, 'error', `Startup flow failed: ${message}`));
     this.clearSessionTimer(record.request.runConfig.sessionId);
+    this.clearRuntimeDeadline(record);
     record.botManager.stopAll();
     record.status = 'failed';
     record.stoppedAt = timestamp;
@@ -4886,56 +5409,221 @@ export class SimulationService {
     return record.issues.find((item) => item.issueId === issue.issueId) ?? issue;
   }
 
-  private async shutdownSessionRecord(
-    record: SimulationSessionRecord,
+  private async performShutdownAllSessions(
     reason: string
-  ): Promise<SimulationSessionStatusSnapshot> {
-    const sessionId = record.request.runConfig.sessionId;
-    const terminalBotStatuses = new Set(['blocked', 'completed', 'failed', 'stopped']);
-    const wasStopped = record.status === 'stopped';
+  ): Promise<SimulationSessionStatusSnapshot[]> {
+    const snapshots: SimulationSessionStatusSnapshot[] = [];
 
-    this.clearSessionTimer(sessionId);
-    record.botManager.stopAll();
-    await this.stopObservationTracking(record);
-
-    if (!wasStopped) {
-      record.status = 'stopped';
-      record.stoppedAt = record.stoppedAt ?? this.now();
-      record.logs.push(this.createLog(sessionId, 'warn', `Graceful shutdown preserved partial session: ${reason}.`));
-      record.structuredLogger.logSession('manual_stop', {
-        scope: 'session',
-        reason
-      });
-    } else {
-      record.stoppedAt = record.stoppedAt ?? this.now();
-    }
-
-    record.botStatuses = record.botStatuses.map((bot) => {
-      if (terminalBotStatuses.has(bot.status)) {
-        return bot;
+    for (const record of this.sessions.values()) {
+      if (record.persisted) {
+        snapshots.push(this.snapshotFor(record));
+        continue;
       }
 
-      return {
-        ...bot,
-        status: 'stopped',
-        progressState: `Stopped during graceful shutdown: ${reason}`,
-        message: `Stopped during graceful shutdown: ${reason}`
-      };
+      if (record.status === 'stopped' || record.status === 'failed') {
+        try {
+          await this.runShutdownOperationWithTimeout(async () => {
+            await record.structuredLogger.flush();
+            await record.reportPersistence.flush();
+            await record.structuredLogger.flush();
+          }, this.shutdownStageTimeoutMs, 'Flush terminal session persistence');
+        } catch (error) {
+          record.logs.push(this.createLog(
+            record.request.runConfig.sessionId,
+            'error',
+            `Terminal session persistence flush failed: ${error instanceof Error ? error.message : String(error)}`
+          ));
+        }
+        snapshots.push(this.snapshotFor(record));
+        continue;
+      }
+
+      if (!record.stopPromise) {
+        const stopPromise = this.shutdownSessionRecord(record, reason, true)
+          .finally(() => {
+            if (record.stopPromise === stopPromise) {
+              record.stopPromise = undefined;
+            }
+          });
+        record.stopPromise = stopPromise;
+      }
+
+      try {
+        snapshots.push(await record.stopPromise);
+      } catch (error) {
+        record.status = 'failed';
+        record.shutdownReason = reason;
+        record.stoppedAt = record.stoppedAt ?? this.now();
+        record.logs.push(this.createLog(
+          record.request.runConfig.sessionId,
+          'error',
+          `Abnormal shutdown: ${error instanceof Error ? error.message : String(error)}`
+        ));
+        snapshots.push(this.snapshotFor(record));
+      }
+    }
+
+    return snapshots;
+  }
+
+  private async shutdownSessionRecord(
+    record: SimulationSessionRecord,
+    reason: string,
+    interrupted: boolean
+  ): Promise<SimulationSessionStatusSnapshot> {
+    const sessionId = record.request.runConfig.sessionId;
+    const initialStatus = record.status;
+    const alreadyTerminal = ['stopped', 'failed'].includes(initialStatus);
+    const deadline = Date.now() + this.shutdownHardTimeoutMs;
+    let stageFailed = false;
+
+    record.status = alreadyTerminal ? initialStatus : 'stopping';
+    record.shutdownReason = reason;
+    record.stoppedAt = record.stoppedAt ?? this.now();
+    record.label = statusLabel(record);
+
+    const runStage = async (
+      stage: string,
+      operation: () => void | Promise<void>
+    ): Promise<void> => {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        stageFailed = true;
+        record.logs.push(this.createLog(
+          sessionId,
+          'error',
+          `Shutdown stage "${stage}" was skipped because the ${this.shutdownHardTimeoutMs} ms session shutdown limit was reached.`
+        ));
+        return;
+      }
+
+      try {
+        await this.runShutdownOperationWithTimeout(
+          operation,
+          Math.min(this.shutdownStageTimeoutMs, remainingMs),
+          stage
+        );
+      } catch (error) {
+        stageFailed = true;
+        record.logs.push(this.createLog(
+          sessionId,
+          'error',
+          `Shutdown stage "${stage}" failed: ${error instanceof Error ? error.message : String(error)}`
+        ));
+      }
+    };
+
+    await runStage('stop accepting directives', () => {
+      record.acceptingDirectives = false;
     });
-    await this.stopGameInstances(record, reason);
-    if (record.adapterShutdownFailed) {
+    await runStage('stop bot loops', () => {
+      this.clearSessionTimer(sessionId);
+      this.clearRuntimeDeadline(record);
+      this.clearInstanceHealthTimer(sessionId);
+      record.botManager.stopAll();
+    });
+    await runStage('stop observation', () => this.stopObservationTracking(record));
+    await runStage('abort adapter requests', () => record.gameAdapter?.abortActiveRequests?.());
+    await runStage('stop game instances', async () => {
+      await this.stopGameInstances(record, reason);
+      if (record.adapterShutdownFailed) {
+        throw new Error('One or more game instances did not stop cleanly.');
+      }
+    });
+    await runStage('close adapter and browser resources', () => record.gameAdapter?.stopAll());
+
+    if (stageFailed || record.adapterShutdownFailed) {
+      await runStage('forced cleanup of owned resources', async () => {
+        if (record.gameAdapter?.forceStopAll) {
+          await record.gameAdapter.forceStopAll();
+        } else {
+          await record.gameAdapter?.stopAll();
+        }
+      });
+    }
+
+    const shouldFail = interrupted && !alreadyTerminal || stageFailed || record.adapterShutdownFailed;
+    record.status = shouldFail ? 'failed' : initialStatus === 'failed' ? 'failed' : 'stopped';
+    record.botStatuses = record.botStatuses.map((bot) => ({
+      ...bot,
+      status: ['completed', 'failed', 'blocked'].includes(bot.status) ? bot.status : 'stopped',
+      progressState: shouldFail ? `Interrupted during shutdown: ${reason}` : 'Stopped',
+      message: shouldFail
+        ? `Session ended during shutdown: ${reason}.`
+        : `${record.useMockRuntime ? 'Mock' : 'Adapter-backed'} session stopped.`
+    }));
+    this.markInstancesStopped(record);
+    record.logs.push(this.createLog(
+      sessionId,
+      shouldFail ? 'error' : 'info',
+      shouldFail
+        ? `Session was interrupted or failed during shutdown: ${reason}.`
+        : `Session stopped cleanly: ${reason}.`
+    ));
+    try {
+      record.structuredLogger.logSession('manual_stop', {
+        scope: 'session',
+        reason,
+        interrupted: shouldFail
+      });
+      this.logSessionStop(record, reason);
+    } catch (error) {
+      stageFailed = true;
       record.status = 'failed';
       record.logs.push(this.createLog(
         sessionId,
         'error',
-        'Session metadata records an abnormal stop because adapter cleanup did not complete cleanly.'
+        `Shutdown event logging failed: ${error instanceof Error ? error.message : String(error)}`
       ));
     }
+
+    await runStage('flush session logs', () => record.structuredLogger.flush());
+    await runStage('finalize reports', () => {
+      record.reportPersistence.cancel();
+      this.performStructuredReportWrite(record);
+    });
+    if (stageFailed) {
+      record.status = 'failed';
+    }
+    await runStage('finalize session metadata', () => {
+      this.metadataForRecord(record);
+    });
+
+    if (stageFailed) {
+      record.status = 'failed';
+    }
+    record.stoppedAt = record.stoppedAt ?? this.now();
     record.label = statusLabel(record);
-    this.logSessionStop(record, reason);
-    this.writeStructuredReports(record);
+    this.activeSessionId =
+      this.activeSessionId === sessionId ? null : this.activeSessionId;
 
     return this.snapshotFor(record);
+  }
+
+  private async runShutdownOperationWithTimeout(
+    operation: () => void | Promise<void>,
+    timeoutMs: number,
+    label: string
+  ): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`${label} exceeded ${timeoutMs} ms.`)),
+        Math.max(1, timeoutMs)
+      );
+      timer.unref?.();
+    });
+
+    try {
+      await Promise.race([
+        Promise.resolve().then(operation),
+        timeout
+      ]);
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
   }
 
   private async captureScreenshotEvidence(
@@ -4983,6 +5671,9 @@ export class SimulationService {
       }
 
       if (result.path) {
+        if (result.captureScope) {
+          record.screenshotCaptureScopes.add(result.captureScope);
+        }
         record.structuredLogger.logSession(
           'state_snapshot',
           {
@@ -4993,6 +5684,7 @@ export class SimulationService {
             issueId: input.issueId,
             directiveId: input.directiveId,
             fallback: result.fallback,
+            captureScope: result.captureScope,
             message: result.message
           },
           {
@@ -5050,6 +5742,7 @@ export class SimulationService {
         capturedAt: result.capturedAt,
         mimeType: result.mimeType,
         sourcePath: result.sourcePath,
+        captureScope: result.captureScope,
         message: result.message
       }
     };
@@ -5083,6 +5776,81 @@ export class SimulationService {
         }
       })
       .map((raw) => this.structuredLogItemFromRaw(raw, source));
+  }
+
+  private async readStructuredLogPage(
+    path: string,
+    source: Pick<StructuredLogItem, 'source' | 'botId' | 'instanceId'>,
+    request: StructuredLogPageRequest
+  ): Promise<Omit<StructuredLogReadResult, 'sessionId'>> {
+    const pageSize = Math.min(500, Math.max(1, Math.floor(request.limit ?? 250)));
+    const before = request.before === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, Math.floor(request.before));
+    const retained: Array<{ index: number; item: StructuredLogItem }> = [];
+    let validRecordCount = 0;
+    let corruptLineCount = 0;
+
+    if (!existsSync(path)) {
+      return {
+        logs: [],
+        totalValidRecords: 0,
+        corruptLineCount: 0,
+        incomplete: false,
+        pageSize
+      };
+    }
+
+    const lines = createInterface({
+      input: createReadStream(path, { encoding: 'utf8' }),
+      crlfDelay: Number.POSITIVE_INFINITY
+    });
+
+    for await (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) {
+        continue;
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line) as unknown;
+      } catch {
+        corruptLineCount += 1;
+        continue;
+      }
+
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        corruptLineCount += 1;
+        continue;
+      }
+
+      const index = validRecordCount;
+      validRecordCount += 1;
+      if (index >= before) {
+        continue;
+      }
+
+      retained.push({
+        index,
+        item: this.structuredLogItemFromRaw(parsed as Record<string, unknown>, source)
+      });
+      if (retained.length > pageSize) {
+        retained.shift();
+      }
+    }
+
+    const logs = retained.map(({ item }) => item);
+    const firstIndex = retained[0]?.index ?? Math.min(before, validRecordCount);
+
+    return {
+      logs,
+      totalValidRecords: validRecordCount,
+      corruptLineCount,
+      incomplete: corruptLineCount > 0,
+      nextCursor: firstIndex > 0 ? firstIndex : undefined,
+      pageSize
+    };
   }
 
   private structuredLogItemFromRaw(
@@ -5437,54 +6205,60 @@ export class SimulationService {
 
     if (memory.lastState && !record.loggedStateSnapshotIds.has(memory.lastState.snapshotId)) {
       record.loggedStateSnapshotIds.add(memory.lastState.snapshotId);
-      const event = record.structuredLogger.logSession(
-        'state_snapshot',
-        {
-          snapshotId: memory.lastState.snapshotId,
-          scene: memory.lastState.scene,
-          screenshotPath: memory.lastState.screenshotPath
-        },
-        {
-          botId: status.botId,
-          gameInstanceId: status.gameInstanceId,
-          timestamp: memory.lastState.capturedAt
-        }
-      );
-      record.structuredLogger.logState(event, memory.lastState);
       record.coverageTracker.recordSnapshot(memory.lastState, {
         botId: status.botId,
         profileId: status.profileId
       });
+
+      if (record.request.runConfig.saveStateSnapshots) {
+        const event = record.structuredLogger.logSession(
+          'state_snapshot',
+          {
+            snapshotId: memory.lastState.snapshotId,
+            scene: memory.lastState.scene,
+            screenshotPath: memory.lastState.screenshotPath
+          },
+          {
+            botId: status.botId,
+            gameInstanceId: status.gameInstanceId,
+            timestamp: memory.lastState.capturedAt
+          }
+        );
+        record.structuredLogger.logState(event, memory.lastState);
+      }
     }
 
     if (memory.lastAction && !record.loggedActionIds.has(memory.lastAction.actionId)) {
       record.loggedActionIds.add(memory.lastAction.actionId);
-      const actionInsight = actionInsightFromAction(memory.lastAction);
-      const event = record.structuredLogger.logSession(
-        'action_performed',
-        {
-          actionId: memory.lastAction.actionId,
-          actionType: memory.lastAction.type,
-          status: memory.lastResult?.status,
-          resultMessage: memory.lastResult?.message,
-          durationMs: memory.lastResult?.durationMs,
-          recovery: memory.lastAction.payload.recovery === true,
-          actionQuality: actionInsight?.quality,
-          explanation: actionInsight?.explanation,
-          nextLikelyAction: actionInsight?.nextLikelyAction,
-          plannerMetadata: plannerMetadataForLog(memory.lastAction)
-        },
-        {
-          botId: status.botId,
-          gameInstanceId: status.gameInstanceId,
-          timestamp: memory.lastResult?.completedAt ?? memory.lastAction.requestedAt
-        }
-      );
-      record.structuredLogger.logAction(event, memory.lastAction, memory.lastResult ?? undefined);
       record.coverageTracker.recordAction(memory.lastAction, {
         botId: status.botId,
         profileId: status.profileId
       });
+
+      if (record.request.runConfig.saveActionTimeline) {
+        const actionInsight = actionInsightFromAction(memory.lastAction);
+        const event = record.structuredLogger.logSession(
+          'action_performed',
+          {
+            actionId: memory.lastAction.actionId,
+            actionType: memory.lastAction.type,
+            status: memory.lastResult?.status,
+            resultMessage: memory.lastResult?.message,
+            durationMs: memory.lastResult?.durationMs,
+            recovery: memory.lastAction.payload.recovery === true,
+            actionQuality: actionInsight?.quality,
+            explanation: actionInsight?.explanation,
+            nextLikelyAction: actionInsight?.nextLikelyAction,
+            plannerMetadata: plannerMetadataForLog(memory.lastAction)
+          },
+          {
+            botId: status.botId,
+            gameInstanceId: status.gameInstanceId,
+            timestamp: memory.lastResult?.completedAt ?? memory.lastAction.requestedAt
+          }
+        );
+        record.structuredLogger.logAction(event, memory.lastAction, memory.lastResult ?? undefined);
+      }
 
       const everyNActions = record.request.runConfig.screenshotEveryNActions;
       if (
@@ -5861,6 +6635,37 @@ export class SimulationService {
       return;
     }
 
+    this.trimRecentLogs(record);
+    const milestone = `${record.status}:${record.startupFlow?.status ?? 'none'}:${record.issues.length}`;
+    if (!record.reportInitialized || record.reportMilestone !== milestone) {
+      record.reportPersistence.cancel();
+      this.performStructuredReportWrite(record);
+      record.reportInitialized = true;
+      record.reportMilestone = milestone;
+      return;
+    }
+
+    record.reportPersistence.schedule(() => {
+      this.performStructuredReportWrite(record);
+      record.reportMilestone = `${record.status}:${record.startupFlow?.status ?? 'none'}:${record.issues.length}`;
+    });
+  }
+
+  private async flushStructuredReports(record: SimulationSessionRecord): Promise<void> {
+    if (record.persisted) {
+      return;
+    }
+
+    this.trimRecentLogs(record);
+    record.reportPersistence.schedule(() => {
+      this.performStructuredReportWrite(record);
+    });
+    await record.structuredLogger.flush();
+    await record.reportPersistence.flush();
+    await record.structuredLogger.flush();
+  }
+
+  private performStructuredReportWrite(record: SimulationSessionRecord): void {
     const bots = this.botReportInputsForRecord(record);
     const coverage = this.contentCoverageForRecord(record);
     const directiveState = record.directiveManager.getSnapshot();
@@ -5881,10 +6686,11 @@ export class SimulationService {
 	      createdAt: record.createdAt,
 	      startedAt: record.startedAt,
       stoppedAt: record.stoppedAt,
+      shutdownReason: record.shutdownReason,
 	      directives: directiveState.directives,
 	      directiveProgress: directiveState.progress,
 	      directiveEvents: directiveState.events,
-	      startupFlow: record.startupFlow
+      startupFlow: record.startupFlow
 	        ? {
 	            flowId: record.startupFlow.flowId,
 	            flowName: record.startupFlow.flowName,
@@ -5897,10 +6703,18 @@ export class SimulationService {
 	            screenshotPath: record.startupFlow.screenshotPath,
 	            timeline: record.startupFlow.timeline
 	          }
-	        : undefined
-	    });
+	        : undefined,
+      screenshotCaptureScopes: [...record.screenshotCaptureScopes].sort()
+    });
     record.structuredLogger.writeBotReports(bots);
     this.metadataForRecord(record);
+  }
+
+  private trimRecentLogs(record: SimulationSessionRecord): void {
+    const maximumRecentLogs = 2_000;
+    if (record.logs.length > maximumRecentLogs) {
+      record.logs.splice(0, record.logs.length - maximumRecentLogs);
+    }
   }
 
   private botReportInputsForRecord(record: SimulationSessionRecord): BotReportInput[] {
@@ -6064,6 +6878,10 @@ export class SimulationService {
           gpuPercent: record.request.runConfig.saveVideo ? Math.min(80, 6 + record.tick + index) : undefined
         }
       }));
+    } else if (['blocked', 'failed'].includes(status.status)) {
+      // Resolve adapter health before an idle bot pool can finalize the session.
+      // Otherwise a connection failure can be mistaken for an ordinary bot stop.
+      await this.refreshInstanceHealth(record, true);
     } else {
       void this.refreshInstanceHealth(record);
     }
@@ -6203,6 +7021,7 @@ export class SimulationService {
       title: issue?.title
     });
     this.clearSessionTimer(sessionId);
+    this.clearRuntimeDeadline(record);
     record.botManager.stopAll();
     record.status = 'stopped';
     record.stoppedAt = this.now();
@@ -6735,6 +7554,7 @@ export class SimulationService {
     }
 
     this.clearSessionTimer(record.request.runConfig.sessionId);
+    this.clearRuntimeDeadline(record);
 
     if (!record.useMockRuntime) {
       record.finalizing = true;
@@ -6762,7 +7582,7 @@ export class SimulationService {
       record.logs.push(this.createLog(record.request.runConfig.sessionId, 'info', 'All adapter-backed bots are stopped.'));
       record.label = statusLabel(record);
       this.logSessionStop(record, 'all_bots_idle');
-      this.writeStructuredReports(record);
+      await this.flushStructuredReports(record);
     } finally {
       record.finalizing = false;
     }
@@ -6788,12 +7608,110 @@ export class SimulationService {
     return record;
   }
 
+  private createInternalSessionId(): string {
+    const sessionId = z.string().uuid().parse(this.generateSessionId());
+    const folderPath = assertPathWithin(
+      this.reportRoot,
+      join(this.reportRoot, `session-${sessionId}`),
+      'New session directory',
+      false
+    );
+    const persistedIdExists = this.sessionRepository
+      .listSessions()
+      .some((session) => session.sessionId === sessionId);
+
+    if (this.sessions.has(sessionId) || persistedIdExists || existsSync(folderPath)) {
+      throw new Error(`Generated session ID "${sessionId}" already exists. No existing run was changed.`);
+    }
+
+    return sessionId;
+  }
+
+  private instrumentedIdentityEnvironment(
+    gameProfile: GameProfile,
+    additional: Record<string, string> = {}
+  ): Record<string, string> {
+    return {
+      GAMEPLAY_SIMULATOR_GAME_ID: gameProfile.gameId,
+      GAMEPLAY_SIMULATOR_GAME_VERSION: gameProfile.version,
+      ...(gameProfile.buildId
+        ? { GAMEPLAY_SIMULATOR_BUILD_ID: gameProfile.buildId }
+        : {}),
+      ...additional
+    };
+  }
+
   private assertMutableSession(record: SimulationSessionRecord, action: string): void {
     if (record.persisted) {
       throw new Error(
         `Saved session "${record.request.runConfig.sessionId}" is read-only and cannot ${action}.`
       );
     }
+
+    this.assertNoOtherActiveSession(record.request.runConfig.sessionId, action, true);
+  }
+
+  private assertAcceptingDirectives(record: SimulationSessionRecord): void {
+    if (!record.acceptingDirectives || record.status === 'stopping') {
+      throw new Error(
+        `Session "${record.request.runConfig.sessionId}" is shutting down and cannot accept directive changes.`
+      );
+    }
+  }
+
+  private assertNoOtherActiveSession(
+    requestedSessionId: string,
+    requestedAction: string,
+    allowRequestedSession: boolean
+  ): void {
+    const activeRecord = this.activeSessionId
+      ? this.sessions.get(this.activeSessionId)
+      : undefined;
+    const blockingRecord =
+      activeRecord &&
+      !activeRecord.persisted &&
+      ACTIVE_SESSION_STATUSES.has(activeRecord.status) &&
+      (!allowRequestedSession || activeRecord.request.runConfig.sessionId !== requestedSessionId)
+        ? activeRecord
+        : [...this.sessions.values()].find((candidate) =>
+            !candidate.persisted &&
+            ACTIVE_SESSION_STATUSES.has(candidate.status) &&
+            (!allowRequestedSession || candidate.request.runConfig.sessionId !== requestedSessionId)
+          );
+
+    if (!blockingRecord) {
+      return;
+    }
+
+    const activeSessionId = blockingRecord.request.runConfig.sessionId;
+    const nextAction =
+      blockingRecord.status === 'stopping'
+        ? 'Wait for it to finish stopping, then try again.'
+        : blockingRecord.status === 'created'
+          ? 'Start or stop it from New Session before continuing.'
+          : blockingRecord.status === 'paused'
+            ? 'Resume or stop it from Live Session before continuing.'
+            : 'Open Live Session and stop it before continuing.';
+
+    throw new Error(
+      `Session "${activeSessionId}" is currently ${blockingRecord.status}. ` +
+      `${nextAction} GameplaySimulator cannot ${requestedAction} session "${requestedSessionId}" while another session is active.`
+    );
+  }
+
+  private assertSessionStatus(
+    record: SimulationSessionRecord,
+    allowedStatuses: SimulationRuntimeStatus[],
+    action: string
+  ): void {
+    if (allowedStatuses.includes(record.status)) {
+      return;
+    }
+
+    throw new Error(
+      `Session "${record.request.runConfig.sessionId}" is currently ${record.status} and cannot ${action}. ` +
+      `Wait for its current operation to finish or use the available Live Session controls.`
+    );
   }
 
   private sessionBotProfiles(record: SimulationSessionRecord): BotProfile[] {

@@ -7,6 +7,15 @@ import type { ActionResult, GameAction, GameInstanceConfig, GameStateSnapshot } 
 import { describe, expect, it } from 'vitest';
 import { EvidenceCaptureService } from './EvidenceCaptureService';
 
+const VALID_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64'
+);
+const VALID_JPEG = Buffer.from(
+  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAEf/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABAf/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPxB//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPxB//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxB//9k=',
+  'base64'
+);
+
 class ScreenshotAdapter implements GameAdapter {
   readonly id = 'screenshot-adapter';
   readonly name = 'Screenshot Adapter';
@@ -75,6 +84,7 @@ class ScreenshotAdapter implements GameAdapter {
       instanceId,
       botId,
       capturedAt: '2026-07-07T10:00:00.000Z',
+      scope: 'game-window',
       path: this.sourcePath,
       mimeType: 'image/png'
     };
@@ -99,9 +109,10 @@ describe('EvidenceCaptureService', () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'gameplay-simulator-evidence-real-'));
     const sourcePath = join(tempDir, 'adapter-source.png');
     const screenshotsDir = join(tempDir, 'bots', 'explorer-001', 'screenshots');
-    await writeFile(sourcePath, 'real screenshot bytes', 'utf8');
+    await writeFile(sourcePath, VALID_PNG);
     const service = new EvidenceCaptureService({
       adapter: new ScreenshotAdapter(sourcePath),
+      approvedSessionRoot: tempDir,
       now: () => '2026-07-07T10:00:00.000Z'
     });
 
@@ -118,7 +129,9 @@ describe('EvidenceCaptureService', () => {
     expect(result.fallback).toBe(false);
     expect(result.path).toContain(screenshotsDir);
     expect(result.path?.endsWith('.png')).toBe(true);
-    expect(result.path ? await readFile(result.path, 'utf8') : '').toBe('real screenshot bytes');
+    expect(result.captureScope).toBe('game-window');
+    expect(result.path ? await readFile(result.path) : Buffer.alloc(0)).toEqual(VALID_PNG);
+    expect(result.path?.startsWith(`${screenshotsDir}/`)).toBe(true);
   });
 
   it('writes fallback SVG evidence when adapter screenshots fail', async () => {
@@ -147,5 +160,91 @@ describe('EvidenceCaptureService', () => {
     expect(result.path?.endsWith('.svg')).toBe(true);
     expect(result.path ? existsSync(result.path) : false).toBe(true);
     expect(result.path ? await readFile(result.path, 'utf8') : '').toContain('Fallback/debug evidence');
+  });
+
+  it('bounds a screenshot adapter that never responds', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'gameplay-simulator-evidence-timeout-'));
+    const screenshotsDir = join(tempDir, 'bots', 'explorer-001', 'screenshots');
+    const adapter = new ScreenshotAdapter(join(tempDir, 'unused.png'));
+    adapter.captureScreenshot = async () => await new Promise<never>(() => undefined);
+    const service = new EvidenceCaptureService({
+      adapter,
+      requestPolicy: {
+        timeouts: {
+          evidenceMs: 20
+        }
+      },
+      now: () => '2026-07-07T10:00:00.000Z'
+    });
+
+    const result = await service.captureScreenshot({
+      sessionId: 'session-evidence-timeout',
+      botId: 'explorer-001',
+      instanceId: 'game-instance-001',
+      reason: 'issue-detected',
+      issueId: 'issue-timeout',
+      screenshotsDir
+    });
+
+    expect(result.kind).toBe('fallback_svg');
+    expect(result.message).toMatch(/timed out after 20 ms/i);
+  });
+
+  it('rejects MIME spoofing without writing untrusted adapter bytes', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'gameplay-simulator-evidence-mime-'));
+    const screenshotsDir = join(tempDir, 'bots', 'explorer-001', 'screenshots');
+    const adapter = new ScreenshotAdapter(join(tempDir, 'unused.png'));
+    adapter.captureScreenshot = async (instanceId, botId) => ({
+      instanceId,
+      botId,
+      capturedAt: '2026-07-07T10:00:00.000Z',
+      data: VALID_PNG,
+      mimeType: 'image/jpeg'
+    });
+    const service = new EvidenceCaptureService({ adapter });
+
+    const result = await service.captureScreenshot({
+      sessionId: 'session-evidence-mime',
+      botId: 'explorer-001',
+      instanceId: 'game-instance-001',
+      reason: 'issue-detected',
+      issueId: 'issue-mime',
+      screenshotsDir
+    });
+
+    expect(result.kind).toBe('fallback_svg');
+    expect(result.message).toMatch(/MIME type does not match PNG/i);
+    expect(result.path?.startsWith(`${screenshotsDir}/`)).toBe(true);
+  });
+
+  it('chooses a safe JPEG extension from validated bytes', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'gameplay-simulator-evidence-jpeg-'));
+    const screenshotsDir = join(tempDir, 'bots', 'explorer-001', 'screenshots');
+    const adapter = new ScreenshotAdapter(join(tempDir, 'untrusted-name.png'));
+    adapter.captureScreenshot = async (instanceId, botId) => ({
+      instanceId,
+      botId,
+      capturedAt: '2026-07-07T10:00:00.000Z',
+      data: VALID_JPEG,
+      mimeType: 'image/jpeg'
+    });
+    const service = new EvidenceCaptureService({
+      adapter,
+      approvedSessionRoot: tempDir
+    });
+
+    const result = await service.captureScreenshot({
+      sessionId: 'session-evidence-jpeg',
+      botId: 'explorer-001',
+      instanceId: 'game-instance-001',
+      reason: 'issue-detected',
+      issueId: 'issue-jpeg',
+      screenshotsDir
+    });
+
+    expect(result.kind).toBe('adapter_screenshot');
+    expect(result.path?.startsWith(`${screenshotsDir}/issue-detected-`)).toBe(true);
+    expect(result.path?.endsWith('.jpg')).toBe(true);
+    expect(result.mimeType).toBe('image/jpeg');
   });
 });

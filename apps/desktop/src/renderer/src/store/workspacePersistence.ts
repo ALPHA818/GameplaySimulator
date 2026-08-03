@@ -26,7 +26,10 @@ type PersistenceHandler = () => void | Promise<void>;
 type LegacyStorage = Pick<Storage, 'getItem'>;
 
 let persistenceHandler: PersistenceHandler | null = null;
-let persistenceScheduled = false;
+let persistencePending = false;
+let persistenceTimer: ReturnType<typeof setTimeout> | undefined;
+let persistenceMaxTimer: ReturnType<typeof setTimeout> | undefined;
+let persistenceChain: Promise<void> = Promise.resolve();
 
 function sameProfile(left: BotProfile, right: BotProfile): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
@@ -142,18 +145,54 @@ export function migrateLegacyRuntimeObservation(
 }
 
 export function configureWorkspacePersistence(handler: PersistenceHandler | null): void {
+  if (persistenceTimer) clearTimeout(persistenceTimer);
+  if (persistenceMaxTimer) clearTimeout(persistenceMaxTimer);
   persistenceHandler = handler;
-  persistenceScheduled = false;
+  persistencePending = false;
+  persistenceTimer = undefined;
+  persistenceMaxTimer = undefined;
 }
 
 export function requestWorkspacePersistence(): void {
-  if (!persistenceHandler || persistenceScheduled) {
+  if (!persistenceHandler) {
     return;
   }
 
-  persistenceScheduled = true;
-  queueMicrotask(() => {
-    persistenceScheduled = false;
-    void persistenceHandler?.();
-  });
+  persistencePending = true;
+  if (persistenceTimer) clearTimeout(persistenceTimer);
+  persistenceTimer = setTimeout(runPendingPersistence, 150);
+  if (!persistenceMaxTimer) {
+    persistenceMaxTimer = setTimeout(runPendingPersistence, 1_000);
+  }
+}
+
+export async function flushWorkspacePersistence(): Promise<void> {
+  do {
+    clearPersistenceTimers();
+    if (persistencePending) {
+      runPendingPersistence();
+    }
+    await persistenceChain;
+  } while (persistencePending);
+}
+
+function runPendingPersistence(): void {
+  clearPersistenceTimers();
+  if (!persistencePending || !persistenceHandler) {
+    return;
+  }
+
+  persistencePending = false;
+  const handler = persistenceHandler;
+  persistenceChain = persistenceChain
+    .catch(() => undefined)
+    .then(handler)
+    .then(() => undefined);
+}
+
+function clearPersistenceTimers(): void {
+  if (persistenceTimer) clearTimeout(persistenceTimer);
+  if (persistenceMaxTimer) clearTimeout(persistenceMaxTimer);
+  persistenceTimer = undefined;
+  persistenceMaxTimer = undefined;
 }

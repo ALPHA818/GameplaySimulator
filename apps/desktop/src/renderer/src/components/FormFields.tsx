@@ -88,7 +88,7 @@ const fieldHelpText: Record<string, string> = {
   'Action Reason':
     'This is the plain-language reason a bot chose its current action. The simulator creates it from planner rules and game context. For example, a UI Tester may open a menu because it matches UI rules. If it seems wrong, check the selected bot profile. Beginners can use it to understand what the bot is doing.',
   'Action Timeline':
-    'This saves the list of actions each bot tried. The simulator uses it to show what happened before an issue. For example, move, jump, then interact. If this is off, reports have fewer steps. Beginners should leave it on.',
+    'This saves a file containing the actions each bot tried. The simulator uses it to explain what happened before an issue. For example, move, jump, then interact. If this is off, no action timeline file or replay timeline is written, so reports have fewer steps. Bots still work normally. Beginners should leave it on for short tests.',
   'Action Endpoint':
     'This is the server route where the simulator asks an instrumented game to perform an action. It is used when bots choose moves like jump, open menu, or buy item. For example, /gsi/v1/actions. If this route is wrong, actions will not reach the game. Beginners should use the default route from the SDK.',
   'Adapter Type':
@@ -100,7 +100,7 @@ const fieldHelpText: Record<string, string> = {
   'Add Bot Type':
     'This chooses another kind of bot to add to the session. The simulator uses it to create a new bot pool. For example, add Explorer Bot to test maps. If there are no choices, all bot types are already added. Beginners should start with Explorer Bot.',
   'Auto Scaling':
-    'This lets the simulator lower or raise bot counts based on your computer. It is used to avoid overloading the PC. For example, it may run 6 bots instead of 10 if memory is tight. If this is off, fixed counts are used even when they are heavy. Beginners should leave it on.',
+    'This lets the simulator lower auto bot pools when your computer cannot safely fit the requested count. For example, it may recommend 6 bots instead of 10 if memory is tight. If this is off, requested counts are kept and an unsafe session is blocked instead of silently changing them. Beginners should leave it on unless exact bot counts are required.',
   'Available Actions':
     'This is the list of actions the game says a bot can try right now. The simulator uses it to choose what to do next. For example, move-forward, open-menu, or buy-item. If the list is empty or wrong, bots may stop or make poor choices. Beginners should check this after the health check works.',
   'Available Actions Preview':
@@ -240,11 +240,11 @@ const fieldHelpText: Record<string, string> = {
   Max:
     'This is the most bots this pool may ever create. The simulator will not go above this number. For example, max 20 means no more than 20 explorer bots. If it is too high, the PC may be overloaded. Beginners should keep it modest, like 5.',
   'Max Actions Per Bot':
-    'This stops each bot after a set number of actions. The simulator uses it for short test runs. For example, 100 means each bot stops after 100 actions. If it is too low, bots may not test much. Beginners can leave it blank or use 100.',
+    'This stops each bot after a set number of actions during a normal run. For example, 100 means each bot stops after 100 actions. Run Until Stopped ignores this limit so bots keep working until a safety condition or manual stop. If the number is too low, bots may not test much. Beginners can use 20 for a smoke test.',
   'Max Game Instances':
     'This is the most copies of the game the simulator may open. It is used when bots need separate game windows. For example, 2 means at most two game copies. If it is too high, the PC may slow down or saves may conflict. Beginners should use 1 or 2.',
   'Max Runtime Minutes':
-    'This is how long the session may run before it stops. The simulator uses it as a time limit. For example, 30 means stop after 30 minutes. If it is too short, bots may not reach much content. Beginners can use 15 or 30.',
+    'This is a hard safety limit for active running time. For example, 30 stops the session after 30 minutes of running; time spent paused does not count. It still applies when Run Until Stopped is on. Leave it blank only when you truly want no time limit. Beginners should use 15 or 30.',
   'Next Likely Action':
     'This is the action the planner currently thinks may be a good next choice. It is only a guess because game state can change after every action. For example, close-menu may follow open-menu. If it is missing, the planner does not know yet. Beginners can use it to spot surprising plans.',
   'Min':
@@ -338,7 +338,7 @@ const fieldHelpText: Record<string, string> = {
   'Run Mode':
     'This chooses how bots run together. Parallel runs many at once, sequential runs one after another, and hybrid runs a small group. If this is wrong, the test may be too slow or too heavy. Beginners should choose Hybrid.',
   'Run Until Stopped':
-    'This keeps the session running until you stop it yourself. The simulator ignores the time limit when this is on. For example, use it for a long overnight test. If you forget to stop it, it may keep using your PC. Beginners should leave it off.',
+    'This keeps bots running after their normal action limit is reached. The session still stops for the maximum runtime, a critical safety condition, a fatal runtime failure, or your manual Stop command. For example, use it with a 60 minute maximum runtime for a controlled endurance test. If there is no time limit, it can keep using your PC until stopped. Beginners should leave it off.',
   'Save Isolation':
     'This says each game copy or bot can use a separate save/profile. The simulator uses it to stop bots from overwriting each other. For example, explorer-001 can have its own save. If this is wrong, test saves may conflict. Beginners should turn it on only if the game supports it.',
   'Save Isolation Mode':
@@ -402,7 +402,7 @@ const fieldHelpText: Record<string, string> = {
   'Raw File':
     'This is the saved file that the selected log came from. The simulator records it so you can find the original artifact inside the run folder. For example, it may be a bot actions file or an instance log. If it says not recorded, the log came from an older file format. Beginners usually do not need to open it directly.',
   'State Snapshots':
-    'This saves small records of what the game state looked like. The simulator uses them to explain issues. For example, a snapshot may say the bot was in a menu. If this is off, reports have less context. Beginners should leave it on.',
+    'This saves files containing what the game state looked like while bots ran. For example, a snapshot may say the bot was in a menu. If this is off, no state snapshot file is written, but the bot still keeps the current state briefly in memory so it can act. Reports will have less saved context. Beginners should turn it on for instrumented tests.',
   'State Preview':
     'This shows a small sample of game state from the profile test. The simulator uses state to help bots understand scenes, UI, quests, inventory, and performance. For example, it may show the current scene or page title. If it is empty, the adapter may only have weak awareness. Beginners should use instrumentation for richer state.',
   'Startup Flow':

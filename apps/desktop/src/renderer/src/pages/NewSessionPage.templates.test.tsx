@@ -23,6 +23,7 @@ function setInputValue(input: HTMLInputElement, value: string) {
 
 beforeEach(() => {
   useConfigStore.setState({
+    currentPage: 'newSession',
     gameProfiles: initialConfigState.gameProfiles,
     botProfiles: initialConfigState.botProfiles,
     runConfigs: [],
@@ -31,7 +32,20 @@ beforeEach(() => {
     pendingSessionBotProfileId: null,
     pendingSessionBotProfileIds: []
   });
-  useSessionStore.setState({ reviewIssueId: null });
+  useSessionStore.setState({
+    status: 'idle',
+    statusLabel: 'No session running',
+    activeSessionId: null,
+    lastSnapshot: null,
+    botStatuses: [],
+    instanceStatuses: [],
+    issues: [],
+    logs: [],
+    coverage: null,
+    liveObservation: null,
+    runtimeWarnings: [],
+    reviewIssueId: null
+  });
 
   const pending = () => new Promise<never>(() => undefined);
   Object.defineProperty(window, 'gameplaySimulator', {
@@ -194,6 +208,66 @@ describe('New Session first-test templates', () => {
     expect(container?.textContent).toContain('UI Tester Bot');
     expect((container?.querySelector('#use-global-observation-settings') as HTMLInputElement).checked).toBe(false);
     expect((container?.querySelector('#session-show-bot-gameplay') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('shows the effective runtime, artifact, and bot-count settings before start', async () => {
+    await act(async () => {
+      root?.render(<NewSessionPage />);
+    });
+
+    expect(container?.textContent).toContain('Effective Run Behavior');
+    expect(container?.textContent).toContain('Stop at bot action limits');
+    expect(container?.textContent).toContain('15 active minute(s)');
+    expect(container?.textContent).toContain('20 action(s) per bot');
+    expect(container?.textContent).toContain('Actions on');
+    expect(container?.textContent).toContain('States off');
+    expect(container?.textContent).toContain('Exact counts or block');
+
+    const runUntilLabel = Array.from(container?.querySelectorAll('label') ?? []).find(
+      (label) => label.textContent?.includes('Run Until Stopped')
+    );
+    const runUntilInput = runUntilLabel?.htmlFor
+      ? document.getElementById(runUntilLabel.htmlFor)
+      : null;
+
+    expect(runUntilInput).toBeInstanceOf(HTMLInputElement);
+    act(() => {
+      (runUntilInput as HTMLInputElement).click();
+    });
+
+    expect(container?.textContent).toContain('Run until stopped');
+    expect(container?.textContent).toContain('Ignored while Run Until Stopped is on');
+  });
+
+  it('locks session creation and offers live controls while another session is mutable', async () => {
+    useSessionStore.setState({
+      status: 'running',
+      statusLabel: 'Running session-active',
+      activeSessionId: 'session-active'
+    });
+
+    await act(async () => {
+      root?.render(<NewSessionPage />);
+    });
+
+    const startButton = Array.from(container?.querySelectorAll('button') ?? []).find(
+      (button) => button.textContent?.trim() === 'Start Session'
+    ) as HTMLButtonElement;
+    const openLiveButton = Array.from(container?.querySelectorAll('button') ?? []).find(
+      (button) => button.textContent?.trim() === 'Open Live Session'
+    ) as HTMLButtonElement;
+    const stopButton = Array.from(container?.querySelectorAll('button') ?? []).find(
+      (button) => button.textContent?.trim() === 'Stop Current Session'
+    ) as HTMLButtonElement;
+
+    expect(startButton.disabled).toBe(true);
+    expect(openLiveButton).toBeInstanceOf(HTMLButtonElement);
+    expect(stopButton).toBeInstanceOf(HTMLButtonElement);
+    expect(container?.textContent).toContain('Session session-active is running');
+    expect(document.querySelector('[aria-label="Help for Current Session Lock"]')).not.toBeNull();
+
+    act(() => openLiveButton.click());
+    expect(useConfigStore.getState().currentPage).toBe('liveSession');
   });
 
   it('applies a focused template as one specialist pool plus one editable directive', async () => {

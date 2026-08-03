@@ -17,6 +17,7 @@ import { tmpdir, totalmem } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { LogEntry } from '@core/logging/LogEntry';
+import { assertResolvedPathWithin } from '@core/security/pathContainment';
 import { BaseGameAdapter } from '../base/BaseGameAdapter';
 import type {
   AdapterCapabilities,
@@ -25,6 +26,7 @@ import type {
   GameAdapterInstance,
   ObservationTargetUpdate,
   ScreenshotCapture,
+  ScreenshotCaptureScope,
   WindowFocusResult
 } from '../base/GameAdapter';
 import {
@@ -90,7 +92,8 @@ export interface DesktopScreenshotDriver {
     processInfo: DesktopProcessInfo;
     windowInfo?: DesktopWindowInfo;
     outputPath: string;
-  }): Promise<{ path: string; mimeType: string }>;
+    allowFullDesktopCapture: boolean;
+  }): Promise<{ path: string; mimeType: string; scope: ScreenshotCaptureScope }>;
 }
 
 export interface DesktopWindowAdapterOptions {
@@ -106,6 +109,8 @@ export interface DesktopWindowAdapterOptions {
   screenshotDriver?: DesktopScreenshotDriver;
   dependencyChecker?: DesktopAdapterDependencyChecker;
   processStopTimeoutMs?: number;
+  allowFullDesktopCapture?: boolean;
+  requireScreenshotEvidence?: boolean;
   capabilities?: Partial<AdapterCapabilities>;
   runtimeObservation?: RuntimeObservationConfig;
 }
@@ -124,6 +129,11 @@ interface DesktopStopEvent {
 
 interface DesktopInstanceRuntime {
   child?: ChildProcess;
+  launcherPid: number;
+  processGroupId?: number;
+  ownedProcessIds: Set<number>;
+  liveProcessIds: Set<number>;
+  ownershipTimer?: NodeJS.Timeout;
   processInfo: DesktopProcessInfo;
   windowInfo?: DesktopWindowInfo;
   lastHeartbeatAt?: string;
@@ -137,15 +147,12 @@ interface DesktopInstanceRuntime {
     message?: string;
   };
   lastScreenshotPath?: string;
+  lastScreenshotScope?: ScreenshotCaptureScope;
   stopEvents: DesktopStopEvent[];
 }
 
 function now(): string {
   return new Date().toISOString();
-}
-
-function hasExited(child: ChildProcess | undefined): boolean {
-  return !child || child.exitCode !== null || child.signalCode !== null;
 }
 
 function pidIsAlive(pid: number | undefined): boolean {
@@ -161,8 +168,62 @@ function pidIsAlive(pid: number | undefined): boolean {
   }
 }
 
+interface SystemProcessRecord {
+  pid: number;
+  parentPid: number;
+  processGroupId?: number;
+}
+
+async function listSystemProcesses(): Promise<SystemProcessRecord[]> {
+  if (process.platform === 'win32') {
+    const { stdout } = await execFileAsync('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress'
+    ]);
+    const parsed = JSON.parse(stdout) as
+      | { ProcessId: number; ParentProcessId: number }
+      | Array<{ ProcessId: number; ParentProcessId: number }>;
+    return (Array.isArray(parsed) ? parsed : [parsed]).map((item) => ({
+      pid: Number(item.ProcessId),
+      parentPid: Number(item.ParentProcessId)
+    }));
+  }
+
+  const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,ppid=,pgid=']);
+  return stdout
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/).map(Number))
+    .filter((parts) => parts.length >= 3 && parts.every(Number.isFinite))
+    .map(([pid, parentPid, processGroupId]) => ({ pid, parentPid, processGroupId }));
+}
+
+function descendantsOf(
+  processes: SystemProcessRecord[],
+  knownProcessIds: ReadonlySet<number>
+): Set<number> {
+  const descendants = new Set(knownProcessIds);
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    for (const item of processes) {
+      if (!descendants.has(item.pid) && descendants.has(item.parentPid)) {
+        descendants.add(item.pid);
+        changed = true;
+      }
+    }
+  }
+
+  return descendants;
+}
+
 function normalizeActionName(value: string | undefined): string {
   return (value ?? '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+}
+
+function safePathSegment(value: string): string {
+  return value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'unknown';
 }
 
 function bindingIsMouse(binding: string): boolean {
@@ -392,31 +453,57 @@ class PlatformScreenshotDriver implements DesktopScreenshotDriver {
     processInfo: DesktopProcessInfo;
     windowInfo?: DesktopWindowInfo;
     outputPath: string;
-  }): Promise<{ path: string; mimeType: string }> {
+    allowFullDesktopCapture: boolean;
+  }): Promise<{ path: string; mimeType: string; scope: ScreenshotCaptureScope }> {
     await mkdir(dirname(request.outputPath), { recursive: true });
 
     if (process.platform === 'linux') {
-      if (request.windowInfo?.windowId) {
+      let windowId = request.windowInfo?.windowId;
+      if (!windowId) {
         try {
-          await execFileAsync('import', ['-window', request.windowInfo.windowId, request.outputPath]);
-          return { path: request.outputPath, mimeType: 'image/png' };
+          const { stdout } = await execFileAsync('xdotool', [
+            'search',
+            '--pid',
+            String(request.processInfo.pid)
+          ]);
+          windowId = stdout.trim().split(/\s+/)[0];
         } catch {
-          // Fall through to full-screen capture helpers.
+          windowId = undefined;
         }
+      }
+
+      if (windowId) {
+        try {
+          await execFileAsync('import', ['-window', windowId, request.outputPath]);
+          return { path: request.outputPath, mimeType: 'image/png', scope: 'game-window' };
+        } catch {
+          // A full-desktop fallback is allowed only with explicit session consent.
+        }
+      }
+
+      if (!request.allowFullDesktopCapture) {
+        throw new Error(
+          'Game-window screenshot capture is unavailable. Full-desktop capture is disabled because this session did not grant privacy consent.'
+        );
       }
 
       try {
         await execFileAsync('gnome-screenshot', ['-f', request.outputPath]);
-        return { path: request.outputPath, mimeType: 'image/png' };
+        return { path: request.outputPath, mimeType: 'image/png', scope: 'full-desktop' };
       } catch {
         await execFileAsync('scrot', [request.outputPath]);
-        return { path: request.outputPath, mimeType: 'image/png' };
+        return { path: request.outputPath, mimeType: 'image/png', scope: 'full-desktop' };
       }
     }
 
     if (process.platform === 'darwin') {
+      if (!request.allowFullDesktopCapture) {
+        throw new Error(
+          'macOS screenshot capture would include the full desktop. Enable full-desktop capture consent for this session to allow it.'
+        );
+      }
       await execFileAsync('screencapture', ['-x', request.outputPath]);
-      return { path: request.outputPath, mimeType: 'image/png' };
+      return { path: request.outputPath, mimeType: 'image/png', scope: 'full-desktop' };
     }
 
     throw new Error(`Screenshot capture is not implemented for ${process.platform}.`);
@@ -431,8 +518,12 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
   private readonly screenshotDirectory: string;
   private readonly inputDriver: DesktopInputDriver;
   private readonly screenshotDriver: DesktopScreenshotDriver;
+  private readonly usesPlatformInputDriver: boolean;
+  private readonly usesPlatformScreenshotDriver: boolean;
   private readonly dependencyChecker: DesktopAdapterDependencyChecker;
   private readonly processStopTimeoutMs: number;
+  private readonly allowFullDesktopCapture: boolean;
+  private readonly requireScreenshotEvidence: boolean;
   private readonly runtimeObservation: RuntimeObservationConfig;
   private readonly desktopInstances = new Map<string, DesktopInstanceRuntime>();
   private readonly stoppedInstanceLogs = new Map<string, LogEntry[]>();
@@ -470,21 +561,72 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     this.controlBindings = options.controlBindings ?? [];
     this.screenshotDirectory = options.screenshotDirectory ??
       join(tmpdir(), 'gameplay-simulator', 'desktop-screenshots');
+    this.usesPlatformInputDriver = options.inputDriver === undefined;
+    this.usesPlatformScreenshotDriver = options.screenshotDriver === undefined;
     this.inputDriver = options.inputDriver ?? new PlatformDesktopInputDriver();
     this.screenshotDriver = options.screenshotDriver ?? new PlatformScreenshotDriver();
     this.dependencyChecker = options.dependencyChecker ?? new DesktopAdapterDependencyChecker();
     this.processStopTimeoutMs = options.processStopTimeoutMs ?? 2500;
+    this.allowFullDesktopCapture = options.allowFullDesktopCapture ?? false;
+    this.requireScreenshotEvidence = options.requireScreenshotEvidence ?? false;
     this.runtimeObservation = options.runtimeObservation ?? defaultRuntimeObservationConfig;
   }
 
   async checkDependencies(): Promise<DesktopAdapterDependencyReport> {
     this.dependencyReport = await this.dependencyChecker.checkDependencies();
+    if (this.usesPlatformInputDriver) {
+      this.capabilities.supportsInputSimulation =
+        this.dependencyReport.canSendKeyboardInput || this.dependencyReport.canSendMouseInput;
+      this.capabilities.supportsWindowFocus = this.dependencyReport.canFocusWindow;
+    }
+    if (this.usesPlatformScreenshotDriver) {
+      this.capabilities.supportsScreenshots =
+        this.dependencyReport.canCaptureGameWindow ||
+        (this.allowFullDesktopCapture && this.dependencyReport.canCaptureFullDesktop);
+    }
     return this.dependencyReport;
   }
 
   override async launchInstance(config: GameInstanceConfig): Promise<GameAdapterInstance> {
     this.stoppedInstanceLogs.delete(config.instanceId);
     const dependencyReport = await this.checkDependencies();
+    const needsKeyboard = this.controlBindings.some((binding) => binding.inputType === 'keyboard');
+    const needsMouse = this.controlBindings.some((binding) => binding.inputType === 'mouse');
+
+    if (
+      this.usesPlatformInputDriver &&
+      (
+        (needsKeyboard && !dependencyReport.canSendKeyboardInput) ||
+        (needsMouse && !dependencyReport.canSendMouseInput)
+      )
+    ) {
+      const inputCheck = dependencyReport.checks.find((item) =>
+        ['input-driver', 'platform-input'].includes(item.id)
+      );
+      throw new Error(
+        [
+          inputCheck?.message ?? 'The desktop input driver required by this game profile is unavailable.',
+          inputCheck?.installHint
+        ].filter(Boolean).join(' ')
+      );
+    }
+
+    if (
+      this.usesPlatformScreenshotDriver &&
+      this.requireScreenshotEvidence &&
+      (!dependencyReport.canCaptureScreenshots ||
+        (dependencyReport.screenshotScope === 'full-desktop' && !this.allowFullDesktopCapture))
+    ) {
+      const screenshotCheck = dependencyReport.checks.find((item) => item.id === 'screenshot-tool');
+      throw new Error(
+        dependencyReport.screenshotScope === 'full-desktop'
+          ? 'Required screenshot evidence is available only as a full-desktop capture, but this session did not grant privacy consent.'
+          : [
+              screenshotCheck?.message ?? 'Required desktop screenshot evidence is unavailable.',
+              screenshotCheck?.installHint
+            ].filter(Boolean).join(' ')
+      );
+    }
     const executablePath = ensureExecutablePath(config.launch.executablePath ?? this.executablePath);
     const args = config.launch.arguments.length > 0 ? config.launch.arguments : this.launchArguments;
     const workingDirectory = config.launch.workingDirectory ?? this.workingDirectory;
@@ -505,7 +647,8 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
       },
       windowsHide: false,
       stdio: 'ignore',
-      shell: false
+      shell: false,
+      detached: process.platform !== 'win32'
     });
 
     await new Promise<void>((resolveLaunch, rejectLaunch) => {
@@ -525,6 +668,17 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
       alive: true,
       startedAt
     };
+    const launcherPid = child.pid ?? 0;
+    const runtime: DesktopInstanceRuntime = {
+      child,
+      launcherPid,
+      processGroupId: process.platform === 'win32' ? undefined : launcherPid,
+      ownedProcessIds: new Set(launcherPid > 0 ? [launcherPid] : []),
+      liveProcessIds: new Set(launcherPid > 0 ? [launcherPid] : []),
+      processInfo,
+      lastHeartbeatAt: startedAt,
+      stopEvents: []
+    };
     const instance: GameAdapterInstance = {
       instanceId: config.instanceId,
       adapterId: this.id,
@@ -537,6 +691,11 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
         executablePath,
         workingDirectory,
         dependencyReport,
+        screenshotCaptureScope:
+          dependencyReport.screenshotScope === 'full-desktop' && !this.allowFullDesktopCapture
+            ? 'unsupported'
+            : dependencyReport.screenshotScope,
+        fullDesktopCaptureConsented: this.allowFullDesktopCapture,
         visible: true,
         observationCapability: this.capabilities.observationCapability,
         observationMode: this.runtimeObservation.observationMode,
@@ -545,21 +704,23 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     };
 
     this.instances.set(config.instanceId, { instance, running: true });
-    this.desktopInstances.set(config.instanceId, {
-      child,
-      processInfo,
-      lastHeartbeatAt: startedAt,
-      stopEvents: []
-    });
+    this.desktopInstances.set(config.instanceId, runtime);
+    runtime.ownershipTimer = setInterval(() => {
+      void this.refreshOwnedProcessIds(runtime);
+    }, 200);
+    runtime.ownershipTimer.unref();
+    await this.refreshOwnedProcessIds(runtime);
 
     child.once('exit', (exitCode, signalCode) => {
       const runtime = this.desktopInstances.get(config.instanceId);
 
       if (runtime) {
-        runtime.processInfo.alive = false;
         runtime.processInfo.exitedAt = now();
         runtime.processInfo.exitCode = exitCode;
         runtime.processInfo.signalCode = signalCode;
+        void this.refreshOwnedProcessIds(runtime).then(() => {
+          runtime.processInfo.alive = this.liveOwnedProcessIds(runtime).length > 0;
+        });
       }
     });
 
@@ -589,68 +750,54 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
       return;
     }
 
-    if (runtime.child && !hasExited(runtime.child)) {
+    await this.refreshOwnedProcessIds(runtime);
+    if (this.liveOwnedProcessIds(runtime).length > 0) {
       runtime.stopEvents.push({
         eventType: 'graceful_stop_requested',
         timestamp: now(),
         signal: 'SIGTERM',
-        message: 'Sent graceful stop signal to desktop game process.'
+        message: 'Sent a graceful stop signal to the owned desktop game process tree.'
       });
-      runtime.child.kill('SIGTERM');
+      await this.signalOwnedProcessTree(runtime, 'SIGTERM', false);
+      const gracefullyStopped = await this.waitForOwnedProcessesToStop(
+        runtime,
+        this.processStopTimeoutMs
+      );
 
-      await new Promise<void>((resolveStop) => {
-        let resolved = false;
-        let forcedKillSent = false;
-        let forceTimeout: NodeJS.Timeout | undefined;
-        const finish = (): void => {
-          if (resolved) {
-            return;
-          }
-
-          resolved = true;
-          clearTimeout(timeout);
-          if (forceTimeout) {
-            clearTimeout(forceTimeout);
-          }
-          resolveStop();
-        };
-        const timeout = setTimeout(() => {
-          if (runtime.child && !hasExited(runtime.child)) {
-            forcedKillSent = true;
-            runtime.stopEvents.push({
-              eventType: 'forced_kill_requested',
-              timestamp: now(),
-              signal: 'SIGKILL',
-              message: `Graceful stop timed out after ${this.processStopTimeoutMs} ms; sent forced kill signal.`
-            });
-            runtime.child.kill('SIGKILL');
-            forceTimeout = setTimeout(finish, 1_000);
-            return;
-          }
-
-          finish();
-        }, this.processStopTimeoutMs);
-
-        runtime.child?.once('exit', () => {
-          runtime.stopEvents.push({
-            eventType: forcedKillSent ? 'forced_kill_completed' : 'graceful_stop_completed',
-            timestamp: now(),
-            signal: forcedKillSent ? 'SIGKILL' : 'SIGTERM',
-            message: forcedKillSent
-              ? 'Desktop game process exited after forced kill signal.'
-              : 'Desktop game process exited after graceful stop signal.'
-          });
-          finish();
+      if (gracefullyStopped) {
+        runtime.stopEvents.push({
+          eventType: 'graceful_stop_completed',
+          timestamp: now(),
+          signal: 'SIGTERM',
+          message: 'The owned desktop game process tree stopped gracefully.'
         });
-      });
+      } else {
+        runtime.stopEvents.push({
+          eventType: 'forced_kill_requested',
+          timestamp: now(),
+          signal: 'SIGKILL',
+          message: `Graceful stop timed out after ${this.processStopTimeoutMs} ms; sent a forced stop only to the owned process tree.`
+        });
+        await this.signalOwnedProcessTree(runtime, 'SIGKILL', true);
+        const forceStopped = await this.waitForOwnedProcessesToStop(runtime, 1_000);
 
-      if (!hasExited(runtime.child) && pidIsAlive(runtime.processInfo.pid)) {
+        if (forceStopped) {
+          runtime.stopEvents.push({
+            eventType: 'forced_kill_completed',
+            timestamp: now(),
+            signal: 'SIGKILL',
+            message: 'The owned desktop game process tree exited after the forced stop.'
+          });
+        }
+      }
+
+      if (this.liveOwnedProcessIds(runtime).length > 0) {
         runtime.stopEvents.push({
           eventType: 'stop_failed',
           timestamp: now(),
-          message: 'Owned desktop process did not exit after graceful and forced stop attempts.'
+          message: 'Owned desktop processes did not exit after graceful and forced stop attempts.'
         });
-        throw new Error('Owned desktop process did not exit after forced stop.');
+        throw new Error('Owned desktop process tree did not exit after forced stop.');
       }
     }
 
@@ -668,23 +815,11 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     const failures: string[] = [];
 
     for (const [instanceId, runtime] of this.desktopInstances) {
-      if (runtime.child && !hasExited(runtime.child)) {
-        try {
-          runtime.child.kill('SIGKILL');
-        } catch {
-          // The owned process may have exited between the health check and the signal.
-        }
+      await this.refreshOwnedProcessIds(runtime);
+      await this.signalOwnedProcessTree(runtime, 'SIGKILL', true);
+      await this.waitForOwnedProcessesToStop(runtime, 1_000);
 
-        await new Promise<void>((resolveExit) => {
-          const timeout = setTimeout(resolveExit, 1_000);
-          runtime.child?.once('exit', () => {
-            clearTimeout(timeout);
-            resolveExit();
-          });
-        });
-      }
-
-      if (!hasExited(runtime.child) && pidIsAlive(runtime.processInfo.pid)) {
+      if (this.liveOwnedProcessIds(runtime).length > 0) {
         runtime.stopEvents.push({
           eventType: 'stop_failed',
           timestamp: now(),
@@ -714,7 +849,15 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
       return false;
     }
 
-    const alive = !hasExited(runtime.child) && pidIsAlive(runtime.processInfo.pid);
+    await this.refreshOwnedProcessIds(runtime);
+    const aliveProcessIds = this.liveOwnedProcessIds(runtime);
+    const alive = aliveProcessIds.length > 0;
+    const activePid = aliveProcessIds.includes(runtime.launcherPid)
+      ? runtime.launcherPid
+      : aliveProcessIds[0];
+    if (activePid) {
+      runtime.processInfo.pid = activePid;
+    }
     runtime.processInfo.alive = alive;
 
     return alive;
@@ -938,21 +1081,28 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     const runtime = this.requireDesktopRuntime(instanceId);
     const processInfo = (await this.getProcessInfo(instanceId)) ?? runtime.processInfo;
     const windowInfo = runtime.windowInfo;
-    const outputPath = join(this.screenshotDirectory, `${instanceId}-${botId}-${Date.now()}.png`);
+    const outputPath = join(
+      this.screenshotDirectory,
+      `${safePathSegment(instanceId)}-${safePathSegment(botId)}-${Date.now()}.png`
+    );
+    assertResolvedPathWithin(this.screenshotDirectory, outputPath, 'Desktop screenshot path', false);
     const result = await this.screenshotDriver.captureWindow({
       instanceId,
       botId,
       processInfo,
       windowInfo,
-      outputPath
+      outputPath,
+      allowFullDesktopCapture: this.allowFullDesktopCapture
     });
 
     runtime.lastScreenshotPath = result.path;
+    runtime.lastScreenshotScope = result.scope;
 
     return {
       instanceId,
       botId,
       capturedAt: now(),
+      scope: result.scope,
       path: result.path,
       mimeType: result.mimeType
     };
@@ -978,6 +1128,7 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
         processInfo,
         windowStatus: runtime.windowInfo ?? { focused: false },
         screenshotPath: runtime.lastScreenshotPath,
+        screenshotCaptureScope: runtime.lastScreenshotScope,
         lastKnownAction: runtime.lastKnownAction,
         lastHeartbeatAt: runtime.lastHeartbeatAt,
         lastSuccessfulInputAt: runtime.lastSuccessfulInputAt,
@@ -1029,6 +1180,14 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
         adapterType: this.adapterType,
         dependencyReport,
         dependencyWarnings: dependencyReport.warnings,
+        screenshotCaptureScope: runtime.lastScreenshotScope ??
+          (dependencyReport.screenshotScope === 'full-desktop' && !this.allowFullDesktopCapture
+            ? 'unsupported'
+            : dependencyReport.screenshotScope),
+        fullDesktopCaptureConsented: this.allowFullDesktopCapture,
+        launcherPid: runtime.launcherPid,
+        ownedProcessIds: [...runtime.ownedProcessIds].sort((a, b) => a - b),
+        activeOwnedProcessIds: [...runtime.liveProcessIds].sort((a, b) => a - b),
         processInfo,
         windowInfo: runtime.windowInfo,
         visible: true,
@@ -1064,11 +1223,114 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     }));
   }
 
+  private async refreshOwnedProcessIds(runtime: DesktopInstanceRuntime): Promise<void> {
+    try {
+      const processes = await listSystemProcesses();
+      if (runtime.processGroupId !== undefined) {
+        const currentGroupMembers = new Set<number>();
+        for (const item of processes) {
+          if (item.processGroupId === runtime.processGroupId) {
+            currentGroupMembers.add(item.pid);
+            runtime.ownedProcessIds.add(item.pid);
+          }
+        }
+        runtime.liveProcessIds = currentGroupMembers;
+        return;
+      }
+
+      const liveKnownIds = new Set(
+        [...runtime.liveProcessIds].filter((pid) =>
+          processes.some((item) => item.pid === pid)
+        )
+      );
+      if (processes.some((item) => item.pid === runtime.launcherPid)) {
+        liveKnownIds.add(runtime.launcherPid);
+      }
+      const descendants = descendantsOf(processes, liveKnownIds);
+      for (const pid of descendants) {
+        runtime.ownedProcessIds.add(pid);
+      }
+      runtime.liveProcessIds = descendants;
+    } catch {
+      // Keep already observed ownership. Cleanup never expands ownership by process name.
+    }
+  }
+
+  private liveOwnedProcessIds(runtime: DesktopInstanceRuntime): number[] {
+    return [...runtime.liveProcessIds].filter(pidIsAlive);
+  }
+
+  private async signalOwnedProcessTree(
+    runtime: DesktopInstanceRuntime,
+    signal: NodeJS.Signals,
+    force: boolean
+  ): Promise<void> {
+    await this.refreshOwnedProcessIds(runtime);
+
+    if (process.platform === 'win32') {
+      const candidates = [
+        runtime.launcherPid,
+        ...this.liveOwnedProcessIds(runtime).filter((pid) => pid !== runtime.launcherPid)
+      ];
+      for (const pid of candidates) {
+        try {
+          await execFileAsync('taskkill.exe', [
+            '/PID',
+            String(pid),
+            '/T',
+            ...(force ? ['/F'] : [])
+          ]);
+        } catch {
+          // The explicitly owned process may already have stopped.
+        }
+      }
+      return;
+    }
+
+    if (runtime.processGroupId !== undefined) {
+      try {
+        process.kill(-runtime.processGroupId, signal);
+        return;
+      } catch {
+        // Fall back to only the descendant PIDs observed for this launched instance.
+      }
+    }
+
+    for (const pid of this.liveOwnedProcessIds(runtime)) {
+      try {
+        process.kill(pid, signal);
+      } catch {
+        // The owned process may have stopped after the liveness check.
+      }
+    }
+  }
+
+  private async waitForOwnedProcessesToStop(
+    runtime: DesktopInstanceRuntime,
+    timeoutMs: number
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await this.refreshOwnedProcessIds(runtime);
+      if (this.liveOwnedProcessIds(runtime).length === 0) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    await this.refreshOwnedProcessIds(runtime);
+    return this.liveOwnedProcessIds(runtime).length === 0;
+  }
+
   private archiveAndReleaseRuntime(
     instanceId: string,
     runtime: DesktopInstanceRuntime
   ): void {
     this.stoppedInstanceLogs.set(instanceId, this.logsForRuntime(instanceId, runtime));
+    if (runtime.ownershipTimer) {
+      clearInterval(runtime.ownershipTimer);
+      runtime.ownershipTimer = undefined;
+    }
     runtime.child?.removeAllListeners();
     runtime.child = undefined;
     this.desktopInstances.delete(instanceId);

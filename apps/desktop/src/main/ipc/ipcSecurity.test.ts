@@ -73,4 +73,20 @@ describe('simulation IPC input validation', () => {
 
     expect(postGitHubIssues).not.toHaveBeenCalled();
   });
+
+  it('propagates the active-session guard for a direct IPC start attempt', async () => {
+    const startSession = vi.fn().mockRejectedValue(
+      new Error(
+        'Session "session-active" is currently running. Open Live Session and stop it before continuing.'
+      )
+    );
+    registerSimulationIpc({
+      startSession
+    } as unknown as SimulationService);
+
+    await expect(
+      ipcHandlers.get('simulation:startSession')?.({}, 'session-second')
+    ).rejects.toThrow(/session-active.*currently running.*stop it/i);
+    expect(startSession).toHaveBeenCalledWith('session-second');
+  });
 });

@@ -157,6 +157,32 @@ describe('createAdapterOptionsFromGameProfile', () => {
     );
   });
 
+  it('passes desktop screenshot consent and evidence requirements to the adapter', () => {
+    const profile: GameProfile = {
+      ...unityProfile,
+      adapter: {
+        ...unityProfile.adapter,
+        instrumentationEndpoint: undefined,
+        supportsStateRead: false,
+        supportsDirectActions: false
+      }
+    };
+    const result = createAdapterOptionsFromGameProfile(profile, {
+      ...runConfig,
+      requireScreenshotEvidence: true,
+      allowFullDesktopCapture: true
+    });
+
+    expect(result.options.desktop).toMatchObject({
+      requireScreenshotEvidence: true,
+      allowFullDesktopCapture: true
+    });
+    expect(result.options.unity?.desktopOptions).toMatchObject({
+      requireScreenshotEvidence: true,
+      allowFullDesktopCapture: true
+    });
+  });
+
   it('warns for unavailable screenshots and rejects unavailable video capture', () => {
     const profile: GameProfile = {
       ...unityProfile,
@@ -315,6 +341,30 @@ describe('createAdapterOptionsFromGameProfile', () => {
     );
   });
 
+  it('rejects remote instrumentation endpoints for this release', () => {
+    const result = createAdapterOptionsFromGameProfile(
+      {
+        ...unityProfile,
+        adapter: {
+          ...unityProfile.adapter,
+          type: 'instrumented',
+          instrumentationEndpoint: 'https://qa-game.example.com/gsi'
+        }
+      },
+      {
+        ...runConfig,
+        adapterType: 'instrumented'
+      }
+    );
+
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        path: 'adapter.instrumentationEndpoint',
+        message: expect.stringMatching(/127\.0\.0\.1.*localhost.*::1/i)
+      })
+    );
+  });
+
   it('validates save isolation adapter settings', () => {
     const missingTemplate = createAdapterOptionsFromGameProfile(
       {
@@ -464,7 +514,7 @@ describe('createAdapterOptionsFromGameProfile', () => {
     );
 
     expect(result.screenshotDirectory).toBe(
-      '/tmp/gameplay-simulator-user-data/runs/session-options/adapter-screenshots'
+      '/tmp/gameplay-simulator-user-data/runs/session-session-options/adapter-screenshots'
     );
     expect(result.options.browser?.screenshotDirectory).toBe(result.screenshotDirectory);
   });

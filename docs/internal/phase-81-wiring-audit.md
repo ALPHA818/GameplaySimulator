@@ -1,6 +1,18 @@
 # Phase 81 End-To-End Wiring Audit
 
-Temporary internal release audit. Verified 2026-07-28.
+Temporary internal release audit. Originally reviewed 2026-07-28 and corrected during the final v0.1.0 release gate.
+
+## Historical Correction
+
+Commit `8bdf676`, which currently carries the local `v0.1.0` tag, incorrectly described the session lifecycle and production settings as completely wired. In that commit, `maxRuntimeMinutes`, `runUntilStopped`, `saveActionTimeline`, `saveStateSnapshots`, and `allowAutoScaling` still had missing runtime or persistence handoffs. The complete-path table below describes the corrected worktree, not the old tagged commit.
+
+| Corrected path | Incorrect earlier claim | Fix commit |
+| --- | --- | --- |
+| Session deadline and run-until-stopped lifecycle | The broad Session lifecycle row was marked working without deadline or run-until-stopped enforcement. | **Not committed - release blocker** |
+| Action timeline and state snapshot artifact gates | Reports were described as using persisted configuration even when disabled artifact settings were not fully honored. | **Not committed - release blocker** |
+| Exact-or-block resource allocation | Resource limits were described as fully connected before `allowAutoScaling: false` prevented silent reductions. | **Not committed - release blocker** |
+
+The local `v0.1.0` tag must not move or be published until these entries name an exact tested commit. After that commit passes clean Linux and Windows package validation, the audit may be updated in a later verified release commit with those hashes.
 
 Status meanings:
 
@@ -14,7 +26,7 @@ Status meanings:
 | --- | --- | --- | --- |
 | Game profile | Editor schema validation, workspace persistence, session payload, adapter option builder, AdapterFactory | `configStore.persistence.test.ts`, `WorkspaceRepository.test.ts`, `ProfileAdapterOptions.test.ts`, `SimulationServiceRealAdapter.integration.test.ts` | working |
 | Custom bot profile | Editor validation, custom-only workspace storage, New Session pool selection, exact session artifact, ActionPlanner preferences | `BotProfileEditorPage.test.tsx`, `CustomBotProfileValidator.test.ts`, `configStore.persistence.test.ts`, `simulationService.test.ts`, `ActionPlanner.test.ts` | fixed: exact used profiles are now stored in `config.json` |
-| Session lifecycle | Config creation, viability, adapter instances, bot start, pause, resume, stop, metadata and reports | `simulationService.test.ts`, `SimulationServiceRealAdapter.integration.test.ts`, `ShutdownCoordinator.test.ts` | working |
+| Session lifecycle | Config creation, viability, adapter instances, bot start, active-runtime deadline, pause-aware time accounting, resume, stop, metadata and reports | `simulationService.test.ts`, `SimulationServiceRealAdapter.integration.test.ts`, `ShutdownCoordinator.test.ts` | working |
 | Startup flow | Profile selection, startup bot gate, step execution, normal-bot wait, failure screenshot, issue and summary timeline | startup-flow cases in `simulationService.test.ts` and `Bot.test.ts` | working |
 | User directive | Pre-run/live creation, assignment, all planner modes, progress, evidence, terminal result and report | `BotDirectiveManager.test.ts`, `ActionPlanner.test.ts`, `LiveBotGuidancePanel.test.tsx`, `simulationService.test.ts`, `StructuredLoggers.test.ts` | fixed: guided steps, waits, runtime timeouts, limit failures, and manual confirmation now reach real outcomes |
 | Specialized bot | Profile selection, compatibility validation, pool resolution, launch and named planner rule | `BotProfilesPage.test.tsx`, `BotCompatibilityEvaluator.test.ts`, `defaultBotProfiles.test.ts`, `ActionPlanner.test.ts` | working |
@@ -24,6 +36,7 @@ Status meanings:
 | Reports | Finalized summary, metadata paths, repository scan after restart, path-checked open | persisted-session cases in `simulationService.test.ts`, `SessionRepository` coverage through service tests | working |
 | GitHub markdown export | Issue selection, preview, markdown files, explicit-only post boundary | GitHub export/post cases in `simulationService.test.ts`, Issues page smoke coverage | working |
 | Save isolation | Profile config, per-instance path, seed copy, launch argument/environment, cleanup and report fields | `GameInstanceManager.test.ts`, `ProfileAdapterOptions.test.ts`, `StructuredLoggers.test.ts` | working |
+| Session runtime settings | Run-until-stopped action behavior, maximum active runtime, action/state artifact gates, exact-or-block scaling policy, confirmation and report output | `BotManager.test.ts`, `ResourceManager.test.ts`, `StructuredLoggers.test.ts`, `simulationService.test.ts` | fixed: every production setting now controls runtime or saved output |
 
 ## Release Invariants
 
@@ -33,7 +46,7 @@ Status meanings:
 | Every template references an existing profile | Both first-test and focused-template suites compare IDs with `defaultBotProfiles` | working |
 | Every specialized profile has planner behavior | The planner suite exercises every specialized profile and rejects the default rule key | working |
 | Every directive mode has runtime handling | Influence, focus, force, repeat, and guided sequence are covered; unavailable actions are never fabricated | fixed |
-| Reports use performed and saved data | Summaries use runtime manager snapshots, actual bot/instance states, detected issues, captured evidence and persisted config | working |
+| Reports use performed and saved data | Summaries use runtime manager snapshots, actual bot/instance states, detected issues, captured evidence and effective settings; disabled artifact paths are omitted | working |
 | Persisted sessions remain read-only | Runtime controls reject saved sessions; listing, polling, log reads, report reads and shutdown do not rewrite them | fixed |
 | Reload cannot replace a live session | Persisted refresh skips every non-persisted in-memory record | fixed |
 

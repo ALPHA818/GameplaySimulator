@@ -16,7 +16,19 @@ describe('DesktopAdapterDependencyChecker', () => {
     expect(report.canSendKeyboardInput).toBe(true);
     expect(report.canFocusWindow).toBe(true);
     expect(report.screenshotTool).toBe('scrot');
+    expect(report.screenshotScope).toBe('full-desktop');
+    expect(report.canCaptureGameWindow).toBe(false);
+    expect(report.canCaptureFullDesktop).toBe(true);
     expect(report.warnings).toHaveLength(0);
+  });
+
+  it('reports game-window capture only when Linux can identify and capture that window', async () => {
+    const report = await checker('linux', ['xdotool', 'import', 'scrot']).checkDependencies();
+
+    expect(report.screenshotTool).toBe('import');
+    expect(report.screenshotScope).toBe('game-window');
+    expect(report.canCaptureGameWindow).toBe(true);
+    expect(report.canCaptureFullDesktop).toBe(true);
   });
 
   it('warns when Linux input and screenshot dependencies are missing', async () => {
@@ -34,6 +46,7 @@ describe('DesktopAdapterDependencyChecker', () => {
 
     expect(report.canFocusWindow).toBe(true);
     expect(report.canCaptureScreenshots).toBe(true);
+    expect(report.screenshotScope).toBe('full-desktop');
     expect(report.canSendKeyboardInput).toBe(false);
     expect(report.warnings).toContain('This platform can launch games but cannot send input yet');
   });

@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.1.0 - 2026-07-28
+## 0.1.0 - Unreleased
 
-First public release of GameplaySimulator.
+Planned first public release of GameplaySimulator. This entry remains unreleased until the legal, clean-machine, Windows, and permitted Hexcraft gates pass.
 
 ### Desktop Application
 

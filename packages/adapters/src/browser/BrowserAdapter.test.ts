@@ -52,6 +52,8 @@ class FakePage {
   indicatorsHidden = false;
   bringToFrontCount = 0;
   directHookEnabled = true;
+  directHookNeverResolves = false;
+  closeNeverResolves = false;
   listenersCleared = false;
 
   async goto(url: string) {
@@ -111,6 +113,9 @@ class FakePage {
     }
 
     if (source.includes('__GAMEPLAY_SIM_PERFORM_ACTION__')) {
+      if (this.directHookNeverResolves) {
+        return await new Promise<T>(() => undefined);
+      }
       const action = arg as GameAction;
       this.performedActions.push(action.type);
       if (this.state) {
@@ -129,10 +134,12 @@ class FakePage {
     return null as T;
   }
 
-  async screenshot(options: { path: string }) {
+  async screenshot(options: { path?: string }) {
     this.screenshotIndicatorVisibility.push(this.indicatorsHidden);
-    await mkdir(dirname(options.path), { recursive: true });
-    await writeFile(options.path, 'fake browser screenshot');
+    if (options.path) {
+      await mkdir(dirname(options.path), { recursive: true });
+      await writeFile(options.path, 'fake browser screenshot');
+    }
     return Buffer.from('fake browser screenshot');
   }
 
@@ -143,6 +150,9 @@ class FakePage {
   async waitForTimeout(_timeoutMs: number) {}
 
   async close() {
+    if (this.closeNeverResolves) {
+      return await new Promise<void>(() => undefined);
+    }
     this.closed = true;
     this.emit('close');
   }
@@ -282,8 +292,21 @@ describe('BrowserAdapter', () => {
     expect(launcher.launchOptions).toMatchObject({
       executablePath:
         '/opt/GameplaySimulator/resources/playwright/chromium-1228/chrome-linux64/chrome',
-      headless: true
+      headless: true,
+      chromiumSandbox: true
     });
+  });
+
+  it('rejects Chromium launch options that bypass the sandbox', () => {
+    for (const argument of ['--no-sandbox', '--disable-setuid-sandbox']) {
+      expect(() => new BrowserAdapter({
+        launchOptions: { args: [argument] }
+      })).toThrow(`cannot use Chromium sandbox bypass ${argument}`);
+    }
+
+    expect(() => new BrowserAdapter({
+      launchOptions: { chromiumSandbox: false }
+    })).toThrow('cannot disable the Chromium sandbox');
   });
 
   it('does not claim unbundled browsers are available in packaged releases', () => {
@@ -317,7 +340,11 @@ describe('BrowserAdapter', () => {
     await adapter.performAction(instanceConfig.instanceId, 'browser-bot-001', action('reload'));
     const runningLogs = await adapter.captureLogs(instanceConfig.instanceId);
 
-    expect(launcher.launchOptions).toMatchObject({ headless: false, slowMo: 250 });
+    expect(launcher.launchOptions).toMatchObject({
+      headless: false,
+      slowMo: 250,
+      chromiumSandbox: true
+    });
     expect(instance.metadata).toMatchObject({
       visible: true,
       headless: false,
@@ -539,6 +566,71 @@ describe('BrowserAdapter', () => {
     expect(launcher.page.performedActions).toContain('dash');
   });
 
+  it('times out a browser direct-action hook that never resolves', async () => {
+    const launcher = new FakeLauncher();
+    launcher.page.directHookNeverResolves = true;
+    const adapter = new BrowserAdapter({
+      browserLauncher: launcher,
+      requestPolicy: {
+        timeouts: {
+          performActionMs: 20
+        }
+      }
+    });
+    await adapter.launchInstance(instanceConfig);
+
+    const result = await adapter.performAction(
+      instanceConfig.instanceId,
+      'browser-bot-001',
+      action('never-finish')
+    );
+    const logs = await adapter.captureLogs(instanceConfig.instanceId);
+
+    expect(result).toMatchObject({
+      status: 'timed_out',
+      message: expect.stringMatching(/timed out after 20 ms/i)
+    });
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        message: expect.stringContaining('adapter_request_timeout:')
+      })
+    );
+    await adapter.stopAll();
+  });
+
+  it('aborts a pending browser hook when the instance stops', async () => {
+    const launcher = new FakeLauncher();
+    launcher.page.directHookNeverResolves = true;
+    const adapter = new BrowserAdapter({
+      browserLauncher: launcher,
+      requestPolicy: {
+        timeouts: {
+          performActionMs: 5_000,
+          shutdownMs: 100
+        }
+      }
+    });
+    await adapter.launchInstance(instanceConfig);
+    const pendingAction = adapter.performAction(
+      instanceConfig.instanceId,
+      'browser-bot-001',
+      action('pending-action')
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await adapter.stopInstance(instanceConfig.instanceId);
+    const result = await pendingAction;
+    const logs = await adapter.captureLogs(instanceConfig.instanceId);
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/aborted/i);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        message: expect.stringContaining('adapter_request_aborted:')
+      })
+    );
+  });
+
   it('merges the dedicated UI hook into browser game snapshots', async () => {
     const launcher = new FakeLauncher();
     launcher.page.state = {
@@ -667,5 +759,27 @@ describe('BrowserAdapter', () => {
 
     expect(await adapter.isRunning(instanceConfig.instanceId)).toBe(false);
     expect(launcher.page.closed).toBe(true);
+  });
+
+  it('bounds shutdown when a browser close request never resolves', async () => {
+    const launcher = new FakeLauncher();
+    launcher.page.closeNeverResolves = true;
+    const adapter = new BrowserAdapter({
+      browserLauncher: launcher,
+      requestPolicy: {
+        timeouts: {
+          shutdownMs: 20
+        }
+      }
+    });
+    await adapter.launchInstance(instanceConfig);
+    const startedAt = Date.now();
+
+    await expect(adapter.stopInstance(instanceConfig.instanceId)).rejects.toThrow(
+      /timed out after 20 ms/i
+    );
+
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(await adapter.isRunning(instanceConfig.instanceId)).toBe(false);
   });
 });

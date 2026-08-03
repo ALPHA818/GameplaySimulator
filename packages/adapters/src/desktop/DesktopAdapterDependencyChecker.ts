@@ -4,6 +4,11 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 export type DesktopDependencyStatus = 'available' | 'missing' | 'limited' | 'not_implemented';
+export type DesktopScreenshotScope =
+  | 'game-window'
+  | 'application-window'
+  | 'full-desktop'
+  | 'unsupported';
 
 export interface DesktopDependencyCheck {
   id: string;
@@ -22,6 +27,10 @@ export interface DesktopAdapterDependencyReport {
   canSendKeyboardInput: boolean;
   canSendMouseInput: boolean;
   canCaptureScreenshots: boolean;
+  canCaptureGameWindow: boolean;
+  canCaptureApplicationWindow: boolean;
+  canCaptureFullDesktop: boolean;
+  screenshotScope: DesktopScreenshotScope;
   inputDriverAvailable: boolean;
   screenshotToolAvailable: boolean;
   focusToolAvailable: boolean;
@@ -132,6 +141,10 @@ export class DesktopAdapterDependencyChecker {
       canSendKeyboardInput: false,
       canSendMouseInput: false,
       canCaptureScreenshots: false,
+      canCaptureGameWindow: false,
+      canCaptureApplicationWindow: false,
+      canCaptureFullDesktop: false,
+      screenshotScope: 'unsupported',
       inputDriverAvailable: false,
       screenshotToolAvailable: false,
       focusToolAvailable: false,
@@ -142,8 +155,16 @@ export class DesktopAdapterDependencyChecker {
 
   private async checkLinux(): Promise<DesktopAdapterDependencyReport> {
     const hasXdotool = await this.commandExists('xdotool');
-    const screenshotTools = ['gnome-screenshot', 'scrot', 'import'];
-    const screenshotTool = await this.firstAvailable(screenshotTools);
+    const hasImport = await this.commandExists('import');
+    const fullDesktopTool = await this.firstAvailable(['gnome-screenshot', 'scrot', 'import']);
+    const canCaptureGameWindow = hasXdotool && hasImport;
+    const canCaptureFullDesktop = Boolean(fullDesktopTool);
+    const screenshotTool = canCaptureGameWindow ? 'import' : fullDesktopTool;
+    const screenshotScope: DesktopScreenshotScope = canCaptureGameWindow
+      ? 'game-window'
+      : canCaptureFullDesktop
+        ? 'full-desktop'
+        : 'unsupported';
     const checks = [
       check(
         'input-driver',
@@ -160,7 +181,9 @@ export class DesktopAdapterDependencyChecker {
         'Screenshot tool',
         screenshotTool ? 'available' : 'missing',
         screenshotTool
-          ? `${screenshotTool} is available for screenshot capture.`
+          ? screenshotScope === 'game-window'
+            ? 'ImageMagick import and xdotool are available for game-window screenshot capture.'
+            : `${screenshotTool} is available only for full-desktop screenshots. Full-desktop capture requires explicit session consent.`
           : 'No supported screenshot tool was found.',
         'Install gnome-screenshot, scrot, or ImageMagick import.',
         screenshotTool
@@ -175,6 +198,10 @@ export class DesktopAdapterDependencyChecker {
       canSendKeyboardInput: hasXdotool,
       canSendMouseInput: hasXdotool,
       canCaptureScreenshots: Boolean(screenshotTool),
+      canCaptureGameWindow,
+      canCaptureApplicationWindow: false,
+      canCaptureFullDesktop,
+      screenshotScope,
       inputDriverAvailable: hasXdotool,
       screenshotToolAvailable: Boolean(screenshotTool),
       focusToolAvailable: hasXdotool,
@@ -224,6 +251,10 @@ export class DesktopAdapterDependencyChecker {
       canSendKeyboardInput: false,
       canSendMouseInput: false,
       canCaptureScreenshots: hasScreencapture,
+      canCaptureGameWindow: false,
+      canCaptureApplicationWindow: false,
+      canCaptureFullDesktop: hasScreencapture,
+      screenshotScope: hasScreencapture ? 'full-desktop' : 'unsupported',
       inputDriverAvailable: false,
       screenshotToolAvailable: hasScreencapture,
       focusToolAvailable: hasOsascript,
@@ -263,6 +294,10 @@ export class DesktopAdapterDependencyChecker {
       canSendKeyboardInput: false,
       canSendMouseInput: false,
       canCaptureScreenshots: false,
+      canCaptureGameWindow: false,
+      canCaptureApplicationWindow: false,
+      canCaptureFullDesktop: false,
+      screenshotScope: 'unsupported',
       inputDriverAvailable: false,
       screenshotToolAvailable: false,
       focusToolAvailable: false,

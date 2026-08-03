@@ -287,10 +287,17 @@ export const useConfigStore = create<ConfigState>((set) => ({
     requestWorkspacePersistence();
   },
   saveRunConfig: (config) => {
-    set((state) => ({
-      runConfigs: [config, ...state.runConfigs],
-      lastValidatedRunConfig: config
-    }));
+    set((state) => {
+      const runConfigs = [
+        config,
+        ...state.runConfigs.filter((existing) => existing.sessionId !== config.sessionId)
+      ];
+
+      return {
+        runConfigs,
+        lastValidatedRunConfig: config
+      };
+    });
     requestWorkspacePersistence();
   },
   addBotProfileToSession: (profileId) =>

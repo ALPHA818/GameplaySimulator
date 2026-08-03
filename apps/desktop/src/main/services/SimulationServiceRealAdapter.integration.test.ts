@@ -172,12 +172,14 @@ describe('SimulationService real adapter integration', () => {
 
   it('runs bots through a real InstrumentedAdapter, mutates server state, and writes logs', async () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-real-adapter-'));
-    const server = await startInstrumentedTestServer({ port: 0, sessionId: 'session-real-instrumented' });
+    const internalSessionId = '123e4567-e89b-42d3-a456-426614174010';
+    const server = await startInstrumentedTestServer({ port: 0, sessionId: internalSessionId });
     const createAdapterSpy = vi.spyOn(AdapterFactory.prototype, 'createAdapter');
     const service = new SimulationService({
       reportRoot,
       systemSnapshot,
-      now: () => new Date().toISOString()
+      now: () => new Date().toISOString(),
+      generateSessionId: () => internalSessionId
     });
     const config = runConfig('session-real-instrumented');
     const profile = instrumentedProfile(server.endpoint);
@@ -185,7 +187,7 @@ describe('SimulationService real adapter integration', () => {
     try {
       const validation = service.validateSessionConfig({ runConfig: config, gameProfile: profile, botProfiles });
       const created = service.createSession({ runConfig: config, gameProfile: profile, botProfiles });
-      const started = await service.startSession(config.sessionId);
+      const started = await service.startSession(created.sessionId);
 
       expect(validation.valid).toBe(true);
       expect(created.status.status).toBe('created');
@@ -200,10 +202,10 @@ describe('SimulationService real adapter integration', () => {
         })
       );
 
-      await waitFor(() => service.getSessionStatus(config.sessionId).status === 'stopped');
+      await waitFor(() => service.getSessionStatus(created.sessionId).status === 'stopped');
 
       const fakeState = server.getState('game-instance-001');
-      const logsResult = await service.openLogs(config.sessionId);
+      const logsResult = await service.openLogs(created.sessionId);
       const sessionEvents = parseJsonl(await readFile(logsResult.logsPath, 'utf8'));
       const botDirectory = join(dirname(logsResult.logsPath), 'bots', 'explorer-001');
       const actions = parseJsonl(await readFile(join(botDirectory, 'actions.jsonl'), 'utf8'));
@@ -214,8 +216,8 @@ describe('SimulationService real adapter integration', () => {
 
       expect(fakeState.tick).toBeGreaterThan(0);
       expect(fakeState.logs.some((line) => line.includes('Action'))).toBe(true);
-      expect(service.getLogs(config.sessionId).some((log) => log.message.includes('Mock'))).toBe(false);
-      expect(service.getBotStatuses(config.sessionId)[0]).toEqual(
+      expect(service.getLogs(created.sessionId).some((log) => log.message.includes('Mock'))).toBe(false);
+      expect(service.getBotStatuses(created.sessionId)[0]).toEqual(
         expect.objectContaining({
           botId: 'explorer-001',
           status: 'completed'
@@ -229,6 +231,122 @@ describe('SimulationService real adapter integration', () => {
     } finally {
       await service.shutdownAllSessions('integration_test_cleanup').catch(() => []);
       await server.stop();
+    }
+  });
+
+  it('fails profile preflight and session startup when the instrumented endpoint is unreachable', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-unreachable-adapter-'));
+    const internalSessionId = '123e4567-e89b-42d3-a456-426614174011';
+    const server = await startInstrumentedTestServer({ port: 0 });
+    const endpoint = server.endpoint;
+    await server.stop();
+    const service = new SimulationService({
+      reportRoot,
+      systemSnapshot,
+      generateSessionId: () => internalSessionId
+    });
+    const config = runConfig('unreachable-instrumented-session');
+    const profile = instrumentedProfile(endpoint);
+
+    try {
+      const profileTest = await service.testGameProfile({ gameProfile: profile });
+
+      expect(profileTest).toMatchObject({
+        ok: false,
+        status: 'failed'
+      });
+      expect(profileTest.errors).toContainEqual(
+        expect.objectContaining({
+          path: 'adapter.launch',
+          message: expect.stringMatching(/Unable to connect instrumented game/i)
+        })
+      );
+      await expect(service.createSessionWithPreflight({
+        runConfig: config,
+        gameProfile: profile,
+        botProfiles
+      })).rejects.toThrow(/Unable to connect instrumented game/i);
+
+      const created = service.createSession({
+        runConfig: config,
+        gameProfile: profile,
+        botProfiles
+      });
+      const started = await service.startSession(created.sessionId);
+
+      expect(started.status).toBe('failed');
+      await expect(service.getInstanceStatuses(created.sessionId)).resolves.toContainEqual(
+        expect.objectContaining({
+          status: 'failed',
+          connectionState: 'failed'
+        })
+      );
+      expect(service.getBotStatuses(created.sessionId)).not.toContainEqual(
+        expect.objectContaining({ status: 'running' })
+      );
+      expect(service.getLogs(created.sessionId)).toContainEqual(
+        expect.objectContaining({
+          level: 'error',
+          message: expect.stringMatching(/Unable to connect instrumented game/i)
+        })
+      );
+    } finally {
+      await service.shutdownAllSessions('integration_test_cleanup').catch(() => []);
+    }
+  });
+
+  it('stops affected bots and fails the session when a live instrumented connection is lost', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-disconnected-adapter-'));
+    const internalSessionId = '123e4567-e89b-42d3-a456-426614174012';
+    const server = await startInstrumentedTestServer({ port: 0, sessionId: internalSessionId });
+    const service = new SimulationService({
+      reportRoot,
+      systemSnapshot,
+      generateSessionId: () => internalSessionId
+    });
+    const config: SimulationRunConfig = {
+      ...runConfig('disconnect-instrumented-session'),
+      runUntilStopped: true,
+      actionDelayMs: 100,
+      maxActionsPerBot: undefined
+    };
+    const profile = instrumentedProfile(server.endpoint);
+
+    try {
+      const created = service.createSession({
+        runConfig: config,
+        gameProfile: profile,
+        botProfiles
+      });
+      const started = await service.startSession(created.sessionId);
+
+      expect(started.status).toBe('running');
+      await waitFor(() =>
+        service.getBotStatuses(created.sessionId).some((bot) => bot.status === 'running')
+      );
+
+      await server.stop();
+      const statuses = await service.getInstanceStatuses(created.sessionId);
+
+      expect(statuses).toContainEqual(
+        expect.objectContaining({
+          status: 'failed',
+          connectionState: 'disconnected'
+        })
+      );
+      expect(service.getBotStatuses(created.sessionId)).toContainEqual(
+        expect.objectContaining({
+          botId: 'explorer-001',
+          status: 'failed',
+          progressState: expect.stringMatching(
+            /Game instance connection lost|instrumented game/
+          )
+        })
+      );
+      expect(service.getSessionStatus(created.sessionId).status).toBe('failed');
+    } finally {
+      await service.shutdownAllSessions('integration_test_cleanup').catch(() => []);
+      await server.stop().catch(() => undefined);
     }
   });
 });

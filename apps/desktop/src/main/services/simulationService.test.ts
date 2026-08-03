@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import type {
@@ -23,6 +23,27 @@ import type {
   ObservationTargetUpdate
 } from '../../../../../packages/adapters/src';
 import { SimulationService } from './simulationService';
+
+class TestSimulationService extends SimulationService {
+  override createSession(payload: unknown) {
+    const created = super.createSession(payload);
+    const request = payload as {
+      runConfig?: {
+        sessionId?: string;
+        directives?: Array<{ sessionId: string }>;
+      };
+    };
+
+    if (request.runConfig) {
+      request.runConfig.sessionId = created.sessionId;
+      request.runConfig.directives?.forEach((directive) => {
+        directive.sessionId = created.sessionId;
+      });
+    }
+
+    return created;
+  }
+}
 
 const gameProfile: GameProfile = {
   gameId: 'sample-browser-game',
@@ -333,6 +354,22 @@ class FailingStopAdapter extends RecordingGameAdapter {
   }
 }
 
+class HangingBrowserCloseAdapter extends RecordingGameAdapter {
+  forcedCleanup = false;
+
+  override async stopInstance(_instanceId: string): Promise<void> {
+    await new Promise<void>(() => undefined);
+  }
+
+  override async stopAll(): Promise<void> {
+    await new Promise<void>(() => undefined);
+  }
+
+  async forceStopAll(): Promise<void> {
+    this.forcedCleanup = true;
+  }
+}
+
 class StartupFlowGameAdapter extends RecordingGameAdapter {
   readonly actionOrder: Array<{ botId: string; actionType: string }> = [];
   readonly screenshotRequests: Array<{ instanceId: string; botId: string }> = [];
@@ -419,7 +456,10 @@ class StartupFlowGameAdapter extends RecordingGameAdapter {
       botId,
       capturedAt: '2026-07-04T09:00:00.000Z',
       mimeType: 'image/png',
-      data: new Uint8Array([137, 80, 78, 71])
+      data: Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        'base64'
+      )
     };
   }
 }
@@ -495,9 +535,80 @@ describe('SimulationService', () => {
     vi.useRealTimers();
   });
 
+  it('replaces the renderer draft ID with a main-process UUID and keeps the readable name separate', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-internal-id-'));
+    const generatedId = '123e4567-e89b-42d3-a456-426614174000';
+    const draftConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: '../../renderer-proposed-id',
+      sessionName: '  First release smoke test  '
+    };
+    const service = new SimulationService({
+      reportRoot,
+      systemSnapshot,
+      generateSessionId: () => generatedId
+    });
+
+    const created = service.createSession({ runConfig: draftConfig, gameProfile, botProfiles });
+    const metadata = service.listSessions().find((session) => session.sessionId === generatedId);
+
+    expect(created.sessionId).toBe(generatedId);
+    expect(draftConfig.sessionId).toBe('../../renderer-proposed-id');
+    expect(metadata?.sessionName).toBe('First release smoke test');
+    expect(basename(metadata!.reportPaths.sessionDirectory)).toBe(`session-${generatedId}`);
+    expect(dirname(metadata!.reportPaths.sessionDirectory)).toBe(reportRoot);
+  });
+
+  it('rejects a duplicate generated session ID and never reuses an existing folder', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-session-collision-'));
+    const generatedId = '123e4567-e89b-42d3-a456-426614174001';
+    const service = new SimulationService({
+      reportRoot,
+      systemSnapshot,
+      generateSessionId: () => generatedId
+    });
+    const first = service.createSession({ runConfig: { ...runConfig }, gameProfile, botProfiles });
+    await service.stopSession(first.sessionId);
+
+    expect(() =>
+      service.createSession({
+        runConfig: { ...runConfig, sessionId: 'another-renderer-draft' },
+        gameProfile,
+        botProfiles
+      })
+    ).toThrow(/already exists.*No existing run was changed/i);
+
+    const secondRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-existing-folder-'));
+    await mkdir(join(secondRoot, `session-${generatedId}`));
+    const secondService = new SimulationService({
+      reportRoot: secondRoot,
+      systemSnapshot,
+      generateSessionId: () => generatedId
+    });
+
+    expect(() =>
+      secondService.createSession({ runConfig: { ...runConfig }, gameProfile, botProfiles })
+    ).toThrow(/already exists.*No existing run was changed/i);
+  });
+
+  it('rejects duplicate bot profile IDs in a session request', () => {
+    const service = new SimulationService({ systemSnapshot });
+    const validation = service.validateSessionConfig({
+      runConfig: { ...runConfig },
+      gameProfile,
+      botProfiles: [botProfiles[0], { ...botProfiles[0] }]
+    });
+
+    expect(validation.valid).toBe(false);
+    expect(validation.errors).toContainEqual(expect.objectContaining({
+      path: 'botProfiles.1.profileId',
+      message: expect.stringMatching(/must be unique/i)
+    }));
+  });
+
   it('creates, starts, ticks, and stops a mock session', async () => {
     vi.useFakeTimers();
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot
     });
@@ -542,8 +653,273 @@ describe('SimulationService', () => {
     expect(service.getBotStatuses(runConfig.sessionId).every((bot) => bot.status === 'stopped')).toBe(true);
   }, 10_000);
 
+  it('stops at the maximum active runtime and excludes paused time', async () => {
+    vi.useFakeTimers();
+    const deadlineRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-active-runtime-deadline',
+      runUntilStopped: true,
+      maxRuntimeMinutes: 0.001,
+      actionDelayMs: 1_000,
+      maxActionsPerBot: undefined,
+      botPools: [{
+        ...runConfig.botPools[0],
+        minCount: 1,
+        desiredCount: 1,
+        maxCount: 1
+      }]
+    };
+    const service = new TestSimulationService({ systemSnapshot });
+
+    service.createSession({ runConfig: deadlineRunConfig, gameProfile, botProfiles });
+    await service.startSession(deadlineRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(310);
+    expect(service.getSessionStatus(deadlineRunConfig.sessionId).status).toBe('running');
+
+    service.pauseSession(deadlineRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(service.getSessionStatus(deadlineRunConfig.sessionId).status).toBe('paused');
+
+    service.resumeSession(deadlineRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(49);
+    expect(service.getSessionStatus(deadlineRunConfig.sessionId).status).toBe('running');
+
+    await vi.advanceTimersByTimeAsync(2);
+    expect(service.getSessionStatus(deadlineRunConfig.sessionId).status).toBe('stopped');
+    expect(
+      service.getLogs(deadlineRunConfig.sessionId).some((entry) =>
+        entry.message.includes('Maximum active runtime')
+      )
+    ).toBe(true);
+
+    const structuredLogs = await service.getStructuredLogs(deadlineRunConfig.sessionId);
+    expect(structuredLogs.logs.some((entry) => entry.eventType === 'max_runtime_reached')).toBe(true);
+  });
+
+  it('does not write disabled action timelines or state snapshots', async () => {
+    vi.useFakeTimers();
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-artifact-settings-'));
+    const artifactRunConfig: SimulationRunConfig = {
+      ...runConfig,
+      sessionId: 'session-disabled-runtime-artifacts',
+      saveActionTimeline: false,
+      saveStateSnapshots: false,
+      actionDelayMs: 0,
+      maxActionsPerBot: 1,
+      botPools: [{
+        ...runConfig.botPools[0],
+        minCount: 1,
+        desiredCount: 1,
+        maxCount: 1
+      }]
+    };
+    const service = new TestSimulationService({ reportRoot, systemSnapshot });
+
+    service.createSession({ runConfig: artifactRunConfig, gameProfile, botProfiles });
+    await service.startSession(artifactRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(350);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const report = await service.openReport(artifactRunConfig.sessionId);
+    const sessionDirectory = dirname(report.reportPath);
+    const botDirectory = join(sessionDirectory, 'bots', 'explorer-001');
+    const summary = await readFile(report.reportPath, 'utf8');
+    const structuredLogs = await service.getStructuredLogs(artifactRunConfig.sessionId);
+
+    expect(existsSync(join(botDirectory, 'actions.jsonl'))).toBe(false);
+    expect(existsSync(join(botDirectory, 'states.jsonl'))).toBe(false);
+    expect(existsSync(join(sessionDirectory, 'replay'))).toBe(false);
+    expect(structuredLogs.logs.some((entry) => entry.eventType === 'action_performed')).toBe(false);
+    expect(structuredLogs.logs.some((entry) => entry.eventType === 'state_snapshot')).toBe(false);
+    expect(summary).toContain('Action timeline artifacts: disabled');
+    expect(summary).toContain('State snapshot artifacts: disabled');
+  });
+
+  it('rejects creating another session while the active session is running', async () => {
+    vi.useFakeTimers();
+    const service = new TestSimulationService({ systemSnapshot });
+    const activeRunConfig = { ...runConfig, sessionId: 'session-active-running' };
+    const secondRunConfig = { ...runConfig, sessionId: 'session-blocked-by-running' };
+
+    service.createSession({ runConfig: activeRunConfig, gameProfile, botProfiles });
+    await service.startSession(activeRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(350);
+
+    expect(() =>
+      service.createSession({ runConfig: secondRunConfig, gameProfile, botProfiles })
+    ).toThrow(/currently running.*stop it/i);
+    expect(service.getStatus().activeSessionId).toBe(activeRunConfig.sessionId);
+
+    await service.stopSession(activeRunConfig.sessionId);
+  });
+
+  it('rejects creating another session while the active session is created or starting', async () => {
+    vi.useFakeTimers();
+    const createdService = new TestSimulationService({ systemSnapshot });
+    const createdRunConfig = { ...runConfig, sessionId: 'session-active-created' };
+
+    createdService.createSession({ runConfig: createdRunConfig, gameProfile, botProfiles });
+    expect(() =>
+      createdService.createSession({
+        runConfig: { ...runConfig, sessionId: 'session-blocked-by-created' },
+        gameProfile,
+        botProfiles
+      })
+    ).toThrow(/currently created.*start or stop/i);
+    await createdService.stopSession(createdRunConfig.sessionId);
+
+    const startingService = new TestSimulationService({ systemSnapshot });
+    const startingRunConfig = { ...runConfig, sessionId: 'session-active-starting' };
+    startingService.createSession({ runConfig: startingRunConfig, gameProfile, botProfiles });
+    await startingService.startSession(startingRunConfig.sessionId);
+
+    await expect(startingService.startSession(startingRunConfig.sessionId)).rejects.toThrow(
+      /currently starting.*cannot start/i
+    );
+    expect(() =>
+      startingService.createSession({
+        runConfig: { ...runConfig, sessionId: 'session-blocked-by-starting' },
+        gameProfile,
+        botProfiles
+      })
+    ).toThrow(/currently starting.*stop it/i);
+    await startingService.stopSession(startingRunConfig.sessionId);
+  });
+
+  it('rejects creating another session while the active session is paused', async () => {
+    vi.useFakeTimers();
+    const service = new TestSimulationService({ systemSnapshot });
+    const activeRunConfig = { ...runConfig, sessionId: 'session-active-paused' };
+    const secondRunConfig = { ...runConfig, sessionId: 'session-blocked-by-paused' };
+
+    service.createSession({ runConfig: activeRunConfig, gameProfile, botProfiles });
+    await service.startSession(activeRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(350);
+    service.pauseSession(activeRunConfig.sessionId);
+
+    expect(() =>
+      service.createSession({ runConfig: secondRunConfig, gameProfile, botProfiles })
+    ).toThrow(/currently paused.*resume or stop/i);
+    expect(service.getStatus().activeSessionId).toBe(activeRunConfig.sessionId);
+
+    await service.stopSession(activeRunConfig.sessionId);
+  });
+
+  it('rejects starting a stopped session while another session is stopping', async () => {
+    vi.useFakeTimers();
+    const service = new TestSimulationService({ systemSnapshot });
+    const restartableRunConfig = { ...runConfig, sessionId: 'session-restartable' };
+    const activeRunConfig = { ...runConfig, sessionId: 'session-active-stopping' };
+
+    service.createSession({ runConfig: restartableRunConfig, gameProfile, botProfiles });
+    await service.stopSession(restartableRunConfig.sessionId);
+    service.createSession({ runConfig: activeRunConfig, gameProfile, botProfiles });
+    await service.startSession(activeRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(350);
+
+    const stopping = service.stopSession(activeRunConfig.sessionId);
+    await expect(service.startSession(restartableRunConfig.sessionId)).rejects.toThrow(
+      /currently stopping.*wait for it to finish/i
+    );
+    expect(service.getStatus().activeSessionId).toBe(activeRunConfig.sessionId);
+    await stopping;
+  });
+
+  it('allows a new session after the previous session has stopped', async () => {
+    const service = new TestSimulationService({ systemSnapshot });
+    const firstRunConfig = { ...runConfig, sessionId: 'session-first-stopped' };
+    const secondRunConfig = { ...runConfig, sessionId: 'session-after-stop' };
+
+    service.createSession({ runConfig: firstRunConfig, gameProfile, botProfiles });
+    await service.stopSession(firstRunConfig.sessionId);
+    const created = service.createSession({
+      runConfig: secondRunConfig,
+      gameProfile,
+      botProfiles
+    });
+
+    expect(created.sessionId).toBe(secondRunConfig.sessionId);
+    expect(service.getStatus().activeSessionId).toBe(secondRunConfig.sessionId);
+    expect(service.getStatus().status).toBe('created');
+  });
+
+  it('recovers a persisted live status as failed without blocking a new session', async () => {
+    vi.useFakeTimers();
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-active-recovery-'));
+    const interruptedRunConfig = { ...runConfig, sessionId: 'session-recovered-interrupted' };
+    const newRunConfig = { ...runConfig, sessionId: 'session-after-recovery' };
+    const originalService = new TestSimulationService({ reportRoot, systemSnapshot });
+
+    originalService.createSession({ runConfig: interruptedRunConfig, gameProfile, botProfiles });
+    await originalService.startSession(interruptedRunConfig.sessionId);
+    await vi.advanceTimersByTimeAsync(350);
+    expect(originalService.getSessionStatus(interruptedRunConfig.sessionId).status).toBe('running');
+
+    const restartedService = new TestSimulationService({ reportRoot, systemSnapshot });
+    expect(restartedService.getSessionStatus(interruptedRunConfig.sessionId).status).toBe('failed');
+
+    const created = restartedService.createSession({
+      runConfig: newRunConfig,
+      gameProfile,
+      botProfiles
+    });
+    expect(created.sessionId).toBe(newRunConfig.sessionId);
+    expect(restartedService.getStatus().activeSessionId).toBe(newRunConfig.sessionId);
+
+    await originalService.forceCleanupOwnedProcesses();
+    await vi.runAllTimersAsync();
+  });
+
+  it('rejects guiding a non-active session while another mutable session owns the runtime', async () => {
+    const service = new TestSimulationService({ systemSnapshot });
+    let oldSessionId = 'session-old-guidance-target';
+    let activeSessionId = 'session-current-owner';
+
+    oldSessionId = service.createSession({
+      runConfig: { ...runConfig, sessionId: oldSessionId },
+      gameProfile,
+      botProfiles
+    }).sessionId;
+    await service.stopSession(oldSessionId);
+    activeSessionId = service.createSession({
+      runConfig: { ...runConfig, sessionId: activeSessionId },
+      gameProfile,
+      botProfiles
+    }).sessionId;
+
+    await expect(service.guideBot({
+      sessionId: oldSessionId,
+      botId: 'explorer-001',
+      behavior: 'apply',
+      directive: {
+        directiveId: 'blocked-cross-session-guidance',
+        sessionId: oldSessionId,
+        name: 'Test movement',
+        description: 'Try a supported movement action.',
+        directiveType: 'action',
+        directiveMode: 'focus',
+        priority: 'normal',
+        status: 'queued',
+        target: {
+          allBots: false,
+          botIds: ['explorer-001'],
+          profileIds: [],
+          gameInstanceIds: []
+        },
+        actionKeywords: ['move'],
+        avoidedActionKeywords: [],
+        successConditions: ['A movement action succeeds.'],
+        failureConditions: [],
+        steps: [],
+        repeatUntilSuccess: false,
+        createdAt: '2026-07-04T09:00:00.000Z',
+        createdBy: 'user'
+      }
+    })).rejects.toThrow(/currently created.*cannot guide bots/i);
+  });
+
   it('rejects a real specialist pool when its required input capability is unavailable', () => {
-    const service = new SimulationService({ systemSnapshot });
+    const service = new TestSimulationService({ systemSnapshot });
     const controllerProfile: BotProfile = {
       ...botProfiles[0],
       profileId: 'controller-gamepad-tester-bot',
@@ -574,7 +950,7 @@ describe('SimulationService', () => {
   });
 
   it('rejects network specialists without explicit controlled-test confirmation', () => {
-    const service = new SimulationService({ systemSnapshot });
+    const service = new TestSimulationService({ systemSnapshot });
     const networkProfile: BotProfile = {
       ...botProfiles[0],
       profileId: 'network-resilience-tester-bot',
@@ -648,7 +1024,7 @@ describe('SimulationService', () => {
         }
       ]
     };
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot
     });
@@ -676,7 +1052,7 @@ describe('SimulationService', () => {
 
   it('runs a valid forced directive and returns the bot to profile planning after success', async () => {
     vi.useFakeTimers();
-    const sessionId = 'session-forced-directive';
+    let sessionId = 'session-forced-directive';
     const directiveRunConfig: SimulationRunConfig = {
       ...runConfig,
       sessionId,
@@ -716,12 +1092,12 @@ describe('SimulationService', () => {
         }
       ]
     };
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot
     });
 
-    service.createSession({ runConfig: directiveRunConfig, gameProfile, botProfiles });
+    sessionId = service.createSession({ runConfig: directiveRunConfig, gameProfile, botProfiles }).sessionId;
     await service.startSession(sessionId);
     await vi.advanceTimersByTimeAsync(900);
 
@@ -753,7 +1129,7 @@ describe('SimulationService', () => {
 
   it('advances every guided directive step and records the completed result', async () => {
     vi.useFakeTimers();
-    const sessionId = 'session-guided-directive';
+    let sessionId = 'session-guided-directive';
     const guidedRunConfig: SimulationRunConfig = {
       ...runConfig,
       sessionId,
@@ -809,12 +1185,12 @@ describe('SimulationService', () => {
         createdBy: 'user'
       }]
     };
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot
     });
 
-    service.createSession({ runConfig: guidedRunConfig, gameProfile, botProfiles });
+    sessionId = service.createSession({ runConfig: guidedRunConfig, gameProfile, botProfiles }).sessionId;
     await service.startSession(sessionId);
     await vi.advanceTimersByTimeAsync(900);
 
@@ -846,7 +1222,7 @@ describe('SimulationService', () => {
 
   it('guides a running bot without restarting its loop and validates exact available actions', async () => {
     vi.useFakeTimers();
-    const sessionId = 'session-live-guidance';
+    let sessionId = 'session-live-guidance';
     const liveRunConfig: SimulationRunConfig = {
       ...runConfig,
       sessionId,
@@ -861,7 +1237,7 @@ describe('SimulationService', () => {
         }
       ]
     };
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot
     });
@@ -898,7 +1274,7 @@ describe('SimulationService', () => {
       ...overrides
     });
 
-    service.createSession({ runConfig: liveRunConfig, gameProfile, botProfiles });
+    sessionId = service.createSession({ runConfig: liveRunConfig, gameProfile, botProfiles }).sessionId;
     await service.startSession(sessionId);
     await vi.advanceTimersByTimeAsync(350);
 
@@ -1001,7 +1377,7 @@ describe('SimulationService', () => {
   it('launches and stops adapter-backed sessions through AdapterFactory by default', async () => {
     const adapter = new RecordingGameAdapter();
     const createAdapter = vi.fn((_adapterType: SimulationRunConfig['adapterType'], _options?: unknown) => adapter);
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot,
       adapterFactory: { createAdapter }
@@ -1048,7 +1424,7 @@ describe('SimulationService', () => {
   it('completes shutdown and records an abnormal stop when adapter cleanup throws', async () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-abnormal-shutdown-'));
     const adapter = new FailingStopAdapter();
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => new Date('2026-07-29T10:00:00.000Z').toISOString(),
       systemSnapshot,
@@ -1079,9 +1455,116 @@ describe('SimulationService', () => {
     )).toBe(true);
   });
 
+  it('shares simultaneous application shutdown calls', async () => {
+    const service = new TestSimulationService({ systemSnapshot });
+    const sessionConfig = {
+      ...runConfig,
+      sessionId: 'session-shared-application-shutdown'
+    };
+    service.createSession({ runConfig: sessionConfig, gameProfile, botProfiles });
+
+    const first = service.shutdownAllSessions('simultaneous_quit');
+    const second = service.shutdownAllSessions('ignored_second_reason');
+
+    expect(second).toBe(first);
+    const snapshots = await first;
+    expect(snapshots[0]?.status).toBe('failed');
+  });
+
+  it('shares repeated Stop requests and reaches a terminal status', async () => {
+    const adapter = new RecordingGameAdapter();
+    const service = new TestSimulationService({
+      systemSnapshot,
+      adapterFactory: { createAdapter: () => adapter }
+    });
+    const sessionConfig = {
+      ...runConfig,
+      sessionId: 'session-repeated-stop',
+      useMockRuntime: false,
+      actionDelayMs: 10_000,
+      maxActionsPerBot: undefined
+    };
+    service.createSession({ runConfig: sessionConfig, gameProfile, botProfiles });
+    await service.startSession(sessionConfig.sessionId);
+
+    const first = service.stopSession(sessionConfig.sessionId);
+    const second = service.stopSession(sessionConfig.sessionId);
+
+    expect(second).toBe(first);
+    const stopped = await first;
+    expect(stopped.status).toBe('stopped');
+    expect(adapter.stoppedAll).toBe(true);
+
+    const logCountAfterStop = service.getLogs(sessionConfig.sessionId).length;
+    const repeatedAfterCompletion = await service.stopSession(sessionConfig.sessionId);
+
+    expect(repeatedAfterCompletion.status).toBe('stopped');
+    expect(service.getLogs(sessionConfig.sessionId)).toHaveLength(logCountAfterStop);
+  });
+
+  it('continues owned-resource cleanup when report finalization throws', async () => {
+    const adapter = new RecordingGameAdapter();
+    const service = new TestSimulationService({
+      systemSnapshot,
+      adapterFactory: { createAdapter: () => adapter }
+    });
+    const sessionConfig = {
+      ...runConfig,
+      sessionId: 'session-report-finalization-failure',
+      useMockRuntime: false,
+      actionDelayMs: 10_000,
+      maxActionsPerBot: undefined
+    };
+    service.createSession({ runConfig: sessionConfig, gameProfile, botProfiles });
+    await service.startSession(sessionConfig.sessionId);
+    const reportSubject = service as unknown as {
+      performStructuredReportWrite: (record: { status: string }) => void;
+    };
+    const originalReportWrite = reportSubject.performStructuredReportWrite.bind(service);
+    reportSubject.performStructuredReportWrite = vi.fn((record) => {
+      if (['stopped', 'failed'].includes(record.status)) {
+        throw new Error('report disk write failed');
+      }
+      originalReportWrite(record);
+    });
+
+    const stopped = await service.stopSession(sessionConfig.sessionId);
+
+    expect(adapter.stoppedAll).toBe(true);
+    expect(stopped.status).toBe('failed');
+    expect(service.getLogs(sessionConfig.sessionId).some((log) =>
+      log.message.includes('finalize reports') && log.message.includes('report disk write failed')
+    )).toBe(true);
+  });
+
+  it('bounds a hanging browser close and performs final cleanup only through the owned-resource hook', async () => {
+    const adapter = new HangingBrowserCloseAdapter();
+    const service = new TestSimulationService({
+      systemSnapshot,
+      shutdownStageTimeoutMs: 10,
+      shutdownHardTimeoutMs: 200,
+      adapterFactory: { createAdapter: () => adapter }
+    });
+    const sessionConfig = {
+      ...runConfig,
+      sessionId: 'session-hanging-browser-close',
+      useMockRuntime: false,
+      actionDelayMs: 10_000,
+      maxActionsPerBot: undefined
+    };
+    service.createSession({ runConfig: sessionConfig, gameProfile, botProfiles });
+    await service.startSession(sessionConfig.sessionId);
+
+    const stopped = await service.stopSession(sessionConfig.sessionId);
+
+    expect(stopped.status).toBe('failed');
+    expect(adapter.forcedCleanup).toBe(true);
+    expect(stopped.status).not.toBe('stopping');
+  });
+
   it('switches the watched bot, focuses its assigned instance, and falls back when it stops', async () => {
     const adapter = new RecordingGameAdapter();
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot,
       adapterFactory: { createAdapter: () => adapter }
@@ -1148,7 +1631,7 @@ describe('SimulationService', () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-startup-success-'));
     const adapter = new StartupFlowGameAdapter();
     const sessionConfig = startupFlowRunConfig('session-startup-success');
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => '2026-07-04T09:00:00.000Z',
       systemSnapshot,
@@ -1195,7 +1678,7 @@ describe('SimulationService', () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-startup-gate-'));
     const adapter = new StartupFlowGameAdapter(startupGate);
     const sessionConfig = startupFlowRunConfig('session-startup-gate');
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => '2026-07-04T09:00:00.000Z',
       systemSnapshot,
@@ -1235,7 +1718,7 @@ describe('SimulationService', () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-startup-failure-'));
     const adapter = new StartupFlowGameAdapter(undefined, true);
     const sessionConfig = startupFlowRunConfig('session-startup-failure');
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => '2026-07-04T09:00:00.000Z',
       systemSnapshot,
@@ -1277,7 +1760,7 @@ describe('SimulationService', () => {
   it('tests a game profile through the selected adapter and cleans up the instance', async () => {
     const adapter = new RecordingGameAdapter();
     const createAdapter = vi.fn((_adapterType: SimulationRunConfig['adapterType'], _options?: unknown) => adapter);
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot,
       adapterFactory: { createAdapter }
@@ -1313,7 +1796,7 @@ describe('SimulationService', () => {
     const createAdapter = vi.fn(
       (_adapterType: SimulationRunConfig['adapterType'], _options?: unknown) => adapter
     );
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot,
       adapterFactory: { createAdapter }
@@ -1336,7 +1819,7 @@ describe('SimulationService', () => {
 
   it('rejects invalid desktop adapter profiles before session startup', () => {
     const createAdapter = vi.fn((_adapterType: SimulationRunConfig['adapterType'], _options?: unknown) => new RecordingGameAdapter());
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot,
       adapterFactory: { createAdapter }
@@ -1384,7 +1867,7 @@ describe('SimulationService', () => {
   it('reports adapter launch failures as failed sessions with critical issues', async () => {
     const adapter = new FailingLaunchAdapter();
     const createAdapter = vi.fn((_adapterType: SimulationRunConfig['adapterType'], _options?: unknown) => adapter);
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot,
       adapterFactory: { createAdapter }
@@ -1421,7 +1904,7 @@ describe('SimulationService', () => {
   it('writes and opens a mock report', async () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-reports-'));
     const openedPaths: string[] = [];
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       systemSnapshot,
       openPath: async (path) => {
@@ -1452,7 +1935,7 @@ describe('SimulationService', () => {
       ...runConfig,
       sessionId: 'session-observation-persisted'
     };
-    const service = new SimulationService({ reportRoot, systemSnapshot });
+    const service = new TestSimulationService({ reportRoot, systemSnapshot });
 
     service.createSession({
       runConfig: observationRunConfig,
@@ -1497,7 +1980,7 @@ describe('SimulationService', () => {
     vi.useFakeTimers();
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-logs-'));
     const openedPaths: string[] = [];
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot,
@@ -1546,7 +2029,7 @@ describe('SimulationService', () => {
   it('detects critical issues, logs them, and stops the session when configured', async () => {
     vi.useFakeTimers();
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-critical-'));
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot
@@ -1578,7 +2061,7 @@ describe('SimulationService', () => {
 
   it('rejects video capture because no production adapter implements it', async () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-video-'));
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot
@@ -1619,7 +2102,7 @@ describe('SimulationService', () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-comparison-'));
     const openedPaths: string[] = [];
     let nowOffsetSeconds = 0;
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => new Date(Date.UTC(2026, 6, 4, 9, 0, nowOffsetSeconds++)).toISOString(),
       systemSnapshot,
@@ -1675,7 +2158,7 @@ describe('SimulationService', () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-persisted-sessions-'));
     const openedPaths: string[] = [];
     let nowOffsetSeconds = 0;
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => new Date(Date.UTC(2026, 6, 4, 10, 0, nowOffsetSeconds++)).toISOString(),
       systemSnapshot,
@@ -1711,7 +2194,7 @@ describe('SimulationService', () => {
     await vi.advanceTimersByTimeAsync(350);
     await vi.advanceTimersByTimeAsync(1000);
 
-    const restartedService = new SimulationService({
+    const restartedService = new TestSimulationService({
       reportRoot,
       now: () => new Date('2026-07-04T11:00:00.000Z').toISOString(),
       systemSnapshot,
@@ -1755,18 +2238,18 @@ describe('SimulationService', () => {
   it('keeps persisted sessions read-only when listed or addressed by runtime controls', async () => {
     vi.useFakeTimers();
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-read-only-session-'));
-    const sessionId = 'session-persisted-read-only';
-    const service = new SimulationService({
+    let sessionId = 'session-persisted-read-only';
+    const service = new TestSimulationService({
       reportRoot,
       now: () => new Date('2026-07-04T12:00:00.000Z').toISOString(),
       systemSnapshot
     });
 
-    service.createSession({
+    sessionId = service.createSession({
       runConfig: { ...boundaryRunConfig, sessionId },
       gameProfile,
       botProfiles: boundaryBotProfiles
-    });
+    }).sessionId;
     await service.startSession(sessionId);
     await vi.advanceTimersByTimeAsync(1500);
     await service.stopSession(sessionId);
@@ -1778,7 +2261,7 @@ describe('SimulationService', () => {
     const statusBefore = service.getSessionStatus(sessionId).status;
     const metadataBefore = await readFile(metadataPath, 'utf8');
     const modifiedBefore = (await stat(metadataPath)).mtimeMs;
-    const restartedService = new SimulationService({
+    const restartedService = new TestSimulationService({
       reportRoot,
       now: () => new Date('2026-07-04T13:00:00.000Z').toISOString(),
       systemSnapshot
@@ -1806,14 +2289,14 @@ describe('SimulationService', () => {
       preferredActions: ['open-inventory'],
       avoidedActions: ['close-inventory']
     };
-    const sessionId = 'session-custom-profile-artifact';
-    const service = new SimulationService({
+    let sessionId = 'session-custom-profile-artifact';
+    const service = new TestSimulationService({
       reportRoot,
       now: () => new Date('2026-07-04T14:00:00.000Z').toISOString(),
       systemSnapshot
     });
 
-    service.createSession({
+    sessionId = service.createSession({
       runConfig: {
         ...runConfig,
         sessionId,
@@ -1826,7 +2309,7 @@ describe('SimulationService', () => {
       },
       gameProfile,
       botProfiles: [customProfile, ...boundaryBotProfiles]
-    });
+    }).sessionId;
 
     const sessionDirectory = service.listSessions().find(
       (session) => session.sessionId === sessionId
@@ -1841,7 +2324,7 @@ describe('SimulationService', () => {
       })
     ]);
 
-    const restartedService = new SimulationService({ reportRoot, systemSnapshot });
+    const restartedService = new TestSimulationService({ reportRoot, systemSnapshot });
     expect(restartedService.getBotStatuses(sessionId)[0]).toMatchObject({
       profileId: customProfile.profileId
     });
@@ -1854,7 +2337,7 @@ describe('SimulationService', () => {
     vi.useFakeTimers();
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-github-export-'));
     const openedPaths: string[] = [];
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot,
@@ -1906,7 +2389,7 @@ describe('SimulationService', () => {
   it('does not post GitHub issues without explicit confirmation', async () => {
     vi.useFakeTimers();
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-github-post-'));
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot
@@ -1947,14 +2430,17 @@ describe('SimulationService', () => {
   it('gracefully shuts down active sessions and preserves partial reports', async () => {
     vi.useFakeTimers();
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-shutdown-'));
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       now: () => new Date('2026-07-04T09:00:00.000Z').toISOString(),
       systemSnapshot
     });
     const interruptedRunConfig: SimulationRunConfig = {
       ...runConfig,
-      sessionId: 'session-interrupted'
+      sessionId: 'session-interrupted',
+      runUntilStopped: true,
+      stopOnCriticalIssue: false,
+      maxActionsPerBot: undefined
     };
 
     service.createSession({ runConfig: interruptedRunConfig, gameProfile, botProfiles });
@@ -1968,19 +2454,20 @@ describe('SimulationService', () => {
     const sessionEvents = parseJsonl(await readFile(logs.logsPath, 'utf8'));
     const summary = await readFile(report.reportPath, 'utf8');
 
-    expect(snapshots.find((snapshot) => snapshot.sessionId === interruptedRunConfig.sessionId)?.status).toBe('stopped');
+    expect(snapshots.find((snapshot) => snapshot.sessionId === interruptedRunConfig.sessionId)?.status).toBe('failed');
     expect(service.getBotStatuses(interruptedRunConfig.sessionId).every((bot) => bot.status === 'stopped')).toBe(true);
     expect((await service.getInstanceStatuses(interruptedRunConfig.sessionId)).every((instance) => instance.status === 'stopped')).toBe(true);
     expect(sessionEvents.some((event) => event.eventType === 'manual_stop')).toBe(true);
     expect(sessionEvents.some((event) => event.eventType === 'session_stop')).toBe(true);
     expect(summary).toContain('GameplaySimulator Session');
     expect(summary).toContain('session-interrupted');
+    expect(summary).toContain('Shutdown reason: test_shutdown');
   });
 
   it('does not open evidence outside the selected session directory', async () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-evidence-boundary-'));
     const openedPaths: string[] = [];
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       systemSnapshot,
       openPath: async (path) => {
@@ -2012,7 +2499,7 @@ describe('SimulationService', () => {
   it('opens only existing evidence files, not session directories', async () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-evidence-file-'));
     const openedPaths: string[] = [];
-    const service = new SimulationService({
+    const service = new TestSimulationService({
       reportRoot,
       systemSnapshot,
       openPath: async (path) => {
@@ -2041,5 +2528,43 @@ describe('SimulationService', () => {
     expect(directoryResult.opened).toBe(false);
     expect(missingResult.opened).toBe(false);
     expect(openedPaths).toEqual([]);
+  });
+
+  it('loads structured logs in bounded pages and reports corrupt JSONL lines', async () => {
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-log-pages-'));
+    const service = new TestSimulationService({ reportRoot, systemSnapshot });
+    const created = service.createSession({
+      runConfig: {
+        ...runConfig,
+        sessionId: 'session-log-pages'
+      },
+      gameProfile,
+      botProfiles
+    });
+    const metadata = service.listSessions().find((session) => session.sessionId === created.sessionId)!;
+    const logPath = metadata.reportPaths.fullStructuredLogs!;
+    const generated = Array.from({ length: 620 }, (_, index) => JSON.stringify({
+      bundleSource: 'session',
+      eventId: `generated-${index}`,
+      eventType: 'resource_warning',
+      sessionId: created.sessionId,
+      timestamp: new Date(index).toISOString(),
+      payload: { index }
+    })).join('\n');
+    await appendFile(logPath, `${generated}\n{broken-json\n`, 'utf8');
+
+    const latest = await service.getStructuredLogs(created.sessionId, { limit: 100 });
+    const older = await service.getStructuredLogs(created.sessionId, {
+      before: latest.nextCursor,
+      limit: 100
+    });
+
+    expect(latest.logs).toHaveLength(100);
+    expect(latest.totalValidRecords).toBeGreaterThanOrEqual(620);
+    expect(latest.corruptLineCount).toBe(1);
+    expect(latest.incomplete).toBe(true);
+    expect(latest.nextCursor).toBeDefined();
+    expect(older.logs).toHaveLength(100);
+    expect(older.logs.at(-1)?.raw.eventId).not.toBe(latest.logs[0]?.raw.eventId);
   });
 });
