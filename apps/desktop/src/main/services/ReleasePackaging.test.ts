@@ -133,6 +133,9 @@ describe('release packaging configuration', () => {
     expect(packagedSmoke).toContain('adapter_launch_failed');
     expect(packagedSmoke).toContain('removeTemporaryDirectory');
     expect(packagedSmoke).toContain("maxRetries: process.platform === 'win32' ? 20 : 0");
+    expect(packagedSmoke).toContain("Status: 'NotSigned'");
+    expect(packagedSmoke).toContain('The PE certificate table is empty.');
+    expect(packagedSmoke).not.toContain('Get-AuthenticodeSignature');
     expect(packagedSmoke).toContain('windowsLaunchIdentity');
     expect(packagedSmoke).toContain('active-shutdown session');
     expect(packagedSmoke).toContain('startInstrumentedExample');

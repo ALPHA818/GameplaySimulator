@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access, copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { constants, createReadStream } from 'node:fs';
 import { platform as osPlatform, release as osRelease, tmpdir, version as osVersion } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -848,22 +848,46 @@ async function windowsAuthenticodeStatus(artifactPath) {
     return undefined;
   }
 
-  const command = [
-    '$signature = Get-AuthenticodeSignature -LiteralPath $env:GAMEPLAY_SIMULATOR_ARTIFACT',
-    "[PSCustomObject]@{ Status = $signature.Status.ToString(); StatusMessage = $signature.StatusMessage; Signer = $signature.SignerCertificate.Subject } | ConvertTo-Json -Compress"
-  ].join('\n');
-  const { stdout } = await execFileAsync(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', command],
-    {
-      env: {
-        ...process.env,
-        GAMEPLAY_SIMULATOR_ARTIFACT: artifactPath
-      },
-      windowsHide: true
+  const handle = await open(artifactPath, 'r');
+  try {
+    const dosHeader = Buffer.alloc(64);
+    await handle.read(dosHeader, 0, dosHeader.length, 0);
+    if (dosHeader.toString('ascii', 0, 2) !== 'MZ') {
+      throw new Error('The Windows artifact does not contain a valid DOS/PE header.');
     }
-  );
-  return stdout.trim() ? JSON.parse(stdout) : { Status: 'Unknown' };
+    const peOffset = dosHeader.readUInt32LE(0x3c);
+    if (peOffset > 1024 * 1024) {
+      throw new Error('The Windows artifact PE header is outside the permitted inspection range.');
+    }
+    const peHeader = Buffer.alloc(256);
+    await handle.read(peHeader, 0, peHeader.length, peOffset);
+    if (peHeader.toString('ascii', 0, 4) !== 'PE\0\0') {
+      throw new Error('The Windows artifact does not contain a valid PE signature.');
+    }
+    const optionalHeaderOffset = 24;
+    const optionalHeaderMagic = peHeader.readUInt16LE(optionalHeaderOffset);
+    const dataDirectoryOffset = optionalHeaderOffset + (
+      optionalHeaderMagic === 0x20b ? 112 : optionalHeaderMagic === 0x10b ? 96 : 0
+    );
+    if (dataDirectoryOffset === optionalHeaderOffset) {
+      throw new Error(`The Windows artifact uses an unknown PE optional-header format: ${optionalHeaderMagic}.`);
+    }
+    const certificateTableOffset = dataDirectoryOffset + (4 * 8);
+    const certificateSize = peHeader.readUInt32LE(certificateTableOffset + 4);
+    return certificateSize === 0
+      ? {
+          Status: 'NotSigned',
+          StatusMessage: 'The PE certificate table is empty.',
+          Signer: null
+        }
+      : {
+          Status: 'SignaturePresentUnverified',
+          StatusMessage: 'The PE certificate table contains data; cryptographic trust was not verified.',
+          Signer: null
+        };
+  } finally {
+    await handle.close();
+  }
 }
 
 async function windowsLaunchIdentity() {
