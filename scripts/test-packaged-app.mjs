@@ -1193,7 +1193,13 @@ try {
     (path) => path.toLowerCase().endsWith('.png')
   );
   if (savedScreenshots.length === 0) {
-    throw new Error('The packaged browser session did not save screenshot evidence.');
+    const screenshotLogs = firstResult.structuredLogs.logs.filter(
+      (log) => typeof log.raw?.payload?.screenshotPath === 'string' ||
+        log.raw?.payload?.evidence === 'fallback_screenshot'
+    );
+    throw new Error(
+      `The packaged browser session did not save real PNG screenshot evidence: ${JSON.stringify(screenshotLogs)}`
+    );
   }
 
   await firstApplication.close();
