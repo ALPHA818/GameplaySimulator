@@ -147,6 +147,7 @@ describe('release packaging configuration', () => {
     expect(standardUserSmoke).toContain('launch-standard-user-smoke.ps1');
     expect(standardUserSmoke).toContain("-File `\"$launcherPath`\"");
     expect(standardUserSmoke).not.toContain('-EncodedCommand');
+    expect(standardUserSmoke).toContain('$childProcess.ExitCode -ne 0');
     expect(standardUserSmoke).toContain('standardUserLaunch = \'passed\'');
   });
 

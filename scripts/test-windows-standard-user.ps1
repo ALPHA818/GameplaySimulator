@@ -58,8 +58,8 @@ exit `$LASTEXITCODE
 
   $deadline = [DateTime]::UtcNow.AddSeconds(90)
   while (-not (Test-Path -LiteralPath $markerPath) -and [DateTime]::UtcNow -lt $deadline) {
-    if ($childProcess.HasExited) {
-      throw "The portable application exited with code $($childProcess.ExitCode) before its standard-user readiness marker was written."
+    if ($childProcess.HasExited -and $childProcess.ExitCode -ne 0) {
+      throw "The portable launcher exited with code $($childProcess.ExitCode) before its standard-user readiness marker was written."
     }
     Start-Sleep -Milliseconds 250
   }
