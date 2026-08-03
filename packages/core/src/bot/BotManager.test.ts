@@ -337,7 +337,18 @@ describe('BotManager', () => {
   });
 
   it('keeps an adapter failure terminal while the bot loop unwinds', async () => {
-    vi.useFakeTimers();
+    let resolveAction: ((result: ActionResult) => void) | undefined;
+    let actionStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      actionStarted = resolve;
+    });
+    const adapter = new ManagerTestAdapter();
+    vi.spyOn(adapter, 'performAction').mockImplementation((_instanceId, botId, action) => {
+      actionStarted?.();
+      return new Promise<ActionResult>((resolve) => {
+        resolveAction = resolve;
+      });
+    });
 
     const manager = new BotManager({
       sessionId: 'session-manager',
@@ -348,12 +359,12 @@ describe('BotManager', () => {
       }),
       launchPlans: [plan('explorer-001', 'explorer', 1)],
       botProfiles: profiles,
-      adapter: new ManagerTestAdapter(),
+      adapter,
       now: () => '2026-07-04T10:00:00.000Z'
     });
 
     manager.startAll();
-    await vi.advanceTimersByTimeAsync(0);
+    await started;
 
     expect(manager.failBot('explorer-001', 'Game instance connection lost.')).toBe(true);
     expect(manager.getStatusSnapshots()[0]).toMatchObject({
@@ -361,9 +372,21 @@ describe('BotManager', () => {
       message: 'Game instance connection lost.'
     });
 
-    await vi.advanceTimersByTimeAsync(1000);
+    resolveAction?.({
+      actionId: 'interrupted-action',
+      botId: 'explorer-001',
+      status: 'failed',
+      startedAt: '2026-07-04T10:00:00.000Z',
+      completedAt: '2026-07-04T10:00:00.000Z',
+      durationMs: 1,
+      message: 'Request aborted because the adapter instance is stopping.',
+      issueIds: []
+    });
     await manager.whenIdle();
-    expect(manager.getStatusSnapshots()[0].status).toBe('failed');
+    expect(manager.getStatusSnapshots()[0]).toMatchObject({
+      status: 'failed',
+      message: 'Game instance connection lost.'
+    });
   });
 
   it('ignores the ordinary per-bot action limit when run until stopped is enabled', async () => {
