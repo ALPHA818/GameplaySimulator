@@ -951,6 +951,16 @@ try {
     if (['created', 'starting', 'running', 'paused'].includes(status.status)) {
       status = await window.gameplaySimulator.simulation.stopSession(runtimeSessionId);
     }
+    if (status.status === 'stopping') {
+      const stopDeadline = Date.now() + 20_000;
+      while (Date.now() < stopDeadline && status.status === 'stopping') {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+        status = await window.gameplaySimulator.simulation.getSessionStatus(runtimeSessionId);
+      }
+    }
+    if (!['stopped', 'failed'].includes(status.status)) {
+      throw new Error(`The packaged browser session did not reach a terminal state: ${JSON.stringify(status)}`);
+    }
 
     const instrumentedCreated = await window.gameplaySimulator.simulation.createSession({
       runConfig: instrumentedConfig,
@@ -982,6 +992,20 @@ try {
     if (['created', 'starting', 'running', 'paused'].includes(instrumentedStatus.status)) {
       instrumentedStatus = await window.gameplaySimulator.simulation.stopSession(
         instrumentedSessionId
+      );
+    }
+    if (instrumentedStatus.status === 'stopping') {
+      const stopDeadline = Date.now() + 20_000;
+      while (Date.now() < stopDeadline && instrumentedStatus.status === 'stopping') {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+        instrumentedStatus = await window.gameplaySimulator.simulation.getSessionStatus(
+          instrumentedSessionId
+        );
+      }
+    }
+    if (!['stopped', 'failed'].includes(instrumentedStatus.status)) {
+      throw new Error(
+        `The packaged instrumented session did not reach a terminal state: ${JSON.stringify(instrumentedStatus)}`
       );
     }
     const instrumentedLogs = await window.gameplaySimulator.simulation.getStructuredLogs(
