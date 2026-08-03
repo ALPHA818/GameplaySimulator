@@ -190,5 +190,10 @@ describe('release packaging configuration', () => {
     expect(packagingScript).toContain('verify-release-artifacts.mjs');
     expect(verificationScript).toContain('packageVersion');
     expect(verificationScript).toContain('exactly one current');
+    const afterPackScript = readFileSync(
+      resolve(projectRoot, 'scripts/after-pack.cjs'),
+      'utf8'
+    );
+    expect(afterPackScript).toContain("path.replaceAll('\\\\', '/')");
   });
 });

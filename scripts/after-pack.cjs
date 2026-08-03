@@ -27,7 +27,7 @@ exec "\${BIN}" "$@"
 module.exports = async function installSandboxedAppImageLauncher(context) {
   const sourceLicense = await readFile(join(context.packager.projectDir, 'LICENSE'), 'utf8');
   const asarPath = join(context.appOutDir, 'resources', 'app.asar');
-  const packagedFiles = listPackage(asarPath);
+  const packagedFiles = listPackage(asarPath).map((path) => path.replaceAll('\\', '/'));
 
   if (!packagedFiles.includes('/LICENSE')) {
     throw new Error('The packaged application is missing the root MIT LICENSE file.');
