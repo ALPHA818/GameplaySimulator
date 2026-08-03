@@ -4760,7 +4760,10 @@ export class SimulationService {
             continue;
           }
 
-          record.botManager.stopBot(botId);
+          record.botManager.failBot(
+            botId,
+            `Game instance connection lost because ${instance.instanceId} is ${instance.status}.`
+          );
           record.botStatuses = record.botStatuses.map((candidate) =>
             candidate.botId === botId
               ? {

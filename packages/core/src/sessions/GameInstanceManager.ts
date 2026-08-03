@@ -174,8 +174,7 @@ function joinPath(...parts: Array<string | undefined>): string {
 
   const separator = pathSeparatorFor(...filtered);
   const joined = filtered.join(separator);
-  const duplicateSeparatorPattern = separator === '\\' ? /\\+/g : /\/+/g;
-  const normalized = joined.replace(duplicateSeparatorPattern, separator);
+  const normalized = joined.replace(/[\\/]+/g, separator);
 
   return /^[a-zA-Z]:[\\/]/.test(joined) && !/^[a-zA-Z]:[\\/]/.test(normalized)
     ? joined.slice(0, 3) + normalized.slice(3)

@@ -1,6 +1,7 @@
 import type { ControlBinding, GameAction, GameInstanceConfig } from '@core/types';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { BrowserAdapter } from './BrowserAdapter';
 
@@ -475,7 +476,7 @@ describe('BrowserAdapter', () => {
     const adapter = new BrowserAdapter({
       browserLauncher: launcher,
       includeActionIndicatorsInScreenshots: false,
-      screenshotDirectory: '/tmp/gameplay-simulator-browser-indicator-test'
+      screenshotDirectory: join(tmpdir(), 'gameplay-simulator-browser-indicator-test')
     });
     await adapter.launchInstance(instanceConfig);
 
@@ -712,10 +713,11 @@ describe('BrowserAdapter', () => {
 
   it('falls back to mapped keyboard/mouse input, reload, wait, screenshot, and clean stop', async () => {
     const launcher = new FakeLauncher();
+    const screenshotDirectory = join(tmpdir(), 'gameplay-simulator-browser-test');
     const adapter = new BrowserAdapter({
       browserLauncher: launcher,
       controlBindings: controls,
-      screenshotDirectory: '/tmp/gameplay-simulator-browser-test'
+      screenshotDirectory
     });
     await adapter.launchInstance(instanceConfig);
     launcher.page.evaluate = async <T,>() => null as T;
@@ -738,7 +740,7 @@ describe('BrowserAdapter', () => {
     expect(waitResult.status).toBe('succeeded');
     expect(launcher.page.keyboard.pressed).toContain('Space');
     expect(launcher.page.mouse.clicked[0]).toMatchObject({ x: 500, y: 400, button: 'left' });
-    expect(screenshot.path).toContain('/tmp/gameplay-simulator-browser-test');
+    expect(dirname(screenshot.path!)).toBe(screenshotDirectory);
 
     await adapter.stopInstance(instanceConfig.instanceId);
 

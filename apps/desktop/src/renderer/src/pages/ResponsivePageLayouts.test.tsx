@@ -12,7 +12,7 @@ import { NewSessionPage } from './NewSessionPage';
 const globalCss = readFileSync(
   resolve(process.cwd(), 'apps/desktop/src/renderer/src/styles/global.css'),
   'utf8'
-);
+).replace(/\r\n/g, '\n');
 
 function cssBlock(selector: string): string {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

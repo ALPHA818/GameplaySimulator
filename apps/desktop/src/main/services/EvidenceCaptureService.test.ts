@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { GameAdapter, GameAdapterInstance, ScreenshotCapture } from '../../../../../packages/adapters/src';
 import type { ActionResult, GameAction, GameInstanceConfig, GameStateSnapshot } from '@core/types';
 import { describe, expect, it } from 'vitest';
@@ -131,7 +131,7 @@ describe('EvidenceCaptureService', () => {
     expect(result.path?.endsWith('.png')).toBe(true);
     expect(result.captureScope).toBe('game-window');
     expect(result.path ? await readFile(result.path) : Buffer.alloc(0)).toEqual(VALID_PNG);
-    expect(result.path?.startsWith(`${screenshotsDir}/`)).toBe(true);
+    expect(dirname(result.path ?? '')).toBe(screenshotsDir);
   });
 
   it('writes fallback SVG evidence when adapter screenshots fail', async () => {
@@ -214,7 +214,7 @@ describe('EvidenceCaptureService', () => {
 
     expect(result.kind).toBe('fallback_svg');
     expect(result.message).toMatch(/MIME type does not match PNG/i);
-    expect(result.path?.startsWith(`${screenshotsDir}/`)).toBe(true);
+    expect(dirname(result.path ?? '')).toBe(screenshotsDir);
   });
 
   it('chooses a safe JPEG extension from validated bytes', async () => {
@@ -243,7 +243,8 @@ describe('EvidenceCaptureService', () => {
     });
 
     expect(result.kind).toBe('adapter_screenshot');
-    expect(result.path?.startsWith(`${screenshotsDir}/issue-detected-`)).toBe(true);
+    expect(dirname(result.path ?? '')).toBe(screenshotsDir);
+    expect(basename(result.path ?? '')).toMatch(/^issue-detected-/);
     expect(result.path?.endsWith('.jpg')).toBe(true);
     expect(result.mimeType).toBe('image/jpeg');
   });
