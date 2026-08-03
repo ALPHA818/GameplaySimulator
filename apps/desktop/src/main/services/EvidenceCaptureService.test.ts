@@ -162,6 +162,37 @@ describe('EvidenceCaptureService', () => {
     expect(result.path ? await readFile(result.path, 'utf8') : '').toContain('Fallback/debug evidence');
   });
 
+  it('retries one transient adapter screenshot failure before using fallback evidence', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'gameplay-simulator-evidence-retry-'));
+    const sourcePath = join(tempDir, 'adapter.png');
+    const screenshotsDir = join(tempDir, 'bots', 'explorer-001', 'screenshots');
+    await writeFile(sourcePath, VALID_PNG);
+    const adapter = new ScreenshotAdapter(sourcePath);
+    let attempts = 0;
+    const captureScreenshot = adapter.captureScreenshot.bind(adapter);
+    adapter.captureScreenshot = async (instanceId, botId) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error('headed browser capture was temporarily unavailable');
+      }
+      return captureScreenshot(instanceId, botId);
+    };
+    const service = new EvidenceCaptureService({ adapter, approvedSessionRoot: tempDir });
+
+    const result = await service.captureScreenshot({
+      sessionId: 'session-evidence-retry',
+      botId: 'explorer-001',
+      instanceId: 'game-instance-001',
+      reason: 'action-1',
+      screenshotsDir
+    });
+
+    expect(attempts).toBe(2);
+    expect(result.kind).toBe('adapter_screenshot');
+    expect(result.fallback).toBe(false);
+    expect(result.path ? await readFile(result.path) : Buffer.alloc(0)).toEqual(VALID_PNG);
+  });
+
   it('bounds a screenshot adapter that never responds', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'gameplay-simulator-evidence-timeout-'));
     const screenshotsDir = join(tempDir, 'bots', 'explorer-001', 'screenshots');

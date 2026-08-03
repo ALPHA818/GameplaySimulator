@@ -196,17 +196,27 @@ export class EvidenceCaptureService {
     };
 
     if (this.adapter?.capabilities.supportsScreenshots && this.adapter.captureScreenshot && context.instanceId) {
-      try {
-        const capture = await runBoundedAdapterRequest({
-          operation: 'Adapter evidence capture',
-          timeoutMs: this.requestPolicy.timeouts.evidenceMs,
-          request: () => this.adapter!.captureScreenshot!(context.instanceId!, context.botId!)
-        });
-        return await this.persistAdapterCapture(boundedContext, capture);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Adapter screenshot capture failed.';
-        return this.writeFallback(boundedContext, message);
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          const capture = await runBoundedAdapterRequest({
+            operation: 'Adapter evidence capture',
+            timeoutMs: this.requestPolicy.timeouts.evidenceMs,
+            request: () => this.adapter!.captureScreenshot!(context.instanceId!, context.botId!)
+          });
+          return await this.persistAdapterCapture(boundedContext, capture);
+        } catch (error) {
+          lastError = error;
+          if (attempt === 1) {
+            await new Promise((resolveRetry) => setTimeout(resolveRetry, 100));
+          }
+        }
       }
+
+      const message = lastError instanceof Error
+        ? `${lastError.message} Screenshot capture was retried once.`
+        : 'Adapter screenshot capture failed after one retry.';
+      return this.writeFallback(boundedContext, message);
     }
 
     return this.writeFallback(boundedContext, 'Adapter screenshots are not available for this session.');

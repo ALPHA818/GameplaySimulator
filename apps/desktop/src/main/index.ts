@@ -173,6 +173,7 @@ app.whenReady().then(() => {
         readyAt: new Date().toISOString(),
         user: userInfo().username,
         environmentUser: `${process.env.USERDOMAIN ?? ''}\\${process.env.USERNAME ?? ''}`,
+        processId: process.pid,
         userDataPath: paths.userDataRoot,
         rendererLoaded: true
       }, null, 2)}\n`, 'utf8');

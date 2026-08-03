@@ -12,6 +12,32 @@ if ([IO.Path]::GetFileName($artifact) -cne $expectedName) {
   throw "Standard-user validation requires $expectedName, not $([IO.Path]::GetFileName($artifact))."
 }
 
+function Get-OwnedProcessTreeIds {
+  param([int[]]$RootProcessIds)
+
+  $knownIds = [Collections.Generic.HashSet[int]]::new()
+  foreach ($rootProcessId in $RootProcessIds) {
+    if ($rootProcessId -gt 0) {
+      [void]$knownIds.Add($rootProcessId)
+    }
+  }
+
+  $processes = @(Get-CimInstance Win32_Process)
+  do {
+    $addedProcess = $false
+    foreach ($process in $processes) {
+      if (
+        $knownIds.Contains([int]$process.ParentProcessId) -and
+        $knownIds.Add([int]$process.ProcessId)
+      ) {
+        $addedProcess = $true
+      }
+    }
+  } while ($addedProcess)
+
+  return @($knownIds | ForEach-Object { [int]$_ })
+}
+
 $suffix = [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $testUser = "GSimRelease$suffix"
 $plainPassword = "Gs!$([Guid]::NewGuid().ToString('N'))"
@@ -71,18 +97,25 @@ exit `$LASTEXITCODE
   if ($marker.rendererLoaded -ne $true -or $marker.user -ine $testUser) {
     throw "The standard-user readiness marker was invalid: $($marker | ConvertTo-Json -Compress)"
   }
-  $ownedProcessIds = @(Get-CimInstance Win32_Process | Where-Object {
-    $_.Name -like 'GameplaySimulator*.exe'
-  } | Select-Object -ExpandProperty ProcessId)
   if (-not $childProcess.WaitForExit(30000)) {
     throw 'The portable application did not close after the standard-user smoke check.'
   }
 
-  $ownedProcesses = @(Get-CimInstance Win32_Process | Where-Object {
-    $_.Name -like 'GameplaySimulator*.exe'
-  })
-  if ($ownedProcesses.Count -ne 0) {
-    throw "The standard-user smoke check left owned processes running: $($ownedProcesses.ProcessId -join ', ')."
+  $ownedProcessRoots = @($childProcess.Id, [int]$marker.processId)
+  $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(30)
+  do {
+    $ownedProcessIds = @(Get-OwnedProcessTreeIds -RootProcessIds ($ownedProcessRoots + $ownedProcessIds))
+    $runningOwnedProcessIds = @($ownedProcessIds | Where-Object {
+      Get-Process -Id $_ -ErrorAction SilentlyContinue
+    })
+    if ($runningOwnedProcessIds.Count -eq 0) {
+      break
+    }
+    Start-Sleep -Milliseconds 250
+  } while ([DateTime]::UtcNow -lt $cleanupDeadline)
+
+  if ($runningOwnedProcessIds.Count -ne 0) {
+    throw "The standard-user smoke check left owned processes running: $($runningOwnedProcessIds -join ', ')."
   }
 
   $validation = [ordered]@{
