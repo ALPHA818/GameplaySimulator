@@ -8,9 +8,9 @@ Commit `8bdf676`, which currently carries the local `v0.1.0` tag, incorrectly de
 
 | Corrected path | Incorrect earlier claim | Fix commit |
 | --- | --- | --- |
-| Session deadline and run-until-stopped lifecycle | The broad Session lifecycle row was marked working without deadline or run-until-stopped enforcement. | `c071b1f50d6c8c624bec790a8466c6f263aa89b8` |
-| Action timeline and state snapshot artifact gates | Reports were described as using persisted configuration even when disabled artifact settings were not fully honored. | `c071b1f50d6c8c624bec790a8466c6f263aa89b8` |
-| Exact-or-block resource allocation | Resource limits were described as fully connected before `allowAutoScaling: false` prevented silent reductions. | `c071b1f50d6c8c624bec790a8466c6f263aa89b8` |
+| Session deadline and run-until-stopped lifecycle | The broad Session lifecycle row was marked working without deadline or run-until-stopped enforcement. | `aa81065ca7946ebb82d47c866daea50bc94afa21` |
+| Action timeline and state snapshot artifact gates | Reports were described as using persisted configuration even when disabled artifact settings were not fully honored. | `aa81065ca7946ebb82d47c866daea50bc94afa21` |
+| Exact-or-block resource allocation | Resource limits were described as fully connected before `allowAutoScaling: false` prevented silent reductions. | `aa81065ca7946ebb82d47c866daea50bc94afa21` |
 
 The exact fix commit is now recorded. The local `v0.1.0` tag must not move or be published until the final documentation commit passes clean Linux and Windows package validation.
 
