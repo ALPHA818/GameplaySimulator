@@ -1,4 +1,5 @@
 import type { LogEntry } from '@core/logging/LogEntry';
+import { assertResolvedPathWithin } from '@core/security/pathContainment';
 import {
   defaultRuntimeObservationConfig,
   type RuntimeObservationConfig
@@ -13,11 +14,20 @@ import type {
   GameInstanceConfig,
   GameStateSnapshot
 } from '@core/types';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { chromium, firefox, webkit } from 'playwright';
 import { BaseGameAdapter } from '../base/BaseGameAdapter';
+import {
+  AdapterRequestBoundaryError,
+  adapterRequestEventType,
+  assertAdapterResponseSize,
+  resolveAdapterRequestPolicy,
+  runBoundedAdapterRequest,
+  type AdapterRequestPolicy,
+  type AdapterRequestPolicyInput
+} from '../base/AdapterRequestPolicy';
 import type {
   AdapterCapabilities,
   AdapterHealth,
@@ -95,7 +105,7 @@ interface PageLike {
   url(): string;
   title(): Promise<string>;
   evaluate<T>(pageFunction: string | ((arg: any) => T | Promise<T>), arg?: unknown): Promise<T>;
-  screenshot(options: { path: string; fullPage?: boolean }): Promise<Buffer>;
+  screenshot(options: { path?: string; fullPage?: boolean }): Promise<Buffer>;
   reload(options?: Record<string, unknown>): Promise<unknown>;
   waitForTimeout(timeoutMs: number): Promise<void>;
   close(): Promise<void>;
@@ -136,6 +146,9 @@ interface BrowserRuntime {
   visibleWindowNumber?: number;
   watchedBotId?: string;
   adapterLogs: LogEntry[];
+  activeRequestControllers: Set<AbortController>;
+  stopping: boolean;
+  logSizeWarningEmitted: boolean;
 }
 
 export interface BrowserAdapterOptions {
@@ -156,6 +169,7 @@ export interface BrowserAdapterOptions {
   runtimeObservation?: RuntimeObservationConfig;
   includeActionIndicatorsInScreenshots?: boolean;
   capabilities?: Partial<AdapterCapabilities>;
+  requestPolicy?: AdapterRequestPolicyInput;
 }
 
 function now(): string {
@@ -168,6 +182,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalize(value: string | undefined): string {
   return (value ?? '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+}
+
+function safePathSegment(value: string): string {
+  return value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'unknown';
 }
 
 function normalizeKeyboardBinding(binding: string): string {
@@ -194,6 +212,39 @@ function normalizeKeyboardBinding(binding: string): string {
   };
 
   return aliases[normalized] ?? (binding.length === 1 ? binding.toUpperCase() : binding);
+}
+
+const forbiddenChromiumSandboxArguments = new Set([
+  '--no-sandbox',
+  '--disable-setuid-sandbox'
+]);
+
+function sandboxedChromiumLaunchOptions(
+  launchOptions: Record<string, unknown>
+): Record<string, unknown> {
+  if (launchOptions.chromiumSandbox === false) {
+    throw new Error('BrowserAdapter cannot disable the Chromium sandbox.');
+  }
+
+  const args = launchOptions.args;
+  if (args !== undefined && !Array.isArray(args)) {
+    throw new Error('BrowserAdapter launchOptions.args must be an array of strings.');
+  }
+
+  for (const argument of args ?? []) {
+    if (typeof argument !== 'string') {
+      throw new Error('BrowserAdapter launchOptions.args must contain only strings.');
+    }
+    const flag = argument.split('=', 1)[0];
+    if (forbiddenChromiumSandboxArguments.has(flag)) {
+      throw new Error(`BrowserAdapter cannot use Chromium sandbox bypass ${flag}.`);
+    }
+  }
+
+  return {
+    ...launchOptions,
+    chromiumSandbox: true
+  };
 }
 
 function bindingIsMouse(binding: string | undefined): boolean {
@@ -373,6 +424,7 @@ export class BrowserAdapter extends BaseGameAdapter {
   private readonly launchOptions: Record<string, unknown>;
   private readonly runtimeObservation: RuntimeObservationConfig;
   private readonly includeActionIndicatorsInScreenshots: boolean;
+  private readonly requestPolicy: AdapterRequestPolicy;
   private readonly browserInstances = new Map<string, BrowserRuntime>();
   private readonly stoppedInstanceLogs = new Map<string, LogEntry[]>();
 
@@ -430,14 +482,18 @@ export class BrowserAdapter extends BaseGameAdapter {
       join(tmpdir(), 'gameplay-simulator', 'browser-screenshots');
     this.headless = options.headless ?? true;
     this.contextOptions = options.contextOptions ?? {};
-    this.launchOptions = {
+    const launchOptions = {
       ...(packagedChromiumExecutable
         ? { executablePath: packagedChromiumExecutable }
         : {}),
       ...options.launchOptions
     };
+    this.launchOptions = this.browserKind === 'chromium'
+      ? sandboxedChromiumLaunchOptions(launchOptions)
+      : launchOptions;
     this.runtimeObservation = options.runtimeObservation ?? defaultRuntimeObservationConfig;
     this.includeActionIndicatorsInScreenshots = options.includeActionIndicatorsInScreenshots ?? true;
+    this.requestPolicy = resolveAdapterRequestPolicy(options.requestPolicy);
   }
 
   private shouldLaunchVisibleInstance(): boolean {
@@ -477,12 +533,20 @@ export class BrowserAdapter extends BaseGameAdapter {
     let browser: BrowserLike;
 
     try {
-      browser = await this.browserLauncher.launch({
-        ...this.launchOptions,
-        headless: !visible,
-        ...(visible && this.runtimeObservation.visibleActionDelayMs > 0
-          ? { slowMo: this.runtimeObservation.visibleActionDelayMs }
-          : {})
+      browser = await runBoundedAdapterRequest({
+        operation: 'Browser launch',
+        timeoutMs: this.requestPolicy.timeouts.connectMs,
+        request: () => this.browserLauncher.launch({
+          ...this.launchOptions,
+          timeout: Math.min(
+            numericValue(this.launchOptions.timeout) ?? this.requestPolicy.timeouts.connectMs,
+            this.requestPolicy.timeouts.connectMs
+          ),
+          headless: !visible,
+          ...(visible && this.runtimeObservation.visibleActionDelayMs > 0
+            ? { slowMo: this.runtimeObservation.visibleActionDelayMs }
+            : {})
+        })
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown Playwright launch error.';
@@ -499,11 +563,18 @@ export class BrowserAdapter extends BaseGameAdapter {
     let page!: PageLike;
 
     try {
-      context = await browser.newContext(this.contextOptions);
-      page = await context.newPage();
+      context = await runBoundedAdapterRequest({
+        operation: 'Browser context creation',
+        timeoutMs: this.requestPolicy.timeouts.connectMs,
+        request: () => browser.newContext(this.contextOptions)
+      });
+      page = await runBoundedAdapterRequest({
+        operation: 'Browser page creation',
+        timeoutMs: this.requestPolicy.timeouts.connectMs,
+        request: () => context.newPage()
+      });
     } catch (error) {
-      await context?.close().catch(() => undefined);
-      await browser.close().catch(() => undefined);
+      await this.closeBrowserResources(page, context, browser);
       const message = error instanceof Error ? error.message : 'Browser context creation failed.';
       throw new Error(
         visible
@@ -524,6 +595,9 @@ export class BrowserAdapter extends BaseGameAdapter {
       headless: !visible,
       visibleWindowNumber,
       adapterLogs: [],
+      activeRequestControllers: new Set(),
+      stopping: false,
+      logSizeWarningEmitted: false,
       openedAt,
       lastHeartbeatAt: openedAt
     };
@@ -550,11 +624,19 @@ export class BrowserAdapter extends BaseGameAdapter {
 
     this.attachPageListeners(runtime);
     try {
-      await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+      await this.runBrowserRequest(
+        runtime,
+        config.instanceId,
+        'Browser page navigation',
+        this.requestPolicy.timeouts.connectMs,
+        undefined,
+        () => page.goto(targetUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: this.requestPolicy.timeouts.connectMs
+        })
+      );
     } catch (error) {
-      await page.close().catch(() => undefined);
-      await context.close().catch(() => undefined);
-      await browser.close().catch(() => undefined);
+      await this.closeBrowserResources(page, context, browser);
       runtime.closed = true;
       const message = error instanceof Error ? error.message : 'Browser page navigation failed.';
       throw new Error(
@@ -596,6 +678,8 @@ export class BrowserAdapter extends BaseGameAdapter {
     const closeErrors: string[] = [];
 
     if (runtime) {
+      runtime.stopping = true;
+      this.abortBrowserRequests(runtime, instanceId);
       if (runtime.visible && !runtime.closed) {
         this.pushAdapterLog(
           runtime,
@@ -604,17 +688,30 @@ export class BrowserAdapter extends BaseGameAdapter {
           `Visible browser window ${runtime.visibleWindowNumber ?? 1} stopped for ${instanceId}.`
         );
       }
-      for (const close of [
-        () => runtime.page.close(),
-        () => runtime.context.close(),
-        () => runtime.browser.close()
-      ]) {
-        try {
-          await close();
-        } catch (error) {
-          if (!isAlreadyClosedCleanupError(error)) {
-            closeErrors.push(error instanceof Error ? error.message : String(error));
+      try {
+        const shutdownDeadline = Date.now() + this.requestPolicy.timeouts.shutdownMs;
+        for (const [operation, close] of [
+          ['Browser page shutdown', () => runtime.page.close()],
+          ['Browser context shutdown', () => runtime.context.close()],
+          ['Browser process shutdown', () => runtime.browser.close()]
+        ] as const) {
+          try {
+            await runBoundedAdapterRequest({
+              operation,
+              timeoutMs: Math.max(1, shutdownDeadline - Date.now()),
+              request: close
+            });
+          } catch (error) {
+            this.recordBrowserRequestFailure(runtime, instanceId, error);
+            if (!isAlreadyClosedCleanupError(error)) {
+              closeErrors.push(error instanceof Error ? error.message : String(error));
+            }
           }
+        }
+      } catch (error) {
+        this.recordBrowserRequestFailure(runtime, instanceId, error);
+        if (!isAlreadyClosedCleanupError(error)) {
+          closeErrors.push(error instanceof Error ? error.message : String(error));
         }
       }
       runtime.closed = true;
@@ -642,6 +739,13 @@ export class BrowserAdapter extends BaseGameAdapter {
 
     if (errors.length > 0) {
       throw new Error(errors.join('; '));
+    }
+  }
+
+  abortActiveRequests(): void {
+    for (const [instanceId, runtime] of this.browserInstances) {
+      runtime.stopping = true;
+      this.abortBrowserRequests(runtime, instanceId);
     }
   }
 
@@ -677,7 +781,14 @@ export class BrowserAdapter extends BaseGameAdapter {
 
     const [url, title, uiState] = await Promise.all([
       Promise.resolve(runtime.page.url()),
-      runtime.page.title().catch(() => ''),
+      this.runBrowserRequest(
+        runtime,
+        instanceId,
+        'Browser page title read',
+        this.requestPolicy.timeouts.stateReadMs,
+        this.requestPolicy.responseSizeLimits.stateBytes,
+        () => runtime.page.title()
+      ).catch(() => ''),
       this.readBrowserUIState(runtime, undefined, instanceId, botId).catch(() => null)
     ]);
 
@@ -798,7 +909,14 @@ export class BrowserAdapter extends BaseGameAdapter {
       this.runtimeObservation.bringGameToFrontOnAction &&
       runtime.page.bringToFront
     ) {
-      await runtime.page.bringToFront().catch(() => undefined);
+      await this.runBrowserRequest(
+        runtime,
+        instanceId,
+        'Bring browser window to front',
+        this.requestPolicy.timeouts.performActionMs,
+        undefined,
+        () => runtime.page.bringToFront!()
+      ).catch(() => undefined);
     }
 
     let indicatorShown = false;
@@ -808,10 +926,11 @@ export class BrowserAdapter extends BaseGameAdapter {
       }
 
       indicatorShown = true;
-      await this.showActionIndicator(runtime, botId, action, inputOverride);
+      await this.showActionIndicator(runtime, instanceId, botId, action, inputOverride);
     };
     const hookResult = await this.tryDirectActionHook(
       runtime,
+      instanceId,
       action,
       botId,
       startedAt,
@@ -830,19 +949,42 @@ export class BrowserAdapter extends BaseGameAdapter {
       const actionType = normalize(action.type);
 
       if (actionType === 'wait') {
-        await runtime.page.waitForTimeout(numericValue(action.payload.durationMs) ?? action.timeoutMs ?? 500);
+        await this.runBrowserRequest(
+          runtime,
+          instanceId,
+          'Browser wait action',
+          this.actionRequestTimeout(action),
+          undefined,
+          () => runtime.page.waitForTimeout(
+            numericValue(action.payload.durationMs) ?? action.timeoutMs ?? 500
+          )
+        );
         return this.recordAction(runtime, action, botId, 'succeeded', startedAt, 'Waited in browser page.');
       }
 
       if (actionType === 'reload') {
-        await runtime.page.reload({ waitUntil: 'domcontentloaded' });
+        await this.runBrowserRequest(
+          runtime,
+          instanceId,
+          'Browser reload action',
+          this.actionRequestTimeout(action),
+          undefined,
+          () => runtime.page.reload({ waitUntil: 'domcontentloaded' })
+        );
         return this.recordAction(runtime, action, botId, 'succeeded', startedAt, 'Reloaded browser page.');
       }
 
       const domTarget = domTargetFromActionPayload(action.payload);
 
       if (domTarget) {
-        const domResult = await runtime.page.evaluate(clickBrowserDomTarget, domTarget);
+        const domResult = await this.runBrowserRequest(
+          runtime,
+          instanceId,
+          'Browser DOM click action',
+          this.actionRequestTimeout(action),
+          this.requestPolicy.responseSizeLimits.actionResultBytes,
+          () => runtime.page.evaluate(clickBrowserDomTarget, domTarget)
+        );
 
         if (domResult.succeeded) {
           return this.recordAction(runtime, action, botId, 'succeeded', startedAt, domResult.message);
@@ -854,7 +996,14 @@ export class BrowserAdapter extends BaseGameAdapter {
       }
 
       if (binding?.binding) {
-        await this.performMappedInput(runtime, binding);
+        await this.runBrowserRequest(
+          runtime,
+          instanceId,
+          'Browser mapped input action',
+          this.actionRequestTimeout(action),
+          undefined,
+          () => this.performMappedInput(runtime, binding)
+        );
         return this.recordAction(
           runtime,
           action,
@@ -867,18 +1016,41 @@ export class BrowserAdapter extends BaseGameAdapter {
 
       if (actionType === 'keyboard-press' || typeof action.payload.key === 'string') {
         const key = String(action.payload.key ?? action.payload.binding ?? 'Space');
-        await runtime.page.keyboard.press(normalizeKeyboardBinding(key));
+        await this.runBrowserRequest(
+          runtime,
+          instanceId,
+          'Browser keyboard action',
+          this.actionRequestTimeout(action),
+          undefined,
+          () => runtime.page.keyboard.press(normalizeKeyboardBinding(key))
+        );
         return this.recordAction(runtime, action, botId, 'succeeded', startedAt, `Pressed ${key}.`);
       }
 
       if (actionType === 'mouse-click') {
         const point = this.clickPoint(runtime, action);
-        await runtime.page.mouse.click(point.x, point.y, { button: buttonForBinding(String(action.payload.button ?? 'left')) });
+        await this.runBrowserRequest(
+          runtime,
+          instanceId,
+          'Browser mouse action',
+          this.actionRequestTimeout(action),
+          undefined,
+          () => runtime.page.mouse.click(point.x, point.y, {
+            button: buttonForBinding(String(action.payload.button ?? 'left'))
+          })
+        );
         return this.recordAction(runtime, action, botId, 'succeeded', startedAt, 'Clicked browser page.');
       }
 
       if (actionType === 'open-menu' || actionType === 'close-menu') {
-        await runtime.page.keyboard.press('Escape');
+        await this.runBrowserRequest(
+          runtime,
+          instanceId,
+          'Browser menu input action',
+          this.actionRequestTimeout(action),
+          undefined,
+          () => runtime.page.keyboard.press('Escape')
+        );
         return this.recordAction(runtime, action, botId, 'succeeded', startedAt, 'Pressed Escape for menu action.');
       }
 
@@ -892,23 +1064,65 @@ export class BrowserAdapter extends BaseGameAdapter {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Browser action failed.';
-      return this.recordAction(runtime, action, botId, 'failed', startedAt, message);
+      return this.recordAction(
+        runtime,
+        action,
+        botId,
+        adapterRequestEventType(error) === 'adapter_request_timeout' ? 'timed_out' : 'failed',
+        startedAt,
+        message
+      );
     }
   }
 
   override async captureScreenshot(instanceId: string, botId: string): Promise<ScreenshotCapture> {
     const runtime = this.requireRuntime(instanceId);
-    const outputPath = join(this.screenshotDirectory, `${instanceId}-${botId}-${Date.now()}.png`);
+    const outputPath = join(
+      this.screenshotDirectory,
+      `${safePathSegment(instanceId)}-${safePathSegment(botId)}-${Date.now()}.png`
+    );
+    assertResolvedPathWithin(this.screenshotDirectory, outputPath, 'Browser screenshot path', false);
     await mkdir(dirname(outputPath), { recursive: true });
     if (!this.includeActionIndicatorsInScreenshots) {
-      await runtime.page.evaluate(setBrowserActionIndicatorsHidden, true).catch(() => undefined);
+      await this.runBrowserRequest(
+        runtime,
+        instanceId,
+        'Hide browser action indicators',
+        this.requestPolicy.timeouts.evidenceMs,
+        undefined,
+        () => runtime.page.evaluate(setBrowserActionIndicatorsHidden, true)
+      ).catch(() => undefined);
     }
 
     try {
-      await runtime.page.screenshot({ path: outputPath, fullPage: true });
+      const screenshot = await this.runBrowserRequest(
+        runtime,
+        instanceId,
+        'Browser screenshot capture',
+        this.requestPolicy.timeouts.evidenceMs,
+        undefined,
+        () => runtime.page.screenshot({ fullPage: true })
+      );
+      if (screenshot.byteLength > this.requestPolicy.responseSizeLimits.screenshotBytes) {
+        const error = new AdapterRequestBoundaryError(
+          'adapter_response_too_large',
+          'Browser screenshot capture',
+          `Browser screenshot returned ${screenshot.byteLength} bytes, exceeding the ${this.requestPolicy.responseSizeLimits.screenshotBytes}-byte limit.`
+        );
+        this.recordBrowserRequestFailure(runtime, instanceId, error);
+        throw error;
+      }
+      await writeFile(outputPath, screenshot);
     } finally {
       if (!this.includeActionIndicatorsInScreenshots) {
-        await runtime.page.evaluate(setBrowserActionIndicatorsHidden, false).catch(() => undefined);
+        await this.runBrowserRequest(
+          runtime,
+          instanceId,
+          'Restore browser action indicators',
+          this.requestPolicy.timeouts.evidenceMs,
+          undefined,
+          () => runtime.page.evaluate(setBrowserActionIndicatorsHidden, false)
+        ).catch(() => undefined);
       }
     }
     runtime.lastScreenshotPath = outputPath;
@@ -917,6 +1131,7 @@ export class BrowserAdapter extends BaseGameAdapter {
       instanceId,
       botId,
       capturedAt: now(),
+      scope: 'application-window',
       path: outputPath,
       mimeType: 'image/png'
     };
@@ -945,7 +1160,14 @@ export class BrowserAdapter extends BaseGameAdapter {
       };
     }
 
-    await runtime.page.bringToFront();
+    await this.runBrowserRequest(
+      runtime,
+      instanceId,
+      'Focus browser window',
+      this.requestPolicy.timeouts.performActionMs,
+      undefined,
+      () => runtime.page.bringToFront!()
+    );
     return {
       instanceId,
       supported: true,
@@ -1060,20 +1282,32 @@ export class BrowserAdapter extends BaseGameAdapter {
 
   private attachPageListeners(runtime: BrowserRuntime): void {
     runtime.page.on('console', (message) => {
-      runtime.consoleLogs.push({
+      const entry = {
         type: message.type(),
         text: message.text(),
         timestamp: now(),
         location: message.location?.()
-      });
+      };
+      if (
+        this.canAppendBrowserLog(runtime, entry) &&
+        this.canAppendBrowserLog(runtime, [...runtime.consoleLogs, entry])
+      ) {
+        runtime.consoleLogs.push(entry);
+      }
     });
     runtime.page.on('pageerror', (error) => {
-      runtime.pageErrors.push({
+      const entry = {
         name: error.name,
         message: error.message,
         stack: error.stack,
         timestamp: now()
-      });
+      };
+      if (
+        this.canAppendBrowserLog(runtime, entry) &&
+        this.canAppendBrowserLog(runtime, [...runtime.pageErrors, entry])
+      ) {
+        runtime.pageErrors.push(entry);
+      }
     });
     runtime.page.on('crash', () => {
       runtime.crashed = true;
@@ -1120,7 +1354,14 @@ export class BrowserAdapter extends BaseGameAdapter {
   private pushAdapterLog(
     runtime: BrowserRuntime,
     instanceId: string,
-    eventType: 'visible_window_started' | 'visible_window_stopped' | 'observation_bot_changed' | 'observation_limit_reached',
+    eventType:
+      | 'visible_window_started'
+      | 'visible_window_stopped'
+      | 'observation_bot_changed'
+      | 'observation_limit_reached'
+      | 'adapter_request_timeout'
+      | 'adapter_request_aborted'
+      | 'adapter_response_too_large',
     message: string,
     level: LogEntry['level'] = 'info'
   ): void {
@@ -1131,6 +1372,127 @@ export class BrowserAdapter extends BaseGameAdapter {
       timestamp: now(),
       source: `${this.id}:observation`
     });
+  }
+
+  private async runBrowserRequest<T>(
+    runtime: BrowserRuntime,
+    instanceId: string,
+    operation: string,
+    timeoutMs: number,
+    maximumBytes: number | undefined,
+    request: () => Promise<T>
+  ): Promise<T> {
+    if (runtime.stopping) {
+      const error = new AdapterRequestBoundaryError(
+        'adapter_request_aborted',
+        operation,
+        `${operation} was not started because the browser instance is stopping.`
+      );
+      this.recordBrowserRequestFailure(runtime, instanceId, error);
+      throw error;
+    }
+
+    const controller = new AbortController();
+    runtime.activeRequestControllers.add(controller);
+
+    try {
+      const value = await runBoundedAdapterRequest({
+        operation,
+        timeoutMs,
+        signal: controller.signal,
+        request
+      });
+      if (maximumBytes !== undefined) {
+        assertAdapterResponseSize(value, maximumBytes, operation);
+      }
+      return value;
+    } catch (error) {
+      this.recordBrowserRequestFailure(runtime, instanceId, error);
+      throw error;
+    } finally {
+      runtime.activeRequestControllers.delete(controller);
+    }
+  }
+
+  private actionRequestTimeout(action: GameAction): number {
+    return Math.min(
+      action.timeoutMs ?? this.requestPolicy.timeouts.performActionMs,
+      this.requestPolicy.timeouts.performActionMs
+    );
+  }
+
+  private canAppendBrowserLog(runtime: BrowserRuntime, value: unknown): boolean {
+    try {
+      assertAdapterResponseSize(
+        value,
+        this.requestPolicy.responseSizeLimits.gameLogsBytes,
+        'Browser game logs'
+      );
+      return true;
+    } catch (error) {
+      if (!runtime.logSizeWarningEmitted) {
+        runtime.logSizeWarningEmitted = true;
+        const instanceId = [...this.browserInstances.entries()]
+          .find((entry) => entry[1] === runtime)?.[0] ?? 'browser-instance';
+        this.recordBrowserRequestFailure(runtime, instanceId, error);
+      }
+      return false;
+    }
+  }
+
+  private async closeBrowserResources(
+    page: PageLike | undefined,
+    context: BrowserContextLike | undefined,
+    browser: BrowserLike | undefined
+  ): Promise<void> {
+    await runBoundedAdapterRequest({
+      operation: 'Browser launch cleanup',
+      timeoutMs: this.requestPolicy.timeouts.shutdownMs,
+      request: async () => {
+        await Promise.allSettled([
+          page?.close(),
+          context?.close(),
+          browser?.close()
+        ].filter((request): request is Promise<void> => Boolean(request)));
+      }
+    }).catch(() => undefined);
+  }
+
+  private abortBrowserRequests(runtime: BrowserRuntime, instanceId: string): void {
+    const requestCount = runtime.activeRequestControllers.size;
+    for (const controller of runtime.activeRequestControllers) {
+      controller.abort();
+    }
+    runtime.activeRequestControllers.clear();
+
+    if (requestCount > 0) {
+      this.pushAdapterLog(
+        runtime,
+        instanceId,
+        'adapter_request_aborted',
+        `${requestCount} active browser request(s) were aborted because the instance is stopping.`,
+        'warn'
+      );
+    }
+  }
+
+  private recordBrowserRequestFailure(
+    runtime: BrowserRuntime,
+    instanceId: string,
+    error: unknown
+  ): void {
+    const eventType = adapterRequestEventType(error);
+    if (!eventType) {
+      return;
+    }
+
+    this.pushAdapterLog(
+      runtime,
+      instanceId,
+      eventType,
+      error instanceof Error ? error.message : 'Browser adapter request failed.',
+      eventType === 'adapter_request_aborted' ? 'warn' : 'error'
+    );
   }
 
   private requireRuntime(instanceId: string): BrowserRuntime {
@@ -1150,24 +1512,39 @@ export class BrowserAdapter extends BaseGameAdapter {
     botId?: string
   ): Promise<BrowserUIState | null> {
     const embeddedState = normalizeBrowserUIState(embeddedUIState, 'hook');
-    const hookValue = await runtime.page.evaluate(({ currentInstanceId, currentBotId }) => {
-      const globalUIState = (window as unknown as {
-        __GAMEPLAY_SIM_UI_STATE__?: unknown | ((context: { instanceId?: string; botId?: string }) => unknown);
-      }).__GAMEPLAY_SIM_UI_STATE__;
+    const requestInstanceId = instanceId ?? 'browser-ui-state';
+    const hookValue = await this.runBrowserRequest(
+      runtime,
+      requestInstanceId,
+      'Browser UI state hook',
+      this.requestPolicy.timeouts.stateReadMs,
+      this.requestPolicy.responseSizeLimits.stateBytes,
+      () => runtime.page.evaluate(({ currentInstanceId, currentBotId }) => {
+        const globalUIState = (window as unknown as {
+          __GAMEPLAY_SIM_UI_STATE__?: unknown | ((context: { instanceId?: string; botId?: string }) => unknown);
+        }).__GAMEPLAY_SIM_UI_STATE__;
 
-      if (typeof globalUIState === 'function') {
-        return globalUIState({ instanceId: currentInstanceId, botId: currentBotId });
-      }
+        if (typeof globalUIState === 'function') {
+          return globalUIState({ instanceId: currentInstanceId, botId: currentBotId });
+        }
 
-      return globalUIState ?? null;
-    }, { currentInstanceId: instanceId, currentBotId: botId }).catch(() => null);
+        return globalUIState ?? null;
+      }, { currentInstanceId: instanceId, currentBotId: botId })
+    ).catch(() => null);
     const separateHookState = normalizeBrowserUIState(hookValue, 'hook');
     const hookState = mergeBrowserUIStates(separateHookState, embeddedState, 'hook');
     const shouldScanDom =
       this.domScanMode === 'always' ||
       (this.domScanMode === 'fallback' && !hasBrowserUIClues(hookState));
     const domValue = shouldScanDom
-      ? await runtime.page.evaluate(scanBrowserDom).catch(() => null)
+      ? await this.runBrowserRequest(
+          runtime,
+          requestInstanceId,
+          'Browser DOM state scan',
+          this.requestPolicy.timeouts.stateReadMs,
+          this.requestPolicy.responseSizeLimits.stateBytes,
+          () => runtime.page.evaluate(scanBrowserDom)
+        ).catch(() => null)
       : null;
     const domState = normalizeBrowserUIState(domValue, 'dom');
     const mergedState = hookState && domState
@@ -1186,17 +1563,24 @@ export class BrowserAdapter extends BaseGameAdapter {
     instanceId: string,
     botId: string
   ): Promise<GameStateSnapshot | null> {
-    const value = await runtime.page.evaluate(
-      ({ currentInstanceId, currentBotId }) => {
-        const globalState = (window as unknown as { __GAMEPLAY_SIM_STATE__?: unknown }).__GAMEPLAY_SIM_STATE__;
+    const value = await this.runBrowserRequest(
+      runtime,
+      instanceId,
+      'Browser game-state hook',
+      this.requestPolicy.timeouts.stateReadMs,
+      this.requestPolicy.responseSizeLimits.stateBytes,
+      () => runtime.page.evaluate(
+        ({ currentInstanceId, currentBotId }) => {
+          const globalState = (window as unknown as { __GAMEPLAY_SIM_STATE__?: unknown }).__GAMEPLAY_SIM_STATE__;
 
-        if (typeof globalState === 'function') {
-          return globalState({ instanceId: currentInstanceId, botId: currentBotId });
-        }
+          if (typeof globalState === 'function') {
+            return globalState({ instanceId: currentInstanceId, botId: currentBotId });
+          }
 
-        return globalState ?? null;
-      },
-      { currentInstanceId: instanceId, currentBotId: botId }
+          return globalState ?? null;
+        },
+        { currentInstanceId: instanceId, currentBotId: botId }
+      )
     );
 
     if (!isRecord(value)) {
@@ -1250,7 +1634,14 @@ export class BrowserAdapter extends BaseGameAdapter {
         performance,
         browser: {
           url: runtime.page.url(),
-          title: await runtime.page.title().catch(() => '')
+          title: await this.runBrowserRequest(
+            runtime,
+            instanceId,
+            'Browser instrumented title read',
+            this.requestPolicy.timeouts.stateReadMs,
+            this.requestPolicy.responseSizeLimits.stateBytes,
+            () => runtime.page.title()
+          ).catch(() => '')
         }
       },
       metrics,
@@ -1264,17 +1655,24 @@ export class BrowserAdapter extends BaseGameAdapter {
     instanceId: string,
     botId: string
   ): Promise<AvailableGameAction[]> {
-    const value = await runtime.page.evaluate(
-      ({ currentInstanceId, currentBotId }) => {
-        const globalActions = (window as unknown as { __GAMEPLAY_SIM_ACTIONS__?: unknown }).__GAMEPLAY_SIM_ACTIONS__;
+    const value = await this.runBrowserRequest(
+      runtime,
+      instanceId,
+      'Browser available-actions hook',
+      this.requestPolicy.timeouts.availableActionsMs,
+      this.requestPolicy.responseSizeLimits.availableActionsBytes,
+      () => runtime.page.evaluate(
+        ({ currentInstanceId, currentBotId }) => {
+          const globalActions = (window as unknown as { __GAMEPLAY_SIM_ACTIONS__?: unknown }).__GAMEPLAY_SIM_ACTIONS__;
 
-        if (typeof globalActions === 'function') {
-          return globalActions({ instanceId: currentInstanceId, botId: currentBotId });
-        }
+          if (typeof globalActions === 'function') {
+            return globalActions({ instanceId: currentInstanceId, botId: currentBotId });
+          }
 
-        return globalActions ?? null;
-      },
-      { currentInstanceId: instanceId, currentBotId: botId }
+          return globalActions ?? null;
+        },
+        { currentInstanceId: instanceId, currentBotId: botId }
+      )
     );
 
     if (!Array.isArray(value)) {
@@ -1286,13 +1684,24 @@ export class BrowserAdapter extends BaseGameAdapter {
 
   private async tryDirectActionHook(
     runtime: BrowserRuntime,
+    instanceId: string,
     action: GameAction,
     botId: string,
     startedAt: string,
     beforePerform?: () => Promise<void>
   ): Promise<ActionResult | null> {
-    const hookExists = await runtime.page
-      .evaluate(() => typeof (window as unknown as { __GAMEPLAY_SIM_PERFORM_ACTION__?: unknown }).__GAMEPLAY_SIM_PERFORM_ACTION__ === 'function')
+    const hookExists = await this.runBrowserRequest(
+      runtime,
+      instanceId,
+      'Browser direct-action hook check',
+      this.requestPolicy.timeouts.availableActionsMs,
+      this.requestPolicy.responseSizeLimits.actionResultBytes,
+      () => runtime.page.evaluate(
+        () => typeof (window as unknown as {
+          __GAMEPLAY_SIM_PERFORM_ACTION__?: unknown
+        }).__GAMEPLAY_SIM_PERFORM_ACTION__ === 'function'
+      )
+    )
       .catch(() => false);
 
     if (!hookExists) {
@@ -1301,14 +1710,21 @@ export class BrowserAdapter extends BaseGameAdapter {
 
     try {
       await beforePerform?.();
-      const value = await runtime.page.evaluate(
-        (browserAction) => {
-          const hook = (window as unknown as {
-            __GAMEPLAY_SIM_PERFORM_ACTION__?: (action: unknown) => unknown | Promise<unknown>;
-          }).__GAMEPLAY_SIM_PERFORM_ACTION__;
-          return hook?.(browserAction);
-        },
-        action
+      const value = await this.runBrowserRequest(
+        runtime,
+        instanceId,
+        `Browser direct action "${action.type}"`,
+        this.actionRequestTimeout(action),
+        this.requestPolicy.responseSizeLimits.actionResultBytes,
+        () => runtime.page.evaluate(
+          (browserAction) => {
+            const hook = (window as unknown as {
+              __GAMEPLAY_SIM_PERFORM_ACTION__?: (action: unknown) => unknown | Promise<unknown>;
+            }).__GAMEPLAY_SIM_PERFORM_ACTION__;
+            return hook?.(browserAction);
+          },
+          action
+        )
       );
 
       return actionResultFromHook(value, action, botId, startedAt);
@@ -1317,7 +1733,7 @@ export class BrowserAdapter extends BaseGameAdapter {
       return {
         actionId: action.actionId,
         botId,
-        status: 'failed',
+        status: adapterRequestEventType(error) === 'adapter_request_timeout' ? 'timed_out' : 'failed',
         startedAt,
         completedAt,
         durationMs: Math.max(0, Date.parse(completedAt) - Date.parse(startedAt)),
@@ -1363,6 +1779,7 @@ export class BrowserAdapter extends BaseGameAdapter {
 
   private async showActionIndicator(
     runtime: BrowserRuntime,
+    instanceId: string,
     botId: string,
     action: GameAction,
     inputOverride?: string
@@ -1415,7 +1832,14 @@ export class BrowserAdapter extends BaseGameAdapter {
       durationMs: 1600
     };
 
-    await runtime.page.evaluate(renderBrowserActionIndicator, payload).catch(() => undefined);
+    await this.runBrowserRequest(
+      runtime,
+      instanceId,
+      'Browser action indicator',
+      this.requestPolicy.timeouts.performActionMs,
+      this.requestPolicy.responseSizeLimits.actionResultBytes,
+      () => runtime.page.evaluate(renderBrowserActionIndicator, payload)
+    ).catch(() => undefined);
   }
 
   private async performMappedInput(runtime: BrowserRuntime, binding: ControlBinding): Promise<void> {

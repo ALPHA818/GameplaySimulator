@@ -6,7 +6,7 @@ import { useSessionStore } from '../store/sessionStore';
 
 function sessionLabel(session: PersistedSessionMetadata): string {
   const build = [session.version, session.buildId].filter(Boolean).join(' / ');
-  return `${session.sessionId} (${session.gameName}${build ? ` ${build}` : ''})`;
+  return `${session.sessionName ?? session.sessionId} (${session.gameName}${build ? ` ${build}` : ''})`;
 }
 
 function formatCoverage(value: number | undefined): string {

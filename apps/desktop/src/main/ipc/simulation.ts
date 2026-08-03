@@ -18,6 +18,10 @@ import {
 } from './validation';
 
 const ObservationDirectionSchema = z.enum(['next', 'previous']);
+const StructuredLogPageRequestSchema = z.object({
+  before: z.number().int().nonnegative().optional(),
+  limit: z.number().int().min(1).max(500).optional()
+}).default({});
 const ValidationPayloadBoundarySchema = z
   .object({
     runConfig: z.unknown(),
@@ -29,12 +33,12 @@ const ValidationPayloadBoundarySchema = z
 
 export function registerSimulationIpc(service: SimulationService): void {
   ipcMain.handle('simulation:createSession', (_event, payload: unknown) =>
-    service.createSession(SimulationSessionRequestSchema.parse(payload))
+    service.createSessionWithPreflight(SimulationSessionRequestSchema.parse(payload))
   );
   ipcMain.handle('simulation:listSessions', () => service.listSessions());
   ipcMain.handle('simulation:reloadSessions', () => service.reloadPersistedSessions());
   ipcMain.handle('simulation:validateSessionConfig', (_event, payload: unknown) =>
-    service.validateSessionConfig(ValidationPayloadBoundarySchema.parse(payload))
+    service.validateSessionConfigWithDependencies(ValidationPayloadBoundarySchema.parse(payload))
   );
   ipcMain.handle('simulation:estimateViability', (_event, payload: unknown) =>
     service.estimateViability(SimulationSessionRequestSchema.parse(payload))
@@ -133,8 +137,11 @@ export function registerSimulationIpc(service: SimulationService): void {
   ipcMain.handle('simulation:getCoverage', (_event, sessionId: unknown) =>
     service.getCoverage(IpcIdentifierSchema.parse(sessionId))
   );
-  ipcMain.handle('simulation:getStructuredLogs', (_event, sessionId: unknown) =>
-    service.getStructuredLogs(IpcIdentifierSchema.parse(sessionId))
+  ipcMain.handle('simulation:getStructuredLogs', (_event, sessionId: unknown, page: unknown) =>
+    service.getStructuredLogs(
+      IpcIdentifierSchema.parse(sessionId),
+      StructuredLogPageRequestSchema.parse(page)
+    )
   );
   ipcMain.handle('simulation:openEvidence', (_event, sessionId: unknown, evidencePath: unknown) =>
     service.openEvidence(IpcIdentifierSchema.parse(sessionId), IpcPathSchema.parse(evidencePath))

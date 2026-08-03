@@ -13,8 +13,10 @@ export const InstrumentationHealthSchema = z.object({
   ok: z.boolean(),
   gameId: z.string().min(1).optional(),
   gameName: z.string().min(1).optional(),
+  gameVersion: z.string().min(1).optional(),
+  buildId: z.string().min(1).optional(),
   instanceId: z.string().min(1).optional(),
-  protocolVersion: z.string().min(1).default(InstrumentationProtocolVersion),
+  protocolVersion: z.string().min(1),
   engine: z
     .object({
       type: z.string().min(1),
@@ -23,16 +25,10 @@ export const InstrumentationHealthSchema = z.object({
     .optional(),
   capabilities: z
     .object({
-      stateRead: z.boolean().default(true),
-      directActions: z.boolean().default(true),
-      events: z.boolean().default(true),
-      logs: z.boolean().default(true)
-    })
-    .default({
-      stateRead: true,
-      directActions: true,
-      events: true,
-      logs: true
+      stateRead: z.boolean(),
+      directActions: z.boolean(),
+      events: z.boolean(),
+      logs: z.boolean()
     }),
   message: z.string().optional()
 });

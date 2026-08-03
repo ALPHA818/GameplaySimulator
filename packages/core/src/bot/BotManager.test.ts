@@ -293,4 +293,32 @@ describe('BotManager', () => {
     await vi.advanceTimersByTimeAsync(1000);
     await manager.whenIdle();
   });
+
+  it('ignores the ordinary per-bot action limit when run until stopped is enabled', async () => {
+    vi.useFakeTimers();
+
+    const adapter = new ManagerTestAdapter();
+    const manager = new BotManager({
+      sessionId: 'session-manager',
+      runConfig: runConfig('parallel', {
+        runUntilStopped: true,
+        actionDelayMs: 100,
+        maxActionsPerBot: 1
+      }),
+      launchPlans: [plan('explorer-001', 'explorer', 1)],
+      botProfiles: profiles,
+      adapter,
+      now: () => '2026-07-04T10:00:00.000Z'
+    });
+
+    manager.startAll();
+    await vi.advanceTimersByTimeAsync(350);
+
+    expect(adapter.actions.length).toBeGreaterThan(1);
+    expect(manager.getStatusSnapshots()[0].status).toBe('running');
+
+    manager.stopAll();
+    await vi.advanceTimersByTimeAsync(100);
+    await manager.whenIdle();
+  });
 });

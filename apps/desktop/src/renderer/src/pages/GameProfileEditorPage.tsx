@@ -655,6 +655,7 @@ export function BrowserProfileTestWindowOption({
 
 export function GameProfileEditorPage() {
   const editingGameId = useConfigStore((state) => state.editingGameId);
+  const gameProfiles = useConfigStore((state) => state.gameProfiles);
   const existingProfile = useConfigStore((state) =>
     state.gameProfiles.find((profile) => profile.gameId === editingGameId)
   );
@@ -865,6 +866,19 @@ export function GameProfileEditorPage() {
 
     if (!result.success) {
       setErrors(zodFieldErrors(result.error));
+      setValidatedProfile(null);
+      return;
+    }
+
+    const duplicateGameId = gameProfiles.some(
+      (candidate) =>
+        candidate.gameId === result.data.gameId &&
+        candidate.gameId !== editingGameId
+    );
+    if (duplicateGameId) {
+      setErrors({
+        gameId: 'This game ID is already used by another profile. Choose a unique game ID.'
+      });
       setValidatedProfile(null);
       return;
     }
@@ -1385,7 +1399,8 @@ export function GameProfileEditorPage() {
                     </div>
                     <div className="metric-card">
                       <FieldLabel label="Screenshot Support Check" />
-                      <strong>{desktopDependencies.screenshotTool ?? 'Missing'}</strong>
+                      <strong>{desktopDependencies.screenshotScope}</strong>
+                      <span>{desktopDependencies.screenshotTool ?? 'No tool found'}</span>
                     </div>
                     <div className="metric-card">
                       <FieldLabel label="Focus Window" />
@@ -1406,6 +1421,15 @@ export function GameProfileEditorPage() {
                       {desktopDependencies.warnings.map((warning) => (
                         <span key={warning}>{warning}</span>
                       ))}
+                    </div>
+                  ) : null}
+                  {desktopDependencies.screenshotScope === 'full-desktop' ? (
+                    <div className="notice-list notice-list--warning">
+                      <FieldLabel
+                        label="Full Desktop Screenshot Privacy"
+                        helpText="This computer can only take a picture of the whole desktop for this game. The image may include other apps, messages, or private information. The simulator keeps this off unless each desktop session grants consent. It uses a little CPU, RAM, and disk space and opens no new window. Beginners should install game-window capture support instead."
+                      />
+                      <span>Full-desktop capture requires explicit consent in New Session and is never described as a game-window screenshot.</span>
                     </div>
                   ) : null}
                 </>

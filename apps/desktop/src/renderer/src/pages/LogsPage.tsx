@@ -124,7 +124,7 @@ function unique(values: Array<string | undefined>): string[] {
 
 function sessionLabel(session: PersistedSessionMetadata): string {
   const build = [session.version, session.buildId].filter(Boolean).join(' / ');
-  return `${session.sessionId} (${session.gameName}${build ? ` ${build}` : ''})`;
+  return `${session.sessionName ?? session.sessionId} (${session.gameName}${build ? ` ${build}` : ''})`;
 }
 
 function logKey(log: StructuredLogItem, index: number): string {
@@ -826,6 +826,9 @@ export function LogsPage() {
   const [selectedLogKey, setSelectedLogKey] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [loadMessage, setLoadMessage] = useState('');
+  const [nextLogCursor, setNextLogCursor] = useState<number | undefined>();
+  const [corruptLineCount, setCorruptLineCount] = useState(0);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   const [showRawJson, setShowRawJson] = useState(true);
   const [copyState, setCopyState] = useState('Copy');
   const [onlyImportantLogs, setOnlyImportantLogs] = useState(false);
@@ -893,8 +896,15 @@ export function LogsPage() {
     try {
       const result = await window.gameplaySimulator.simulation.getStructuredLogs(sessionId);
       setLogs(result.logs);
+      setHistoryExpanded(false);
+      setNextLogCursor(result.nextCursor);
+      setCorruptLineCount(result.corruptLineCount);
       setLoadState('ready');
-      setLoadMessage(`${result.logs.length} structured log entries loaded for ${sessionId}.`);
+      setLoadMessage(
+        result.incomplete
+          ? `${result.logs.length} of ${result.totalValidRecords} valid entries loaded. ${result.corruptLineCount} corrupt line(s) were skipped, so this run's log data is incomplete.`
+          : `${result.logs.length} of ${result.totalValidRecords} structured log entries loaded for ${sessionId}.`
+      );
     } catch (error) {
       setLoadState('error');
       setLoadMessage(error instanceof Error ? error.message : 'Unable to load structured logs.');
@@ -936,6 +946,10 @@ export function LogsPage() {
       return undefined;
     }
 
+    if (historyExpanded) {
+      return undefined;
+    }
+
     let cancelled = false;
 
     async function refresh() {
@@ -946,8 +960,14 @@ export function LogsPage() {
 
         if (!cancelled) {
           setLogs(result.logs);
+          setNextLogCursor(result.nextCursor);
+          setCorruptLineCount(result.corruptLineCount);
           setLoadState('ready');
-          setLoadMessage(`${result.logs.length} structured log entries loaded for ${selectedSessionId}.`);
+          setLoadMessage(
+            result.incomplete
+              ? `${result.logs.length} of ${result.totalValidRecords} valid entries loaded. ${result.corruptLineCount} corrupt line(s) were skipped, so this run's log data is incomplete.`
+              : `${result.logs.length} of ${result.totalValidRecords} structured log entries loaded for ${selectedSessionId}.`
+          );
         }
       } catch (error) {
         if (!cancelled) {
@@ -959,7 +979,7 @@ export function LogsPage() {
 
     void refresh();
 
-    if (selectedSessionId !== activeSessionId) {
+    if (selectedSessionId !== activeSessionId || historyExpanded) {
       return () => {
         cancelled = true;
       };
@@ -971,7 +991,33 @@ export function LogsPage() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [activeSessionId, selectedSessionId]);
+  }, [activeSessionId, historyExpanded, selectedSessionId]);
+
+  async function loadOlderLogs() {
+    if (!selectedSessionId || nextLogCursor === undefined) {
+      return;
+    }
+
+    setLoadState('loading');
+    try {
+      const result = await window.gameplaySimulator.simulation.getStructuredLogs(selectedSessionId, {
+        before: nextLogCursor
+      });
+      setLogs((current) => [...result.logs, ...current]);
+      setHistoryExpanded(true);
+      setNextLogCursor(result.nextCursor);
+      setCorruptLineCount(result.corruptLineCount);
+      setLoadState('ready');
+      setLoadMessage(
+        result.incomplete
+          ? `Older logs loaded. ${result.corruptLineCount} corrupt line(s) were skipped, so this run's log data is incomplete.`
+          : `Older logs loaded. ${result.nextCursor === undefined ? 'This is the beginning of the run.' : 'More are available.'}`
+      );
+    } catch (error) {
+      setLoadState('error');
+      setLoadMessage(error instanceof Error ? error.message : 'Unable to load older structured logs.');
+    }
+  }
 
   const eventTypes = unique(logs.map((log) => log.eventType));
   const botIds = unique(logs.map((log) => log.botId));
@@ -1145,6 +1191,12 @@ export function LogsPage() {
             <RefreshCw size={16} aria-hidden="true" />
             <span>Refresh Logs</span>
           </button>
+          {nextLogCursor !== undefined ? (
+            <button className="secondary-button" type="button" onClick={() => void loadOlderLogs()}>
+              <Download size={16} aria-hidden="true" />
+              <span>Load Older Logs</span>
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -1162,6 +1214,7 @@ export function LogsPage() {
             onChange={(event) => {
               setSelectedSessionId(event.target.value);
               setSelectedLogKey(null);
+              setHistoryExpanded(false);
             }}
           >
             {sessionOptions.length === 0 ? <option value="">No sessions found</option> : null}
@@ -1439,7 +1492,11 @@ export function LogsPage() {
         </button>
       </section>
 
-      {loadMessage ? <div className={`inline-notice inline-notice--${loadState}`}>{loadMessage}</div> : null}
+      {loadMessage ? (
+        <div className={`inline-notice inline-notice--${corruptLineCount > 0 ? 'error' : loadState}`}>
+          {loadMessage}
+        </div>
+      ) : null}
 
       <section className="review-layout review-layout--logs">
         <div

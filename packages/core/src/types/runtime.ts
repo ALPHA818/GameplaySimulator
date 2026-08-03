@@ -137,6 +137,15 @@ export const GameInstanceRuntimeStatusSchema = z.enum([
   'failed'
 ]);
 
+export const InstanceConnectionStateSchema = z.enum([
+  'connecting',
+  'connected',
+  'failed',
+  'disconnected',
+  'stopping',
+  'stopped'
+]);
+
 export const GameInstanceResourceUsageSchema = z.object({
   cpuPercent: z.number().min(0).optional(),
   ramMb: z.number().min(0).optional(),
@@ -149,6 +158,7 @@ export const GameInstanceStatusSchema = z.object({
   processId: z.number().int().positive().optional(),
   adapterType: AdapterTypeSchema,
   status: GameInstanceRuntimeStatusSchema,
+  connectionState: InstanceConnectionStateSchema.optional(),
   assignedBots: z.array(z.string().min(1)).default([]),
   startTime: z.string().min(1),
   lastHeartbeat: z.string().min(1),
@@ -262,6 +272,7 @@ export type SaveIsolationRuntimeInfo = z.infer<typeof SaveIsolationRuntimeInfoSc
 export type GameInstanceConfig = z.infer<typeof GameInstanceConfigSchema>;
 export type ResourceEstimate = z.infer<typeof ResourceEstimateSchema>;
 export type GameInstanceRuntimeStatus = z.infer<typeof GameInstanceRuntimeStatusSchema>;
+export type InstanceConnectionState = z.infer<typeof InstanceConnectionStateSchema>;
 export type GameInstanceResourceUsage = z.infer<typeof GameInstanceResourceUsageSchema>;
 export type GameInstanceStatus = z.infer<typeof GameInstanceStatusSchema>;
 export type BotAllocation = z.infer<typeof BotAllocationSchema>;

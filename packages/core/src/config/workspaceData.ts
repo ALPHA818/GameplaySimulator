@@ -13,22 +13,65 @@ export const WorkspaceMigrationStateSchema = z.object({
   runtimeObservationLocalStorageImported: z.boolean().default(false)
 });
 
-export const WorkspaceDataSchema = z.object({
-  schemaVersion: z.literal(WORKSPACE_SCHEMA_VERSION),
-  gameProfiles: z.array(GameProfileSchema).default([]),
-  customBotProfiles: z.array(BotProfileSchema).default([]),
-  botProfileOverrides: z.array(BotProfileSchema).default([]),
-  runConfigs: z.array(SimulationRunConfigSchema).default([]),
-  lastValidatedRunConfig: SimulationRunConfigSchema.nullable().default(null),
-  runtimeObservation: RuntimeObservationConfigSchema.default(defaultRuntimeObservationConfig),
-  reviewedIssueIds: z.array(z.string().min(1)).default([]),
-  falsePositiveIssueIds: z.array(z.string().min(1)).default([]),
-  migrations: WorkspaceMigrationStateSchema.default({
-    runtimeObservationLocalStorageImported: false
-  })
-});
+function addDuplicateIssues(
+  values: readonly string[],
+  path: string,
+  message: string,
+  context: z.RefinementCtx
+): void {
+  const seen = new Set<string>();
+  values.forEach((value, index) => {
+    if (seen.has(value)) {
+      context.addIssue({
+        code: 'custom',
+        path: [path, index],
+        message
+      });
+    }
+    seen.add(value);
+  });
+}
 
-export const WorkspaceDataPatchSchema = WorkspaceDataSchema
+const WorkspaceDataBaseSchema = z.object({
+    schemaVersion: z.literal(WORKSPACE_SCHEMA_VERSION),
+    gameProfiles: z.array(GameProfileSchema).default([]),
+    customBotProfiles: z.array(BotProfileSchema).default([]),
+    botProfileOverrides: z.array(BotProfileSchema).default([]),
+    runConfigs: z.array(SimulationRunConfigSchema).default([]),
+    lastValidatedRunConfig: SimulationRunConfigSchema.nullable().default(null),
+    runtimeObservation: RuntimeObservationConfigSchema.default(defaultRuntimeObservationConfig),
+    reviewedIssueIds: z.array(z.string().min(1)).default([]),
+    falsePositiveIssueIds: z.array(z.string().min(1)).default([]),
+    migrations: WorkspaceMigrationStateSchema.default({
+      runtimeObservationLocalStorageImported: false
+    })
+  });
+
+export const WorkspaceDataSchema = WorkspaceDataBaseSchema.superRefine((workspace, context) => {
+    addDuplicateIssues(
+      workspace.gameProfiles.map((profile) => profile.gameId),
+      'gameProfiles',
+      'Game profile IDs must be unique.',
+      context
+    );
+    addDuplicateIssues(
+      [
+        ...workspace.customBotProfiles.map((profile) => profile.profileId),
+        ...workspace.botProfileOverrides.map((profile) => profile.profileId)
+      ],
+      'customBotProfiles',
+      'Custom bot profile and override IDs must be unique.',
+      context
+    );
+    addDuplicateIssues(
+      workspace.runConfigs.map((config) => config.sessionId),
+      'runConfigs',
+      'Saved run configuration IDs must be unique.',
+      context
+    );
+  });
+
+export const WorkspaceDataPatchSchema = WorkspaceDataBaseSchema
   .omit({ schemaVersion: true })
   .partial();
 

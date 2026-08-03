@@ -164,6 +164,66 @@ describe('ResourceManager', () => {
     expect(report.warnings.length).toBeGreaterThan(0);
   });
 
+  it('preserves requested auto-pool counts when automatic scaling is disabled', () => {
+    const report = new ResourceManager().estimateViabilitySync(
+      request({
+        botPools: [{
+          profileId: 'explorer',
+          enabled: true,
+          minCount: 1,
+          desiredCount: 2,
+          maxCount: 4,
+          scalingMode: 'auto',
+          priority: 10,
+          resourceWeight: 'light'
+        }],
+        globalBotLimit: 4,
+        resourceLimits: {
+          maxCpuPercent: 90,
+          maxRamPercent: 90,
+          maxGpuPercent: 90,
+          reserveRamMb: 512,
+          maxGameInstances: 4,
+          allowAutoScaling: false
+        }
+      })
+    );
+
+    expect(report.canRun).toBe(true);
+    expect(report.botAllocation[0].recommendedCount).toBe(2);
+    expect(report.botAllocation[0].reason).toContain('disabled');
+  });
+
+  it('blocks instead of reducing requested counts when automatic scaling is disabled', () => {
+    const report = new ResourceManager().estimateViabilitySync(
+      request({
+        botPools: [{
+          profileId: 'explorer',
+          enabled: true,
+          minCount: 1,
+          desiredCount: 4,
+          maxCount: 4,
+          scalingMode: 'auto',
+          priority: 10,
+          resourceWeight: 'heavy'
+        }],
+        globalBotLimit: 1,
+        resourceLimits: {
+          maxCpuPercent: 20,
+          maxRamPercent: 30,
+          maxGpuPercent: 30,
+          reserveRamMb: 4096,
+          maxGameInstances: 1,
+          allowAutoScaling: false
+        }
+      })
+    );
+
+    expect(report.canRun).toBe(false);
+    expect(report.botAllocation[0].recommendedCount).toBe(4);
+    expect(report.blockers.join(' ')).toContain('Auto scaling is disabled');
+  });
+
   it('reports a blocker when a fixed pool is impossible', () => {
     const report = new ResourceManager().estimateViabilitySync(
       request({

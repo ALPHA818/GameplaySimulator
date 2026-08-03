@@ -104,6 +104,7 @@ describe('release E2E: real adapters', () => {
   it('uses the real InstrumentedAdapter against the existing local test server', async () => {
     const server = await startInstrumentedTestServer({
       port: 0,
+      gameId: 'release-instrumented-game',
       sessionId: 'release-instrumented-adapter'
     });
     const adapter = new InstrumentedAdapter({

@@ -33,7 +33,7 @@ import {
   type RuntimeObservationConfig
 } from '@core/config/runtimeObservationConfig';
 import { planGameInstances } from '@core/sessions/GameInstanceManager';
-import { Pause, Pencil, Play, Plus, RotateCw, ShieldCheck, Square, Trash2, X } from 'lucide-react';
+import { Activity, Pause, Pencil, Play, Plus, RotateCw, ShieldCheck, Square, Trash2, X } from 'lucide-react';
 import type { FormEvent } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -50,7 +50,7 @@ import type { FieldErrors } from '../utils/forms';
 import { optionalText, zodFieldErrors } from '../utils/forms';
 
 interface RunFormState {
-  sessionId: string;
+  sessionName: string;
   sessionLabel: SessionLabel;
   gameProfileId: string;
   runMode: RunMode;
@@ -58,6 +58,8 @@ interface RunFormState {
   maxRuntimeMinutes: string;
   stopOnCriticalIssue: boolean;
   saveScreenshots: boolean;
+  requireScreenshotEvidence: boolean;
+  allowFullDesktopCapture: boolean;
   saveVideo: boolean;
   screenshotEveryNActions: string;
   startupFlowId: string;
@@ -89,6 +91,8 @@ interface RunFormState {
   approvedFileTestDirectories: string;
   directives: BotTestDirective[];
 }
+
+const DRAFT_SESSION_ID = 'pending-main-process-session';
 
 type DirectiveAssignmentMode = 'all-bots' | 'bot' | 'profile' | 'instance';
 
@@ -573,6 +577,8 @@ function applyTemplateToForm(
     maxRuntimeMinutes: '15',
     stopOnCriticalIssue: true,
     saveScreenshots: screenshotsEnabled,
+    requireScreenshotEvidence: false,
+    allowFullDesktopCapture: false,
     saveVideo: false,
     screenshotEveryNActions: screenshotsEnabled ? String(template.actionCount) : '',
     startupFlowId,
@@ -643,6 +649,8 @@ function applyFocusedTemplateToForm(
     maxRuntimeMinutes: String(template.runtimeMinutes),
     stopOnCriticalIssue: true,
     saveScreenshots: screenshotsEnabled,
+    requireScreenshotEvidence: false,
+    allowFullDesktopCapture: false,
     saveVideo: false,
     screenshotEveryNActions: screenshotsEnabled ? String(template.actionCount) : '',
     saveActionTimeline: true,
@@ -676,7 +684,7 @@ function initialRunFormState(
   runtimeObservation: RuntimeObservationConfig
 ): RunFormState {
   const base: RunFormState = {
-    sessionId: `session-${Date.now()}`,
+    sessionName: `Smoke test ${new Date().toLocaleString()}`,
     sessionLabel: 'Smoke Test',
     gameProfileId: gameProfile?.gameId ?? '',
     runMode: 'sequential',
@@ -684,6 +692,8 @@ function initialRunFormState(
     maxRuntimeMinutes: '15',
     stopOnCriticalIssue: true,
     saveScreenshots: gameProfile?.adapter.supportsScreenshots ?? true,
+    requireScreenshotEvidence: false,
+    allowFullDesktopCapture: false,
     saveVideo: false,
     screenshotEveryNActions: '20',
     startupFlowId: '',
@@ -746,7 +756,8 @@ function pathList(value: string): string[] {
 
 function buildRunConfig(form: RunFormState, adapterType: SimulationRunConfig['adapterType']): SimulationRunConfig {
   return {
-    sessionId: form.sessionId.trim(),
+    sessionId: DRAFT_SESSION_ID,
+    sessionName: form.sessionName.trim(),
     sessionLabel: form.sessionLabel,
     gameProfilePath: `memory://game-profiles/${form.gameProfileId}`,
     adapterType,
@@ -757,6 +768,8 @@ function buildRunConfig(form: RunFormState, adapterType: SimulationRunConfig['ad
       : undefined,
     stopOnCriticalIssue: form.stopOnCriticalIssue,
     saveScreenshots: form.saveScreenshots,
+    requireScreenshotEvidence: form.saveScreenshots && form.requireScreenshotEvidence,
+    allowFullDesktopCapture: form.saveScreenshots && form.allowFullDesktopCapture,
     saveVideo: form.saveVideo,
     screenshotEveryNActions: optionalText(form.screenshotEveryNActions)
       ? Number(form.screenshotEveryNActions)
@@ -787,7 +800,7 @@ function buildRunConfig(form: RunFormState, adapterType: SimulationRunConfig['ad
     maxActionsPerBot: optionalText(form.maxActionsPerBot) ? Number(form.maxActionsPerBot) : undefined,
     directives: form.directives.map((directive) => ({
       ...directive,
-      sessionId: form.sessionId.trim()
+      sessionId: DRAFT_SESSION_ID
     })),
     technicalTesting: {
       controlledNetworkTestConfirmed: form.controlledNetworkTestConfirmed,
@@ -846,6 +859,7 @@ export function NewSessionPage() {
   const clearPendingSessionBotProfile = useConfigStore((state) => state.clearPendingSessionBotProfile);
   const clearPendingSessionBotProfiles = useConfigStore((state) => state.clearPendingSessionBotProfiles);
   const openGameProfileEditor = useConfigStore((state) => state.openGameProfileEditor);
+  const navigate = useConfigStore((state) => state.navigate);
   const setSessionPreview = useSessionStore((state) => state.setSessionPreview);
   const sessionStatus = useSessionStore((state) => state.status);
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
@@ -879,6 +893,7 @@ export function NewSessionPage() {
   const [adapterValidationErrors, setAdapterValidationErrors] = useState<string[]>([]);
   const [adapterValidationWarnings, setAdapterValidationWarnings] = useState<string[]>([]);
   const [runAnyway, setRunAnyway] = useState(false);
+  const [sessionRequestPending, setSessionRequestPending] = useState(false);
   const [addPoolProfileId, setAddPoolProfileId] = useState('');
   const [startupFlowTestResult, setStartupFlowTestResult] = useState<string | null>(null);
   const [directiveDraft, setDirectiveDraft] = useState<DirectiveDraft>(() => blankDirectiveDraft());
@@ -886,10 +901,23 @@ export function NewSessionPage() {
   const [directiveError, setDirectiveError] = useState<string | null>(null);
   const selectedProfile = gameProfiles.find((profile) => profile.gameId === form.gameProfileId);
   const adapterType = selectedProfile?.adapter.type ?? 'custom';
+  const usesDesktopRuntime = Boolean(
+    selectedProfile &&
+    (
+      ['desktop', 'rpg_maker', 'gamemaker'].includes(adapterType) ||
+      (
+        ['unity', 'godot', 'unreal'].includes(adapterType) &&
+        !selectedProfile.adapter.instrumentationEndpoint?.trim()
+      )
+    )
+  );
   const observationSupport = observationSupportMessage(selectedProfile);
   const videoSupported = false;
   const canPause = activeSessionId !== null && sessionStatus === 'running';
   const canResume = activeSessionId !== null && sessionStatus === 'paused';
+  const hasMutableSession =
+    activeSessionId !== null &&
+    ['created', 'starting', 'running', 'paused', 'stopping'].includes(sessionStatus);
   const canStop =
     activeSessionId !== null && ['created', 'starting', 'running', 'paused'].includes(sessionStatus);
   const availableBotProfiles = botProfiles.filter(
@@ -1071,7 +1099,7 @@ export function NewSessionPage() {
   const directiveDraftResult = BotTestDirectiveSchema.safeParse(
     buildDirectiveFromDraft(
       directiveDraft,
-      form.sessionId.trim() || 'session-preview',
+      DRAFT_SESSION_ID,
       'direction-preview',
       '2026-01-01T00:00:00.000Z'
     )
@@ -1232,7 +1260,7 @@ export function NewSessionPage() {
     const result = BotTestDirectiveSchema.safeParse(
       buildDirectiveFromDraft(
         directiveDraft,
-        form.sessionId.trim() || 'session-draft',
+        DRAFT_SESSION_ID,
         directiveId,
         new Date().toISOString()
       )
@@ -1363,7 +1391,7 @@ export function NewSessionPage() {
 
     const directive = createFocusedTestDirective({
       template: selectedFocusedTemplate,
-      sessionId: form.sessionId.trim() || 'session-draft',
+      sessionId: DRAFT_SESSION_ID,
       directiveId: `focused-${selectedFocusedTemplate.id}-${Date.now()}`,
       createdAt: new Date().toISOString(),
       selectedIssueId: selectedReviewIssueId ?? undefined
@@ -1439,6 +1467,15 @@ export function NewSessionPage() {
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
+    if (hasMutableSession) {
+      setErrors({
+        form: `Session ${activeSessionId} is ${sessionStatus}. Open or stop it before starting another session.`
+      });
+      setValidatedConfig(null);
+      return;
+    }
+
     const config = buildRunConfig(
       { ...form, saveVideo: videoSupported ? form.saveVideo : false },
       adapterType
@@ -1509,13 +1546,22 @@ export function NewSessionPage() {
     }
 
     try {
+      setSessionRequestPending(true);
       setAdapterValidationWarnings(backendValidation.warnings.map((warning) => `${warning.path}: ${warning.message}`));
       const created = await window.gameplaySimulator.simulation.createSession(payload);
       const started = await window.gameplaySimulator.simulation.startSession(created.sessionId);
+      const createdConfig = SimulationRunConfigSchema.parse({
+        ...adjustedResult.data,
+        sessionId: created.sessionId,
+        directives: adjustedResult.data.directives?.map((directive) => ({
+          ...directive,
+          sessionId: created.sessionId
+        }))
+      });
 
       setErrors({});
-      setValidatedConfig(adjustedResult.data);
-      saveRunConfig(adjustedResult.data);
+      setValidatedConfig(createdConfig);
+      saveRunConfig(createdConfig);
       applySessionSnapshot(started);
       applyRuntimeDetails({
         botStatuses: created.botStatuses,
@@ -1528,6 +1574,8 @@ export function NewSessionPage() {
       const message = error instanceof Error ? error.message : 'Backend session start failed.';
       setErrors({ form: message });
       setValidatedConfig(null);
+    } finally {
+      setSessionRequestPending(false);
     }
   }
 
@@ -1584,11 +1632,21 @@ export function NewSessionPage() {
             className="primary-button"
             type="submit"
             form="new-session-form"
-            disabled={sessionStatus === 'starting'}
+            disabled={hasMutableSession || sessionRequestPending}
           >
             <Play size={18} aria-hidden="true" />
             <span>Start Session</span>
           </button>
+          {hasMutableSession ? (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => navigate('liveSession')}
+            >
+              <Activity size={18} aria-hidden="true" />
+              <span>Open Live Session</span>
+            </button>
+          ) : null}
           {canPause ? (
             <button className="secondary-button" type="button" onClick={pauseActiveSession}>
               <Pause size={18} aria-hidden="true" />
@@ -1604,13 +1662,26 @@ export function NewSessionPage() {
           {canStop ? (
             <button className="secondary-button" type="button" onClick={stopActiveSession}>
               <Square size={18} aria-hidden="true" />
-              <span>Stop</span>
+              <span>Stop Current Session</span>
             </button>
           ) : null}
         </div>
       </div>
 
       <form id="new-session-form" className="form-grid" onSubmit={onSubmit}>
+        {hasMutableSession ? (
+          <div className="inline-notice inline-notice--error" role="status">
+            <FieldLabel
+              label="Current Session Lock"
+              helpText="GameplaySimulator allows one editable or running session at a time so bots and game processes cannot be left behind. Open Live Session to monitor it, or stop it before creating another test. For example, a paused session still holds this lock. Beginners should finish or stop the current session first."
+            />
+            <span>
+              {sessionStatus === 'stopping'
+                ? `Session ${activeSessionId} is stopping. Wait for cleanup to finish before starting another session.`
+                : `Session ${activeSessionId} is ${sessionStatus}. Open it or stop it before starting another session.`}
+            </span>
+          </div>
+        ) : null}
         {errors.form ? <div className="form-error">{errors.form}</div> : null}
 
         <section className="form-section form-section--template">
@@ -1857,11 +1928,11 @@ export function NewSessionPage() {
           <h2>Run</h2>
           <div className="field-grid">
             <TextInput
-              label="Session ID"
-              name="sessionId"
-              value={form.sessionId}
-              error={errors.sessionId}
-              onChange={(event) => update('sessionId', event.target.value)}
+              label="Session Name"
+              name="sessionName"
+              value={form.sessionName}
+              error={errors.sessionName}
+              onChange={(event) => update('sessionName', event.target.value)}
             />
             <SelectInput
               label="Session Label"
@@ -2022,6 +2093,22 @@ export function NewSessionPage() {
               onChange={(event) => update('saveScreenshots', event.target.checked)}
             />
             <ToggleInput
+              label="Require Screenshot Evidence"
+              checked={form.requireScreenshotEvidence}
+              disabled={!form.saveScreenshots}
+              helpText="This makes screenshots mandatory before bots can start. The simulator checks the selected adapter and your computer first. For example, turn this on when a bug report is useless without a picture. If no safe screenshot method is available, the session will be blocked. This does not add game windows, but screenshots use a little CPU, RAM, and disk space. Beginners should leave it off for a first setup test."
+              onChange={(event) => update('requireScreenshotEvidence', event.target.checked)}
+            />
+            {usesDesktopRuntime ? (
+              <ToggleInput
+                label="Allow Full Desktop Capture"
+                checked={form.allowFullDesktopCapture}
+                disabled={!form.saveScreenshots}
+                helpText="This allows a screenshot tool to photograph your whole desktop when it cannot capture only the game window. The picture may include other apps, messages, or private information. For example, Linux scrot usually captures the full desktop. This does not open another window, but it uses a little CPU, RAM, and disk space. It works only with desktop-style adapters and is off by default. Beginners should leave it off and install a game-window screenshot tool instead."
+                onChange={(event) => update('allowFullDesktopCapture', event.target.checked)}
+              />
+            ) : null}
+            <ToggleInput
               label="Action Timeline"
               checked={form.saveActionTimeline}
               onChange={(event) => update('saveActionTimeline', event.target.checked)}
@@ -2038,6 +2125,12 @@ export function NewSessionPage() {
               onChange={(event) => update('continueOnStartupFlowFailure', event.target.checked)}
             />
           </div>
+          {usesDesktopRuntime && form.saveScreenshots && form.allowFullDesktopCapture ? (
+            <div className="notice warning">
+              Full-desktop screenshots can include private content from other visible applications.
+              Close private windows before starting this session.
+            </div>
+          ) : null}
           <div className="wizard-test-card">
             <div>
               <FieldLabel label="Check Startup Flow" />
@@ -3250,6 +3343,69 @@ export function NewSessionPage() {
               helpText="This is the final number of game windows the session may show. Other game instances can keep running in the background. A larger limit uses more CPU, RAM, and desktop space and only works when the adapter supports visible windows. Beginners should confirm 1."
             />
             <strong>{effectiveObservation.maxVisibleGameWindows}</strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel
+              label="Effective Run Behavior"
+              helpText="This shows when the session will finish. Normal mode lets each bot stop at its action limit. Run Until Stopped ignores that action limit, but the maximum runtime and safety stops still apply. For example, Run Until Stopped with a 30 minute limit runs until you stop it or 30 active minutes pass. Beginners should use normal mode."
+            />
+            <strong>{form.runUntilStopped ? 'Run until stopped' : 'Stop at bot action limits'}</strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel
+              label="Effective Runtime Limit"
+              helpText="This is the hard active-running-time limit saved with the session. Paused time does not count. It applies even when Run Until Stopped is enabled. For example, 15 means the simulator stops and writes normal reports after 15 active minutes. Beginners should keep a limit."
+            />
+            <strong>
+              {form.maxRuntimeMinutes
+                ? `${form.maxRuntimeMinutes} active minute(s)`
+                : 'No time limit'}
+            </strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel
+              label="Effective Bot Action Limit"
+              helpText="This shows whether the per-bot action limit will actually stop bots. Run Until Stopped ignores it so bots do not finish only because they used their ordinary action allowance. For example, 20 stops each bot after 20 actions in normal mode. Beginners should use 20 for a smoke test."
+            />
+            <strong>
+              {form.runUntilStopped
+                ? 'Ignored while Run Until Stopped is on'
+                : form.maxActionsPerBot
+                  ? `${form.maxActionsPerBot} action(s) per bot`
+                  : 'No action limit'}
+            </strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel
+              label="Saved Runtime Artifacts"
+              helpText="This shows which detailed bot files will be written. Action timelines save bot actions. State snapshots save game-state records. Turning either off saves disk space but removes that artifact and its report link. It does not stop the bot from using temporary state while running. Beginners should keep action timelines on."
+            />
+            <strong>
+              {form.saveActionTimeline ? 'Actions on' : 'Actions off'} ·{' '}
+              {form.saveStateSnapshots ? 'States on' : 'States off'}
+            </strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel
+              label="Effective Bot Count Policy"
+              helpText="This shows whether the resource check may reduce auto bot pools. When scaling is on, auto pools can be lowered safely with an explanation. When it is off, requested counts stay exact and the session is blocked if they cannot fit. Beginners should use automatic scaling for larger runs."
+            />
+            <strong>{form.allowAutoScaling ? 'Auto pools may scale down' : 'Exact counts or block'}</strong>
+          </div>
+          <div className="metric-card">
+            <FieldLabel
+              label="Desktop Screenshot Privacy"
+              helpText="This shows the screenshot rule that will be saved with this test. Game-window only keeps other desktop content out of captures. Full-desktop allowed may include other apps and private information. Screenshots use some CPU, RAM, and disk space but open no new windows. Desktop-style adapters are checked before bots start. Beginners should use game-window only."
+            />
+            <strong>
+              {!form.saveScreenshots
+                ? 'Screenshots disabled'
+                : usesDesktopRuntime && form.allowFullDesktopCapture
+                  ? 'Full desktop allowed with consent'
+                  : form.requireScreenshotEvidence
+                    ? 'Game-window evidence required'
+                    : 'Game-window capture when available'}
+            </strong>
           </div>
         </div>
         <div className="session-confirmation__directives">

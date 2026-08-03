@@ -144,6 +144,7 @@ export abstract class BaseGameAdapter implements GameAdapter {
       instanceId,
       botId,
       capturedAt: new Date().toISOString(),
+      scope: 'unsupported',
       mimeType: 'image/png'
     };
   }

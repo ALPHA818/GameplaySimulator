@@ -1,14 +1,14 @@
 import {
-  appendFileSync,
   copyFileSync,
   existsSync,
   mkdirSync,
-  readFileSync,
   readdirSync,
   statSync,
   writeFileSync
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { appendFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { assertResolvedPathWithin } from '../security/pathContainment';
 import type {
   ActionResult,
   BotDirectiveProgress,
@@ -57,11 +57,15 @@ export type StructuredLogEventType =
   | 'crash'
   | 'freeze'
   | 'manual_stop'
+  | 'max_runtime_reached'
   | 'resource_warning'
   | 'visible_window_started'
   | 'visible_window_stopped'
   | 'observation_bot_changed'
   | 'observation_limit_reached'
+  | 'adapter_request_timeout'
+  | 'adapter_request_aborted'
+  | 'adapter_response_too_large'
   | 'directive_created'
   | 'directive_queued'
   | 'directive_assigned'
@@ -97,6 +101,8 @@ export interface StructuredRunLoggerOptions {
   createdAt: string;
   sessionDir?: string;
   now?: () => string;
+  saveActionTimeline?: boolean;
+  saveStateSnapshots?: boolean;
 }
 
 export interface SessionConfigArtifact {
@@ -140,6 +146,7 @@ export interface SessionSummaryReportInput {
   createdAt?: string;
   startedAt?: string;
   stoppedAt?: string;
+  shutdownReason?: string;
   directives?: BotTestDirective[];
   directiveProgress?: BotDirectiveProgress[];
   directiveEvents?: BotDirectiveEvent[];
@@ -155,6 +162,17 @@ export interface SessionSummaryReportInput {
     screenshotPath?: string;
     timeline?: Array<Record<string, unknown>>;
   };
+  actionSummaries?: Record<string, BotActionSummary>;
+  screenshotCaptureScopes?: string[];
+}
+
+export interface BotActionSummary {
+  total: number;
+  failed: number;
+  skipped: number;
+  repeated: string[][];
+  latest?: ActionReportRow;
+  recent: ActionReportRow[];
 }
 
 function technicalTestReadiness(input: SessionSummaryReportInput) {
@@ -260,28 +278,6 @@ function writeJson(path: string, value: unknown): void {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-function appendJsonl(path: string, value: unknown): void {
-  appendFileSync(path, `${JSON.stringify(value)}\n`, 'utf8');
-}
-
-function writeJsonl(path: string, values: unknown[]): void {
-  ensureDirectory(dirname(path));
-  writeFileSync(path, values.map((value) => JSON.stringify(value)).join('\n') + (values.length > 0 ? '\n' : ''), 'utf8');
-}
-
-function timestampForFolder(timestamp: string): string {
-  const parsed = new Date(timestamp);
-  const date = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
-  const yyyy = date.getUTCFullYear();
-  const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(date.getUTCDate()).padStart(2, '0');
-  const hh = String(date.getUTCHours()).padStart(2, '0');
-  const min = String(date.getUTCMinutes()).padStart(2, '0');
-  const ss = String(date.getUTCSeconds()).padStart(2, '0');
-
-  return `${yyyy}-${mm}-${dd}-${hh}-${min}-${ss}`;
-}
-
 function safePathSegment(value: string): string {
   return value
     .trim()
@@ -380,43 +376,6 @@ function compactJson(value: unknown): string {
   }
 }
 
-function readJsonlRecords(path: string): Array<Record<string, unknown>> {
-  if (!existsSync(path)) {
-    return [];
-  }
-
-  return readFileSync(path, 'utf8')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .flatMap((line) => {
-      try {
-        const parsed = JSON.parse(line) as unknown;
-        return isRecord(parsed) ? [parsed] : [];
-      } catch {
-        return [
-          {
-            eventType: 'invalid_json',
-            line
-          }
-        ];
-      }
-    });
-}
-
-function sourcedJsonlRecords(source: StructuredLogFileSource): Array<Record<string, unknown>> {
-  return readJsonlRecords(source.path).map((record) => ({
-    bundleSource: source.source,
-    bundleFile: source.path,
-    botId: source.botId ?? stringValue(record.botId) ?? stringValue(record.action && isRecord(record.action) ? record.action.botId : undefined),
-    gameInstanceId:
-      source.instanceId ??
-      stringValue(record.gameInstanceId) ??
-      stringValue(record.action && isRecord(record.action) ? record.action.gameInstanceId : undefined),
-    ...record
-  }));
-}
-
 function isImportantStructuredEvent(record: Record<string, unknown>): boolean {
   const eventType = String(record.eventType ?? '').toLowerCase();
   const source = String(record.bundleSource ?? '').toLowerCase();
@@ -439,6 +398,7 @@ function isImportantStructuredEvent(record: Record<string, unknown>): boolean {
     eventType.includes('instance_crash') ||
     eventType.includes('instance_restart') ||
     eventType.includes('manual_stop') ||
+    eventType.includes('max_runtime_reached') ||
     payloadText.includes('critical') ||
     payloadText.includes('error') ||
     payloadText.includes('warning') ||
@@ -505,41 +465,13 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
-interface ActionReportRow {
+export interface ActionReportRow {
   timestamp: string;
   actionId: string;
   actionType: string;
   quality: string;
   result: string;
   explanation: string;
-}
-
-function actionReportRows(path: string): ActionReportRow[] {
-  return readJsonlRecords(path).flatMap((record) => {
-    const action = isRecord(record.action) ? record.action : undefined;
-
-    if (!action) {
-      return [];
-    }
-
-    const payload = isRecord(action.payload) ? action.payload : {};
-    const result = isRecord(record.result) ? record.result : {};
-    const actionType = stringValue(action.type) ?? 'unknown-action';
-    const resultStatus = stringValue(result.status) ?? 'not-recorded';
-    const resultMessage = stringValue(result.message);
-
-    return [{
-      timestamp: stringValue(record.timestamp) ?? stringValue(action.requestedAt) ?? 'Unknown',
-      actionId: stringValue(action.actionId) ?? 'Unknown',
-      actionType,
-      quality: stringValue(payload.quality) ?? (payload.recovery === true ? 'recovery' : 'planned'),
-      result: resultMessage ? `${resultStatus}: ${resultMessage}` : resultStatus,
-      explanation:
-        stringValue(payload.explanation) ??
-        stringValue(payload.reason) ??
-        `The bot chose ${actionType}; this older action did not record a full planner explanation.`
-    }];
-  });
 }
 
 function topRepeatedActionRows(actions: ActionReportRow[]): string[][] {
@@ -816,13 +748,56 @@ export class IssueEventLogger {
 }
 
 export class JsonlLogger {
+  private pendingLines: string[] = [];
+  private writeChain: Promise<void> = Promise.resolve();
+  private drainScheduled = false;
+  private writeError: unknown;
+
   constructor(readonly filePath: string) {
     ensureDirectory(dirname(filePath));
-    appendFileSync(filePath, '', 'utf8');
+    if (!existsSync(filePath)) {
+      writeFileSync(filePath, '', 'utf8');
+    }
   }
 
   append(value: unknown): void {
-    appendJsonl(this.filePath, value);
+    this.pendingLines.push(`${JSON.stringify(value)}\n`);
+    if (!this.drainScheduled) {
+      this.drainScheduled = true;
+      queueMicrotask(() => this.drain());
+    }
+  }
+
+  async flush(): Promise<void> {
+    let observedChain: Promise<void>;
+    do {
+      this.drain();
+      observedChain = this.writeChain;
+      await observedChain;
+    } while (this.pendingLines.length > 0 || observedChain !== this.writeChain);
+
+    if (this.writeError) {
+      const error = this.writeError;
+      this.writeError = undefined;
+      throw error;
+    }
+  }
+
+  private drain(): void {
+    this.drainScheduled = false;
+    if (this.pendingLines.length === 0) {
+      return;
+    }
+
+    const batch = this.pendingLines.join('');
+    this.pendingLines = [];
+    this.writeChain = this.writeChain
+      .then(async () => {
+        await appendFile(this.filePath, batch, 'utf8');
+      })
+      .catch((error: unknown) => {
+        this.writeError ??= error;
+      });
   }
 }
 
@@ -850,7 +825,14 @@ export class SessionLogger {
 
   constructor(private readonly options: StructuredRunLoggerOptions) {
     this.now = options.now ?? (() => new Date().toISOString());
-    this.sessionDir = options.sessionDir ?? join(options.rootDir, `session-${timestampForFolder(options.createdAt)}`);
+    const rootDir = resolve(options.rootDir);
+    ensureDirectory(rootDir);
+    this.sessionDir = assertResolvedPathWithin(
+      rootDir,
+      options.sessionDir ?? join(rootDir, `session-${safePathSegment(options.sessionId)}`),
+      'Session directory',
+      false
+    );
     this.sessionLogPath = join(this.sessionDir, 'session-log.jsonl');
     this.summaryJsonPath = join(this.sessionDir, 'session-summary.json');
     this.summaryPath = join(this.sessionDir, 'session-summary.md');
@@ -867,11 +849,17 @@ export class SessionLogger {
     this.exportsDir = join(this.sessionDir, 'exports');
     this.replayDir = join(this.sessionDir, 'replay');
 
-    ensureDirectory(this.sessionDir);
+    if (options.sessionDir) {
+      ensureDirectory(this.sessionDir);
+    } else {
+      mkdirSync(this.sessionDir, { recursive: false });
+    }
     ensureDirectory(this.screenshotsDir);
     ensureDirectory(this.reportsDir);
     ensureDirectory(this.exportsDir);
-    ensureDirectory(this.replayDir);
+    if (options.saveActionTimeline !== false) {
+      ensureDirectory(this.replayDir);
+    }
     this.logger = new JsonlLogger(this.sessionLogPath);
   }
 
@@ -885,6 +873,10 @@ export class SessionLogger {
 
   currentTimestamp(): string {
     return this.now();
+  }
+
+  async flush(): Promise<void> {
+    await this.logger.flush();
   }
 
   log<TPayload extends Record<string, unknown>>(
@@ -956,18 +948,20 @@ export class SessionLogger {
         bot.stopReason?.toLowerCase().includes('stop') === true)
     );
     const totalActions = input.bots.reduce((total, bot) => total + bot.actionCount, 0);
+    const actionTimelineEnabled = input.runConfig.saveActionTimeline;
+    const stateSnapshotsEnabled = input.runConfig.saveStateSnapshots;
     const actionOutcomeRows = input.bots.map((bot) => {
-      const actions = actionReportRows(join(this.sessionDir, 'bots', safePathSegment(bot.botId), 'actions.jsonl'));
-      const failed = actions.filter((action) => action.result.startsWith('failed') || action.result.startsWith('timed_out')).length;
-      const skipped = actions.filter((action) => action.result.startsWith('skipped')).length;
-      const repeated = topRepeatedActionRows(actions).map(([actionType, count]) => `${actionType} (${count})`).join(', ');
-      const lastAction = actions.at(-1);
+      const summary = input.actionSummaries?.[bot.botId];
+      const repeated = summary?.repeated
+        .map(([actionType, count]) => `${actionType} (${count})`)
+        .join(', ');
+      const lastAction = summary?.latest;
 
       return [
         bot.botId,
-        String(actions.length || bot.actionCount),
-        String(failed),
-        String(skipped),
+        String(summary?.total ?? bot.actionCount),
+        String(summary?.failed ?? 0),
+        String(summary?.skipped ?? 0),
         repeated || 'None',
         lastAction ? `${lastAction.actionType}: ${lastAction.explanation}` : 'None captured'
       ];
@@ -1068,8 +1062,9 @@ export class SessionLogger {
       ];
     });
     const lines = [
-      `# GameplaySimulator Session: ${this.options.sessionId}`,
+      `# GameplaySimulator Session: ${input.runConfig.sessionName ?? this.options.sessionId}`,
       '',
+      `Session ID: ${this.options.sessionId}`,
       `Status: ${input.status}`,
       `Game: ${input.gameProfile.gameName}`,
       `Engine: ${input.gameProfile.engine.type}${engineVersion}`,
@@ -1081,6 +1076,7 @@ export class SessionLogger {
       `Created: ${input.createdAt ?? 'Unknown'}`,
       `Started: ${input.startedAt ?? 'Not started'}`,
       `Stopped: ${input.stoppedAt ?? 'Not stopped'}`,
+      `Shutdown reason: ${input.shutdownReason ?? 'None'}`,
       `Total runtime: ${formatDuration(input.startedAt, input.stoppedAt)}`,
       '',
       '## Live Observation',
@@ -1092,6 +1088,34 @@ export class SessionLogger {
       `Visible action delay: ${runtimeObservation.visibleActionDelayMs} ms`,
       `Show action information: ${runtimeObservation.showActionInformation ? 'yes' : 'no'}`,
       `Maximum visible game windows: ${runtimeObservation.maxVisibleGameWindows}`,
+      '',
+      '## Effective Session Settings',
+      '',
+      `Run until manually stopped: ${input.runConfig.runUntilStopped ? 'yes' : 'no'}`,
+      `Maximum active runtime: ${
+        input.runConfig.maxRuntimeMinutes === undefined
+          ? 'No time limit'
+          : `${input.runConfig.maxRuntimeMinutes} minute(s); paused time is excluded`
+      }`,
+      `Configured maximum actions per bot: ${input.runConfig.maxActionsPerBot ?? 'No action limit'}`,
+      `Effective maximum actions per bot: ${
+        input.runConfig.runUntilStopped
+          ? 'Ignored while run-until-stopped is enabled'
+          : input.runConfig.maxActionsPerBot ?? 'No action limit'
+      }`,
+      `Action timeline artifacts: ${actionTimelineEnabled ? 'enabled' : 'disabled'}`,
+      `State snapshot artifacts: ${stateSnapshotsEnabled ? 'enabled' : 'disabled'}`,
+      `Automatic bot-count scaling: ${input.runConfig.resourceLimits.allowAutoScaling ? 'enabled' : 'disabled'}`,
+      `Screenshot evidence requested: ${input.runConfig.saveScreenshots ? 'yes' : 'no'}`,
+      `Screenshot evidence required: ${input.runConfig.requireScreenshotEvidence ? 'yes' : 'no'}`,
+      `Full-desktop capture consent: ${input.runConfig.allowFullDesktopCapture ? 'granted' : 'not granted'}`,
+      `Actual screenshot capture scope: ${
+        input.screenshotCaptureScopes?.length
+          ? input.screenshotCaptureScopes.join(', ')
+          : input.runConfig.saveScreenshots
+            ? 'No screenshot captured'
+            : 'Disabled'
+      }`,
       '',
       '## Startup Flow',
       '',
@@ -1348,11 +1372,21 @@ export class BotLogger {
   readonly screenshotsDir: string;
   readonly videoDir: string;
 
-  private readonly actionsLogger: JsonlLogger;
-  private readonly statesLogger: JsonlLogger;
+  private readonly actionsLogger?: JsonlLogger;
+  private readonly statesLogger?: JsonlLogger;
   private readonly issuesLogger: JsonlLogger;
+  private readonly recentActions: ActionReportRow[] = [];
+  private readonly actionCounts = new Map<string, number>();
+  private totalActions = 0;
+  private failedActionCount = 0;
+  private skippedActionCount = 0;
 
-  constructor(sessionDir: string, readonly botId: string) {
+  constructor(
+    sessionDir: string,
+    readonly botId: string,
+    private readonly saveActionTimeline = true,
+    private readonly saveStateSnapshots = true
+  ) {
     this.botDir = join(sessionDir, 'bots', safePathSegment(botId));
     this.actionsPath = join(this.botDir, 'actions.jsonl');
     this.statesPath = join(this.botDir, 'states.jsonl');
@@ -1363,15 +1397,43 @@ export class BotLogger {
 
     ensureDirectory(this.screenshotsDir);
     ensureDirectory(this.videoDir);
-    this.actionsLogger = new JsonlLogger(this.actionsPath);
-    this.statesLogger = new JsonlLogger(this.statesPath);
+    if (saveActionTimeline) {
+      this.actionsLogger = new JsonlLogger(this.actionsPath);
+    }
+    if (saveStateSnapshots) {
+      this.statesLogger = new JsonlLogger(this.statesPath);
+    }
     this.issuesLogger = new JsonlLogger(this.issuesPath);
   }
 
   logAction(event: StructuredLogEvent, action: GameAction, result?: ActionResult): void {
     const insight = actionInsightFromAction(action);
+    const status = result?.status ?? 'not-recorded';
+    const reportRow: ActionReportRow = {
+      timestamp: event.timestamp,
+      actionId: action.actionId,
+      actionType: action.type,
+      quality: insight?.quality ?? 'planned',
+      result: result?.message ? `${status}: ${result.message}` : status,
+      explanation:
+        insight?.explanation ??
+        `The bot chose ${action.type}; no detailed planner explanation was recorded.`
+    };
 
-    this.actionsLogger.append({
+    this.totalActions += 1;
+    this.actionCounts.set(action.type, (this.actionCounts.get(action.type) ?? 0) + 1);
+    if (status === 'failed' || status === 'timed_out') {
+      this.failedActionCount += 1;
+    }
+    if (status === 'skipped') {
+      this.skippedActionCount += 1;
+    }
+    this.recentActions.push(reportRow);
+    if (this.recentActions.length > 100) {
+      this.recentActions.splice(0, this.recentActions.length - 100);
+    }
+
+    this.actionsLogger?.append({
       ...event,
       payload: {
         ...event.payload,
@@ -1390,7 +1452,7 @@ export class BotLogger {
   }
 
   logState(event: StructuredLogEvent, snapshot: GameStateSnapshot): void {
-    this.statesLogger.append({
+    this.statesLogger?.append({
       ...event,
       snapshot
     });
@@ -1404,7 +1466,7 @@ export class BotLogger {
   }
 
   writeReport(input: BotReportInput): void {
-    const actions = actionReportRows(this.actionsPath);
+    const actions = this.saveActionTimeline ? this.recentActions : [];
     const failedActions = actions.filter((action) => action.result.startsWith('failed') || action.result.startsWith('timed_out'));
     const skippedActions = actions.filter((action) => action.result.startsWith('skipped'));
     const lines = [
@@ -1432,17 +1494,19 @@ export class BotLogger {
       '',
       '## Action Timeline With Explanations',
       '',
-      ...markdownTable(
-        ['Time', 'Action', 'Quality', 'Result', 'Why'],
-        actions.map((action) => [
-          action.timestamp,
-          action.actionType,
-          action.quality,
-          action.result,
-          action.explanation
-        ]),
-        'No action timeline captured'
-      ),
+      ...(this.saveActionTimeline
+        ? markdownTable(
+            ['Time', 'Action', 'Quality', 'Result', 'Why'],
+            actions.map((action) => [
+              action.timestamp,
+              action.actionType,
+              action.quality,
+              action.result,
+              action.explanation
+            ]),
+            'No action timeline captured'
+          )
+        : ['Action timeline capture was disabled for this session.']),
       '',
       '## Top Repeated Actions',
       '',
@@ -1482,19 +1546,49 @@ export class BotLogger {
       '',
       ...jsonBlock(input.finalState ?? input.progressState ?? input.status),
       '',
-      `Actions log: ${this.actionsPath}`,
-      `States log: ${this.statesPath}`,
+      ...(this.saveActionTimeline
+        ? [`Actions log: ${this.actionsPath}`]
+        : ['Actions log: Disabled by session setting']),
+      ...(this.saveStateSnapshots
+        ? [`States log: ${this.statesPath}`]
+        : ['States log: Disabled by session setting']),
       `Issues log: ${this.issuesPath}`
     ];
 
     writeFileSync(this.reportPath, `${lines.join('\n')}\n`, 'utf8');
+  }
+
+  getActionSummary(): BotActionSummary {
+    return {
+      total: this.totalActions,
+      failed: this.failedActionCount,
+      skipped: this.skippedActionCount,
+      repeated: [...this.actionCounts.entries()]
+        .filter(([, count]) => count > 1)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, 10)
+        .map(([actionType, count]) => [actionType, String(count)]),
+      latest: this.recentActions.at(-1),
+      recent: [...this.recentActions]
+    };
+  }
+
+  async flush(): Promise<void> {
+    await Promise.all([
+      this.actionsLogger?.flush(),
+      this.statesLogger?.flush(),
+      this.issuesLogger.flush()
+    ]);
   }
 }
 
 export class IssueLogger {
   readonly issuesDir: string;
 
-  constructor(sessionDir: string) {
+  constructor(
+    sessionDir: string,
+    private readonly saveActionTimeline = true
+  ) {
     this.issuesDir = join(sessionDir, 'issues');
     ensureDirectory(this.issuesDir);
   }
@@ -1504,6 +1598,10 @@ export class IssueLogger {
     const attempts = recoveryAttempts(issue);
     const lastActions = issue.lastActions.slice(-20);
     const issuePayload = buildIssueEventPayload(issue, context);
+    const screenshotEvidence = rawEvidenceRecord(issue).screenshotEvidence;
+    const screenshotCaptureScope = isRecord(screenshotEvidence)
+      ? stringValue(screenshotEvidence.captureScope)
+      : undefined;
     const timelineRows = issuePayload.timeline.map((item) => [
       String(item.label ?? item.step ?? 'Unknown'),
       String(item.summary ?? 'No summary'),
@@ -1576,11 +1674,16 @@ export class IssueLogger {
       '## Evidence',
       '',
       `Screenshot: ${issue.screenshotPath ?? 'None'}`,
+      `Screenshot capture scope: ${screenshotCaptureScope ?? 'Not recorded'}`,
       `Video: ${issue.videoPath ?? 'None'}`,
-      '',
-      '| Action Timeline IDs |',
-      '| --- |',
-      ...issue.actionTimelineIds.map((id) => `| ${mdEscape(id)} |`)
+      ...(this.saveActionTimeline
+        ? [
+            '',
+            '| Action Timeline IDs |',
+            '| --- |',
+            ...issue.actionTimelineIds.map((id) => `| ${mdEscape(id)} |`)
+          ]
+        : ['', 'Action timeline evidence was disabled for this session.'])
     ];
 
     writeFileSync(issuePath, `${lines.join('\n')}\n`, 'utf8');
@@ -1624,6 +1727,10 @@ export class InstanceLogger {
       status
     });
   }
+
+  async flush(): Promise<void> {
+    await this.logger.flush();
+  }
 }
 
 export class StructuredRunLogger {
@@ -1635,13 +1742,27 @@ export class StructuredRunLogger {
 
   private readonly botLoggers = new Map<string, BotLogger>();
   private readonly instanceLoggers = new Map<string, InstanceLogger>();
+  private readonly saveActionTimeline: boolean;
+  private readonly saveStateSnapshots: boolean;
+  private readonly fullStructuredLogsLogger: JsonlLogger;
+  private readonly importantEventsLogger: JsonlLogger;
+  private readonly replayActionLogger?: JsonlLogger;
+  private totalLogCount = 0;
+  private importantEventCount = 0;
 
   constructor(options: StructuredRunLoggerOptions) {
+    this.saveActionTimeline = options.saveActionTimeline !== false;
+    this.saveStateSnapshots = options.saveStateSnapshots !== false;
     this.sessionLogger = new SessionLogger(options);
-    this.issueLogger = new IssueLogger(this.sessionLogger.sessionDir);
+    this.issueLogger = new IssueLogger(this.sessionLogger.sessionDir, this.saveActionTimeline);
     this.issueEventLogger = new IssueEventLogger();
     this.actionTimelineLogger = new ActionTimelineLogger(this.botLoggers);
     this.stateSnapshotLogger = new StateSnapshotLogger(this.botLoggers);
+    this.fullStructuredLogsLogger = new JsonlLogger(this.sessionLogger.fullStructuredLogsPath);
+    this.importantEventsLogger = new JsonlLogger(this.sessionLogger.importantEventsPath);
+    this.replayActionLogger = this.saveActionTimeline
+      ? new JsonlLogger(join(this.sessionLogger.replayDir, 'action-timeline.jsonl'))
+      : undefined;
   }
 
   get sessionDir(): string {
@@ -1667,7 +1788,12 @@ export class StructuredRunLogger {
       return existing;
     }
 
-    const logger = new BotLogger(this.sessionDir, botId);
+    const logger = new BotLogger(
+      this.sessionDir,
+      botId,
+      this.saveActionTimeline,
+      this.saveStateSnapshots
+    );
     this.botLoggers.set(botId, logger);
     return logger;
   }
@@ -1693,8 +1819,12 @@ export class StructuredRunLogger {
   }
 
   writeSummary(input: SessionSummaryReportInput): void {
-    this.sessionLogger.writeSummary(input);
-    this.writeSessionBundle(input);
+    const actionSummaries = Object.fromEntries(
+      [...this.botLoggers.entries()].map(([botId, logger]) => [botId, logger.getActionSummary()])
+    );
+    const enrichedInput = { ...input, actionSummaries };
+    this.sessionLogger.writeSummary(enrichedInput);
+    this.writeSessionBundle(enrichedInput);
   }
 
   logSession<TPayload extends Record<string, unknown>>(
@@ -1702,18 +1832,24 @@ export class StructuredRunLogger {
     payload: TPayload,
     options: { botId?: string; gameInstanceId?: string; timestamp?: string } = {}
   ): StructuredLogEvent<TPayload> {
-    return this.sessionLogger.log(eventType, payload, options);
+    const event = this.sessionLogger.log(eventType, payload, options);
+    this.appendBundleRecord({ ...event }, 'session');
+    return event;
   }
 
   logInstance(event: StructuredLogEvent, status?: GameInstanceStatus): void {
     if (event.gameInstanceId) {
       this.ensureInstance(event.gameInstanceId).log(event, status);
+      this.appendBundleRecord({ ...event, status }, 'instance', undefined, event.gameInstanceId);
     }
   }
 
   logAction(event: StructuredLogEvent, action: GameAction, result?: ActionResult): void {
     this.ensureBot(action.botId);
     this.actionTimelineLogger.logAction(event, action, result);
+    const record = { ...event, action, result };
+    this.appendBundleRecord(record, 'bot-actions', action.botId, action.gameInstanceId);
+    this.replayActionLogger?.append(record);
   }
 
   logState(event: StructuredLogEvent, snapshot: GameStateSnapshot): void {
@@ -1722,6 +1858,12 @@ export class StructuredRunLogger {
     }
 
     this.stateSnapshotLogger.logState(event, snapshot);
+    this.appendBundleRecord(
+      { ...event, snapshot },
+      'bot-states',
+      snapshot.botId,
+      snapshot.gameInstanceId
+    );
   }
 
   logIssue(event: StructuredLogEvent, issue: DetectedIssue, index: number, context: IssueEventLoggerContext = {}): string {
@@ -1730,6 +1872,12 @@ export class StructuredRunLogger {
     if (issue.botId) {
       this.ensureBot(issue.botId).logIssue(richEvent, issue);
     }
+    this.appendBundleRecord(
+      { ...richEvent, issue },
+      'bot-issues',
+      issue.botId,
+      issue.gameInstanceId ?? issue.instanceId
+    );
 
     return this.issueLogger.writeIssue(richEvent, issue, index, context);
   }
@@ -1737,6 +1885,37 @@ export class StructuredRunLogger {
   writeBotReports(bots: BotReportInput[]): void {
     for (const bot of bots) {
       this.ensureBot(bot.botId).writeReport(bot);
+    }
+  }
+
+  async flush(): Promise<void> {
+    await Promise.all([
+      this.sessionLogger.flush(),
+      this.fullStructuredLogsLogger.flush(),
+      this.importantEventsLogger.flush(),
+      this.replayActionLogger?.flush(),
+      ...[...this.botLoggers.values()].map((logger) => logger.flush()),
+      ...[...this.instanceLoggers.values()].map((logger) => logger.flush())
+    ]);
+  }
+
+  private appendBundleRecord(
+    record: Record<string, unknown>,
+    source: StructuredLogFileSource['source'],
+    botId?: string,
+    instanceId?: string
+  ): void {
+    const bundled = {
+      bundleSource: source,
+      botId: botId ?? stringValue(record.botId),
+      gameInstanceId: instanceId ?? stringValue(record.gameInstanceId),
+      ...record
+    };
+    this.fullStructuredLogsLogger.append(bundled);
+    this.totalLogCount += 1;
+    if (isImportantStructuredEvent(bundled)) {
+      this.importantEventsLogger.append(bundled);
+      this.importantEventCount += 1;
     }
   }
 
@@ -1753,48 +1932,13 @@ export class StructuredRunLogger {
       screenshotsDirectory: this.sessionLogger.screenshotsDir,
       reportsDirectory: this.sessionLogger.reportsDir,
       exportsDirectory: this.sessionLogger.exportsDir,
-      replayDirectory: this.sessionLogger.replayDir
+      replayDirectory: this.saveActionTimeline ? this.sessionLogger.replayDir : undefined
     };
-  }
-
-  private structuredLogSources(): StructuredLogFileSource[] {
-    return [
-      {
-        path: this.sessionLogger.sessionLogPath,
-        source: 'session'
-      },
-      ...[...this.botLoggers.values()].flatMap((logger): StructuredLogFileSource[] => [
-        {
-          path: logger.actionsPath,
-          source: 'bot-actions',
-          botId: logger.botId
-        },
-        {
-          path: logger.statesPath,
-          source: 'bot-states',
-          botId: logger.botId
-        },
-        {
-          path: logger.issuesPath,
-          source: 'bot-issues',
-          botId: logger.botId
-        }
-      ]),
-      ...[...this.instanceLoggers.values()].map((logger): StructuredLogFileSource => ({
-        path: logger.logPath,
-        source: 'instance',
-        instanceId: logger.instanceId
-      }))
-    ];
   }
 
   private writeSessionBundle(input: SessionSummaryReportInput): void {
     const paths = this.bundlePathsForSession();
     const runtimeObservation = resolveRuntimeObservationConfig(input.runConfig);
-    const fullLogs = this.structuredLogSources()
-      .flatMap(sourcedJsonlRecords)
-      .sort((a, b) => String(a.timestamp ?? '').localeCompare(String(b.timestamp ?? '')));
-    const importantEvents = fullLogs.filter(isImportantStructuredEvent);
     const issueTimeline = input.issues.map((issue) => ({
       issueId: issue.issueId,
       title: issue.title,
@@ -1808,29 +1952,6 @@ export class StructuredRunLogger {
       evidencePaths: unique([issue.screenshotPath, issue.videoPath, ...(issue.evidencePaths ?? [])]),
       timeline: buildIssueEventPayload(issue).timeline
     }));
-    const actionTimeline = fullLogs
-      .filter((event) => event.eventType === 'action_performed' || isRecord(event.action))
-      .map((event) => ({
-        eventId: event.eventId,
-        timestamp: event.timestamp,
-        botId: event.botId,
-        gameInstanceId: event.gameInstanceId,
-        actionId: stringValue(isRecord(event.action) ? event.action.actionId : undefined) ??
-          stringValue(isRecord(event.payload) ? event.payload.actionId : undefined),
-        actionType: stringValue(isRecord(event.action) ? event.action.type : undefined) ??
-          stringValue(isRecord(event.payload) ? event.payload.actionType : undefined),
-        status: stringValue(isRecord(event.result) ? event.result.status : undefined) ??
-          stringValue(isRecord(event.payload) ? event.payload.status : undefined),
-        quality: stringValue(isRecord(event.payload) ? event.payload.actionQuality : undefined) ??
-          stringValue(isRecord(event.action) && isRecord(event.action.payload) ? event.action.payload.quality : undefined),
-        explanation: stringValue(isRecord(event.payload) ? event.payload.explanation : undefined) ??
-          stringValue(isRecord(event.action) && isRecord(event.action.payload) ? event.action.payload.explanation : undefined),
-        nextLikelyAction: stringValue(isRecord(event.payload) ? event.payload.nextLikelyAction : undefined) ??
-          stringValue(isRecord(event.action) && isRecord(event.action.payload) ? event.action.payload.nextLikelyAction : undefined),
-        plannerMetadata: isRecord(event.payload) && isRecord(event.payload.plannerMetadata)
-          ? event.payload.plannerMetadata
-          : undefined
-      }));
     const screenshotFiles = [...this.botLoggers.values()]
       .flatMap((logger) => listFilesRecursive(logger.screenshotsDir))
       .filter((path) => /\.(png|jpe?g|webp|gif|svg)$/i.test(path));
@@ -1872,6 +1993,22 @@ export class StructuredRunLogger {
       },
       adapterType: input.runConfig.adapterType,
       runtimeObservation,
+      effectiveSettings: {
+        runUntilStopped: input.runConfig.runUntilStopped,
+        maxRuntimeMinutes: input.runConfig.maxRuntimeMinutes ?? null,
+        runtimeClock: 'active-running-time',
+        configuredMaxActionsPerBot: input.runConfig.maxActionsPerBot ?? null,
+        effectiveMaxActionsPerBot: input.runConfig.runUntilStopped
+          ? null
+          : input.runConfig.maxActionsPerBot ?? null,
+        saveActionTimeline: input.runConfig.saveActionTimeline,
+        saveStateSnapshots: input.runConfig.saveStateSnapshots,
+        allowAutoScaling: input.runConfig.resourceLimits.allowAutoScaling,
+        saveScreenshots: input.runConfig.saveScreenshots,
+        requireScreenshotEvidence: input.runConfig.requireScreenshotEvidence,
+        allowFullDesktopCapture: input.runConfig.allowFullDesktopCapture,
+        screenshotCaptureScopes: input.screenshotCaptureScopes ?? []
+      },
       directives: input.directives ?? [],
       directiveProgress: input.directiveProgress ?? [],
       directiveTimeline: input.directiveEvents ?? [],
@@ -1883,13 +2020,14 @@ export class StructuredRunLogger {
       createdAt: input.createdAt,
       startedAt: input.startedAt,
       stoppedAt: input.stoppedAt,
+      shutdownReason: input.shutdownReason,
       totalRuntime: formatDuration(input.startedAt, input.stoppedAt),
       counts: {
         bots: input.bots.length,
         instances: input.instances.length,
         issues: input.issues.length,
-        totalLogs: fullLogs.length,
-        importantEvents: importantEvents.length,
+        totalLogs: this.totalLogCount,
+        importantEvents: this.importantEventCount,
         screenshots: screenshotFiles.length
       },
       issuesBySeverity: Object.fromEntries(countBy(input.issues, (issue) => issue.severity)),
@@ -1914,8 +2052,8 @@ export class StructuredRunLogger {
       generatedAt: this.sessionLogger.currentTimestamp(),
       paths,
       counts: {
-        totalLogs: fullLogs.length,
-        importantEvents: importantEvents.length,
+        totalLogs: this.totalLogCount,
+        importantEvents: this.importantEventCount,
         issues: input.issues.length,
         bots: input.bots.length,
         instances: input.instances.length,
@@ -1926,7 +2064,9 @@ export class StructuredRunLogger {
     ensureDirectory(paths.screenshotsDirectory);
     ensureDirectory(paths.reportsDirectory);
     ensureDirectory(paths.exportsDirectory);
-    ensureDirectory(paths.replayDirectory);
+    if (paths.replayDirectory) {
+      ensureDirectory(paths.replayDirectory);
+    }
     writeJson(paths.summaryJson, summaryJson);
     writeJson(paths.issuesJson, input.issues);
     writeJson(paths.issueTimelineJson, issueTimeline);
@@ -1936,14 +2076,8 @@ export class StructuredRunLogger {
       sessionId: bundle.sessionId,
       screenshots: screenshotFiles
     });
-    writeJson(join(paths.replayDirectory, 'action-timeline.json'), {
-      sessionId: bundle.sessionId,
-      actions: actionTimeline
-    });
     writeJson(paths.metadataJson, bundle);
     copyIfExists(paths.summaryJson, join(paths.reportsDirectory, 'session-summary.json'));
-    writeJsonl(paths.fullStructuredLogsJsonl, fullLogs);
-    writeJsonl(paths.importantEventsJsonl, importantEvents);
   }
 
   static directoryExists(path: string): boolean {

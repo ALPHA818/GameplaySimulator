@@ -10,6 +10,8 @@ import {
   defaultRuntimeObservationConfig,
   type RuntimeObservationConfig
 } from '@core/config/runtimeObservationConfig';
+import { isLoopbackInstrumentationEndpoint } from '@instrumentation-sdk';
+import { assertResolvedPathWithin } from '@core/security/pathContainment';
 import { join } from 'node:path';
 import type { AdapterFactoryOptions } from './AdapterFactory';
 import type { AdapterCapabilities, ObservationCapability } from './base/GameAdapter';
@@ -54,6 +56,13 @@ const desktopAdapterTypes = new Set<AdapterType>(['desktop', 'rpg_maker', 'gamem
 function trimmed(value: string | undefined): string | undefined {
   const text = value?.trim();
   return text && text.length > 0 ? text : undefined;
+}
+
+function safePathSegment(value: string): string {
+  return value
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'unknown';
 }
 
 function isHttpUrl(value: string | undefined): boolean {
@@ -263,6 +272,19 @@ function validateProfileAdapterSettings(input: {
 
   if (
     (runtimeMode === 'instrumented' || runtimeMode === 'engine-instrumented') &&
+    instrumentationEndpoint &&
+    isHttpUrl(instrumentationEndpoint) &&
+    !isLoopbackInstrumentationEndpoint(instrumentationEndpoint)
+  ) {
+    errors.push({
+      path: 'adapter.instrumentationEndpoint',
+      message:
+        'Instrumentation must use 127.0.0.1, localhost, or ::1. Remote endpoints are unavailable in this release.'
+    });
+  }
+
+  if (
+    (runtimeMode === 'instrumented' || runtimeMode === 'engine-instrumented') &&
     gameProfile.adapter.instrumentationTransport !== undefined &&
     gameProfile.adapter.instrumentationTransport !== 'local-http'
   ) {
@@ -358,14 +380,21 @@ export function createAdapterOptionsFromGameProfile(
   const controlBindings = cloneControlBindings(gameProfile.controls);
   const launchArguments = [...gameProfile.launch.arguments];
   const screenshotDirectory = runtimePaths.runsRoot
-    ? join(runtimePaths.runsRoot, runConfig.sessionId, 'adapter-screenshots')
-    : `runs/${runConfig.sessionId}/adapter-screenshots`;
+    ? assertResolvedPathWithin(
+        runtimePaths.runsRoot,
+        join(runtimePaths.runsRoot, `session-${safePathSegment(runConfig.sessionId)}`, 'adapter-screenshots'),
+        'Adapter output path',
+        false
+      )
+    : `runs/session-${safePathSegment(runConfig.sessionId)}/adapter-screenshots`;
   const desktopOptions = {
     executablePath: gameProfile.launch.executablePath,
     workingDirectory: gameProfile.launch.workingDirectory,
     launchArguments,
     controlBindings,
     screenshotDirectory,
+    allowFullDesktopCapture: runConfig.allowFullDesktopCapture,
+    requireScreenshotEvidence: runConfig.requireScreenshotEvidence,
     runtimeObservation,
     capabilities
   };

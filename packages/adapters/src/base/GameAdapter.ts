@@ -71,10 +71,17 @@ export interface ScreenshotCapture {
   instanceId: string;
   botId: string;
   capturedAt: string;
+  scope?: ScreenshotCaptureScope;
   path?: string;
   mimeType?: string;
   data?: Uint8Array;
 }
+
+export type ScreenshotCaptureScope =
+  | 'game-window'
+  | 'application-window'
+  | 'full-desktop'
+  | 'unsupported';
 
 export interface VideoCaptureHandle {
   instanceId: string;
@@ -102,6 +109,7 @@ export interface GameAdapter {
   launchInstance(config: GameInstanceConfig): Promise<GameAdapterInstance>;
   stopInstance(instanceId: string): Promise<void>;
   stopAll(): Promise<void>;
+  abortActiveRequests?(): Promise<void> | void;
   forceStopAll?(): Promise<void>;
   getState(instanceId: string, botId: string): Promise<GameStateSnapshot | null>;
   getAvailableActions(instanceId: string, botId: string): Promise<AvailableGameAction[]>;

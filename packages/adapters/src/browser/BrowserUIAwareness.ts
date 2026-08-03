@@ -381,7 +381,7 @@ export function scanBrowserDom(): unknown {
     currentScreen = 'pause-menu';
   } else if (!currentScreen && /main menu|title screen/i.test(firstHeading)) {
     currentScreen = 'main-menu';
-  } else if (!currentScreen && /create game|create world|game settings|play game|select world/i.test(firstHeading)) {
+  } else if (!currentScreen && /create (?:new )?(?:game|world)|game settings|play game|select world/i.test(firstHeading)) {
     currentScreen = slugText(firstHeading);
   } else if (!currentScreen && isInGameplay) {
     currentScreen = 'gameplay';

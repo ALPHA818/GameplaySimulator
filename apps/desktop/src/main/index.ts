@@ -1,5 +1,5 @@
 import { app, BrowserWindow, shell } from 'electron';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { registerAppIpc } from './ipc/app';
@@ -13,6 +13,7 @@ import { resolveApplicationDataPaths } from './services/ApplicationPaths';
 import { LegacyRunsMigrator } from './services/LegacyRunsMigrator';
 import { ApplicationLogger } from './services/ApplicationLogger';
 import { runBoundedShutdown } from './services/ShutdownCoordinator';
+import { RendererCrashRecovery } from './services/RendererCrashRecovery';
 import {
   configureWebContentsSecurity,
   secureWebPreferences,
@@ -23,6 +24,7 @@ let mainWindow: BrowserWindow | null = null;
 let quitAfterShutdown = false;
 let simulationService: SimulationService | null = null;
 let applicationLogger: ApplicationLogger | null = null;
+let applicationShutdownPromise: Promise<unknown> | null = null;
 const pendingFailures: Array<{ kind: string; error: unknown; details?: Record<string, unknown> }> = [];
 
 function recordApplicationFailure(
@@ -50,14 +52,23 @@ process.on('unhandledRejection', (reason) => {
   recordApplicationFailure('unhandled_rejection', reason);
 });
 
+const rendererCrashRecovery = new RendererCrashRecovery({
+  onExhausted: (message) => {
+    recordApplicationFailure('renderer_recovery_exhausted', new Error(message), {
+      recovery: 'Restart GameplaySimulator and inspect the application logs.'
+    });
+    app.quit();
+  }
+});
+
 app.on('render-process-gone', (_event, webContents, details) => {
   recordApplicationFailure('renderer_process_gone', new Error(details.reason), {
     exitCode: details.exitCode,
     reason: details.reason
   });
 
-  if (!quitAfterShutdown && !webContents.isDestroyed()) {
-    setTimeout(() => webContents.reload(), 250);
+  if (!quitAfterShutdown) {
+    rendererCrashRecovery.handleCrash(webContents);
   }
 });
 
@@ -74,12 +85,14 @@ app.disableHardwareAcceleration();
 
 const releaseSmokeTest = process.env.GAMEPLAY_SIMULATOR_RELEASE_SMOKE_TEST === '1';
 const releaseSmokeUserData = process.env.GAMEPLAY_SIMULATOR_RELEASE_SMOKE_USER_DATA;
+const standardUserReleaseSmoke =
+  releaseSmokeTest && process.env.GAMEPLAY_SIMULATOR_STANDARD_USER_SMOKE === '1';
 
 if (releaseSmokeTest && releaseSmokeUserData) {
   app.setPath('userData', resolve(releaseSmokeUserData));
 }
 
-function createMainWindow(): void {
+function createMainWindow(onRendererLoaded?: () => void): void {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL;
   const rendererFile = join(__dirname, '../renderer/index.html');
   const rendererEntryUrl = rendererUrl ?? pathToFileURL(rendererFile).toString();
@@ -103,6 +116,9 @@ function createMainWindow(): void {
       recordApplicationFailure('external_navigation_failed', error, { url });
     }
   });
+  if (onRendererLoaded) {
+    mainWindow.webContents.once('did-finish-load', onRendererLoaded);
+  }
   mainWindow.once('closed', () => {
     mainWindow = null;
   });
@@ -149,7 +165,18 @@ app.whenReady().then(() => {
   registerResourceIpc(service);
   registerSessionIpc(service);
   registerWorkspaceIpc(workspaceRepository);
-  createMainWindow();
+  createMainWindow(standardUserReleaseSmoke
+    ? () => {
+      const markerPath = join(paths.userDataRoot, 'standard-user-release-smoke.json');
+      writeFileSync(markerPath, `${JSON.stringify({
+        readyAt: new Date().toISOString(),
+        user: `${process.env.USERDOMAIN ?? ''}\\${process.env.USERNAME ?? ''}`,
+        userDataPath: paths.userDataRoot,
+        rendererLoaded: true
+      }, null, 2)}\n`, 'utf8');
+      app.quit();
+    }
+    : undefined);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -164,17 +191,27 @@ app.on('before-quit', (event) => {
   }
 
   event.preventDefault();
+  if (applicationShutdownPromise) {
+    return;
+  }
   const service = simulationService;
 
   if (!service) {
-    quitAfterShutdown = true;
-    app.quit();
+    applicationShutdownPromise = Promise.resolve(applicationLogger?.flush()).finally(() => {
+      quitAfterShutdown = true;
+      app.quit();
+    });
     return;
   }
 
-  void runBoundedShutdown(service, {
+  applicationShutdownPromise = runBoundedShutdown(service, {
     onFailure: (kind, error) => recordApplicationFailure(kind, error)
-  }).finally(() => {
+  }).finally(async () => {
+    try {
+      await applicationLogger?.flush();
+    } catch (error) {
+      recordApplicationFailure('application_log_flush_failed', error);
+    }
     quitAfterShutdown = true;
     app.quit();
   });

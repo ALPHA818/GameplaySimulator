@@ -15,6 +15,7 @@ import { useSessionStore } from './sessionStore';
 import {
   configureWorkspacePersistence,
   createWorkspaceSnapshot,
+  flushWorkspacePersistence,
   mergeBotProfiles,
   migrateLegacyRuntimeObservation
 } from './workspacePersistence';
@@ -57,8 +58,7 @@ const savedRunConfig = SimulationRunConfigSchema.parse({
 let persistedWorkspace: WorkspaceData | undefined;
 
 async function flushPersistence(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
+  await flushWorkspacePersistence();
 }
 
 function resetStores(): void {

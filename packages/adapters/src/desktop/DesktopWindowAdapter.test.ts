@@ -46,12 +46,15 @@ class RecordingInputDriver implements DesktopInputDriver {
 }
 
 class FileScreenshotDriver implements DesktopScreenshotDriver {
-  async captureWindow(request: { outputPath: string }): Promise<{ path: string; mimeType: string }> {
+  async captureWindow(
+    request: { outputPath: string }
+  ): Promise<{ path: string; mimeType: string; scope: 'application-window' }> {
     await mkdir(dirname(request.outputPath), { recursive: true });
     await writeFile(request.outputPath, 'fake screenshot');
     return {
       path: request.outputPath,
-      mimeType: 'image/png'
+      mimeType: 'image/png',
+      scope: 'application-window'
     };
   }
 }
@@ -299,6 +302,7 @@ describe('DesktopWindowAdapter', () => {
 
     expect(screenshot.path).toContain(screenshotDirectory);
     expect(screenshot.mimeType).toBe('image/png');
+    expect(screenshot.scope).toBe('application-window');
     expect(state.screenshotPath).toBe(screenshot.path);
   });
 });

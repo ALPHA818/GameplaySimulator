@@ -73,6 +73,15 @@ interface ManagedBotRecord {
   runPromise: Promise<void> | null;
 }
 
+const MAX_RECENT_LOGS_PER_BOT = 500;
+
+function appendRecentBotLog(logs: LogEntry[], entry: LogEntry): void {
+  logs.push(entry);
+  if (logs.length > MAX_RECENT_LOGS_PER_BOT) {
+    logs.splice(0, logs.length - MAX_RECENT_LOGS_PER_BOT);
+  }
+}
+
 const ACTIVE_STATUSES = new Set<BotStatus>(['starting', 'running', 'waiting']);
 const TERMINAL_STATUSES = new Set<BotStatus>(['blocked', 'completed', 'failed', 'stopped']);
 
@@ -178,7 +187,7 @@ export class BotManager {
           adapter: options.adapter,
           logger: {
             log: (entry) => {
-              logs.push(entry);
+              appendRecentBotLog(logs, entry);
               return this.onLog?.({
                 plan,
                 profile,
@@ -187,7 +196,9 @@ export class BotManager {
             }
           },
           actionDelayMs: options.runConfig.actionDelayMs,
-          maxActionsPerBot: options.runConfig.maxActionsPerBot,
+          maxActionsPerBot: options.runConfig.runUntilStopped
+            ? undefined
+            : options.runConfig.maxActionsPerBot,
           seed: plan.seed,
           getCoverageData: options.getCoverageData,
           getRecentIssues: options.getRecentIssues,
@@ -405,7 +416,7 @@ export class BotManager {
     record.runPromise = runPromise
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : 'Unknown bot manager runtime error.';
-        record.logs.push({
+        appendRecentBotLog(record.logs, {
           id: `${this.options.sessionId}-${record.plan.botId}-manager-error-${Date.now()}`,
           level: 'error',
           message,

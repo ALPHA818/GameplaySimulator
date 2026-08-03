@@ -6,7 +6,7 @@
   "desktopName": "com.gameplaysimulator.desktop.desktop",
   "main": "out/main/index.js",
   "author": "GameplaySimulator contributors",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "node": ">=22.13.0 <23",
     "npm": ">=10"
@@ -33,7 +33,7 @@
   },
   "devDependencies": {
     "@swc/core": "^1.15.43",
-    "@types/node": "^26.1.0",
+    "@types/node": "^22.20.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.2.0",
@@ -50,13 +50,22 @@
     "productName": "GameplaySimulator",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "asar": true,
+    "afterPack": "scripts/after-pack.cjs",
     "directories": {
       "output": "release",
       "buildResources": "build"
     },
     "files": [
       "out/**/*",
-      "package.json"
+      "package.json",
+      "LICENSE",
+      "!**/*.map",
+      "!**/*.d.ts",
+      "!**/*.d.mts",
+      "!**/*.d.cts",
+      "!node_modules/**/*.ts",
+      "!node_modules/**/*.tsx",
+      "!node_modules/**/{test,tests,__tests__,benchmark,benchmarks,example,examples,fixtures}/**/*"
     ],
     "extraResources": [
       {
@@ -73,13 +82,19 @@
       ],
       "category": "Development",
       "icon": "build/icon.png",
-      "syncDesktopName": true
+      "syncDesktopName": true,
+      "executableArgs": []
+    },
+    "appImage": {
+      "executableArgs": []
     },
     "win": {
       "target": [
         "portable"
       ],
-      "icon": "build/icon.ico"
+      "artifactName": "${productName}-${version}-windows-${arch}.${ext}",
+      "icon": "build/icon.ico",
+      "requestedExecutionLevel": "asInvoker"
     }
   }
 }

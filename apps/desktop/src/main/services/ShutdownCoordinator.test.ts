@@ -47,6 +47,7 @@ describe('bounded application shutdown', () => {
     logger.logFailure('unhandled_rejection', new Error('browser close failed'), {
       sessionId: 'session-001'
     });
+    await logger.flush();
     const contents = await readFile(logger.logPath, 'utf8');
 
     expect(contents).toContain('unhandled_rejection');

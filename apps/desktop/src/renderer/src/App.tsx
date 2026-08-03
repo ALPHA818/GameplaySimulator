@@ -17,6 +17,7 @@ import { useSessionStore } from './store/sessionStore';
 import {
   configureWorkspacePersistence,
   createWorkspaceSnapshot,
+  flushWorkspacePersistence,
   migrateLegacyRuntimeObservation
 } from './store/workspacePersistence';
 import { pollRuntimeDetails, readableError } from './runtimePolling';
@@ -110,7 +111,9 @@ export function App() {
 
     return () => {
       cancelled = true;
-      configureWorkspacePersistence(null);
+      void flushWorkspacePersistence().finally(() => {
+        configureWorkspacePersistence(null);
+      });
     };
   }, [hydrateIssueReviewState, hydrateWorkspace, setWorkspaceWarning]);
 

@@ -8,7 +8,7 @@ GameplaySimulator is for legitimate development and QA. It is not a cheating too
 
 ## Install
 
-Download the package for your operating system from the `v0.1.0` GitHub release.
+After the v0.1.0 release gate passes, download the package for your operating system from the published `v0.1.0` GitHub release. Do not use the current local tag or an unverified build as a release artifact.
 
 ### Linux
 
@@ -19,13 +19,31 @@ chmod +x GameplaySimulator-0.1.0-linux-x86_64.AppImage
 ./GameplaySimulator-0.1.0-linux-x86_64.AppImage
 ```
 
-The release also includes `linux-unpacked` for debugging. The installed application includes Electron and Chromium, so Node.js and Playwright are not required for normal use.
+Local packaging also creates `linux-unpacked` for debugging; the published release artifact is the AppImage. The installed application includes Electron and Chromium, so Node.js and Playwright are not required for normal use.
+
+Verify the downloaded AppImage against its published checksum before running it:
+
+```bash
+sha256sum --check GameplaySimulator-0.1.0-linux-x86_64.AppImage.sha256
+```
+
+GameplaySimulator keeps the Electron renderer and bundled Chromium sandbox enabled. The Linux system must allow unprivileged user namespaces, which are enabled by default on supported desktop distributions. The AppImage runtime also requires FUSE 2 support, commonly provided by the `libfuse2` package. The application does not retry with sandbox-bypass arguments when sandbox initialization is blocked. In that case, enable user namespaces through the operating system's supported security policy before launching GameplaySimulator again.
 
 ### Windows
 
-Run `GameplaySimulator-0.1.0-windows-x64.exe`. It is a portable application and does not require an installer. The release also includes `win-unpacked` for debugging.
+Run `GameplaySimulator-0.1.0-windows-x64.exe`. It is a portable application and does not require an installer. Local packaging also creates `win-unpacked` for debugging.
+
+Version 0.1.0 Windows artifacts are not code-signed. Windows SmartScreen may show an unknown-publisher warning. Check the published `.sha256` file with `Get-FileHash -Algorithm SHA256` before choosing whether to run it. The project does not claim that this portable executable is signed.
+
+The Windows CI job launches the produced portable executable itself in both background and visible browser modes. It publishes machine-readable validation records containing the Windows version, artifact checksum, launch mode, Authenticode status, and test results. See [Windows release validation](docs/windows-release-validation.md).
 
 GameplaySimulator does not ship a macOS package in version `0.1.0`.
+
+## License
+
+GameplaySimulator is distributed under the [MIT License](LICENSE).
+
+Copyright (c) 2026 Hanre Bornman
 
 ## Supported Systems
 
@@ -161,12 +179,14 @@ Packaging commands:
 - `npm run dist:windows`: Windows portable executable and unpacked directory; run on Windows.
 - `npm run test:packaged`: packaged workspace, browser session, persistence, and report smoke test.
 
+Linux package validation launches the AppImage normally and rejects AppImage, Electron, or Chromium launch configuration containing sandbox-bypass arguments.
+
 Other development commands:
 
 - `npm run dev` or `npm run desktop`: desktop development mode.
 - `npm run example:instrumented-server`: controlled Local HTTP instrumented target.
 
-Release output is written to `release/`. Native packaging commands reject the wrong host operating system so the bundled Chromium runtime matches the package.
+Release output is written to `release/`. Packaging cleans old release output first, reads the version from `package.json`, and writes a `.sha256` sidecar plus a platform checksum manifest for each distributable. Native packaging commands reject the wrong host operating system so the bundled Chromium runtime matches the package. Unpacked directories remain local debugging output and are not published as release downloads.
 
 ## Documentation
 
@@ -178,6 +198,7 @@ Release output is written to `release/`. Native packaging commands reject the wr
 - [Unreal](docs/adapters/unreal.md)
 - [Custom engines](docs/adapters/custom-engine.md)
 - [Instrumentation SDK](packages/instrumentation-sdk/README.md)
+- [Windows release validation](docs/windows-release-validation.md)
 
 ## Repository Layout
 

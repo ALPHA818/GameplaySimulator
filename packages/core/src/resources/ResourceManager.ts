@@ -215,10 +215,15 @@ export class ResourceManager {
     const allocations: MutableAllocation[] = enabledPools.map((pool) => ({
       profileId: pool.profileId,
       requestedCount: pool.desiredCount,
-      recommendedCount: pool.scalingMode === 'fixed' ? pool.desiredCount : pool.minCount,
+      recommendedCount:
+        pool.scalingMode === 'fixed' || !runConfig.resourceLimits.allowAutoScaling
+          ? pool.desiredCount
+          : pool.minCount,
       reason:
         pool.scalingMode === 'fixed'
           ? 'Fixed scaling keeps the requested count unless a hard limit makes it impossible.'
+          : !runConfig.resourceLimits.allowAutoScaling
+            ? 'Auto scaling is disabled, so the requested count must be preserved or the session is blocked.'
           : 'Auto scaling starts at the configured minimum and grows while resources allow.',
       pool
     }));
@@ -251,7 +256,13 @@ export class ResourceManager {
       );
     }
 
-    this.fitAllocationsToUserCapacity(allocations, userCapacity, warnings, blockers);
+    this.fitAllocationsToUserCapacity(
+      allocations,
+      userCapacity,
+      warnings,
+      blockers,
+      runConfig.resourceLimits.allowAutoScaling
+    );
 
     const resourceCapacity = this.calculateResourceCapacity(system, runConfig);
     this.fitAllocationsToResourceCapacity(
@@ -265,15 +276,17 @@ export class ResourceManager {
       blockers
     );
 
-    this.growAutoAllocations(
-      allocations,
-      costs.estimatedCostPerGameInstance,
-      costByProfile,
-      resourceCapacity,
-      userCapacity,
-      runConfig,
-      gameProfile
-    );
+    if (runConfig.resourceLimits.allowAutoScaling) {
+      this.growAutoAllocations(
+        allocations,
+        costs.estimatedCostPerGameInstance,
+        costByProfile,
+        resourceCapacity,
+        userCapacity,
+        runConfig,
+        gameProfile
+      );
+    }
 
     const recommendedTotalBots = sumRecommended(allocations);
     const recommendedGameInstances = this.estimateGameInstances(
@@ -586,12 +599,18 @@ export class ResourceManager {
     allocations: MutableAllocation[],
     userCapacity: number,
     warnings: string[],
-    blockers: string[]
+    blockers: string[],
+    allowAutoScaling: boolean
   ): void {
     while (sumRecommended(allocations) > userCapacity) {
-      const autoCandidate = [...allocations]
-        .filter((allocation) => allocation.pool.scalingMode === 'auto' && allocation.recommendedCount > 0)
-        .sort((a, b) => a.pool.priority - b.pool.priority)[0];
+      const autoCandidate = allowAutoScaling
+        ? [...allocations]
+            .filter((allocation) =>
+              allocation.pool.scalingMode === 'auto' &&
+              allocation.recommendedCount > 0
+            )
+            .sort((a, b) => a.pool.priority - b.pool.priority)[0]
+        : undefined;
 
       if (autoCandidate) {
         autoCandidate.recommendedCount -= 1;
@@ -599,17 +618,12 @@ export class ResourceManager {
         continue;
       }
 
-      const fixedCandidate = [...allocations]
-        .filter((allocation) => allocation.recommendedCount > 0)
-        .sort((a, b) => a.pool.priority - b.pool.priority)[0];
-
-      if (!fixedCandidate) {
-        return;
-      }
-
-      fixedCandidate.recommendedCount -= 1;
-      fixedCandidate.reason = `Fixed request could not fit the configured hard limits.`;
-      blockers.push(`${fixedCandidate.profileId} was reduced because hard user limits make the request impossible.`);
+      blockers.push(
+        allowAutoScaling
+          ? 'The remaining fixed bot counts exceed the configured bot or game-instance limits.'
+          : 'Auto scaling is disabled, so requested bot counts cannot be reduced to fit the configured bot or game-instance limits.'
+      );
+      return;
     }
 
     if (sumRecommended(allocations) < allocations.reduce((total, allocation) => total + allocation.requestedCount, 0)) {
@@ -637,9 +651,14 @@ export class ResourceManager {
         gameProfile.adapter.supportsMultipleInstances
       )
     ) {
-      const autoCandidate = [...allocations]
-        .filter((allocation) => allocation.pool.scalingMode === 'auto' && allocation.recommendedCount > 0)
-        .sort((a, b) => a.pool.priority - b.pool.priority)[0];
+      const autoCandidate = runConfig.resourceLimits.allowAutoScaling
+        ? [...allocations]
+            .filter((allocation) =>
+              allocation.pool.scalingMode === 'auto' &&
+              allocation.recommendedCount > 0
+            )
+            .sort((a, b) => a.pool.priority - b.pool.priority)[0]
+        : undefined;
 
       if (autoCandidate) {
         autoCandidate.recommendedCount -= 1;
@@ -648,18 +667,12 @@ export class ResourceManager {
         continue;
       }
 
-      const fixedCandidate = [...allocations]
-        .filter((allocation) => allocation.recommendedCount > 0)
-        .sort((a, b) => a.pool.priority - b.pool.priority)[0];
-
-      if (!fixedCandidate) {
-        blockers.push('No enabled bot pool can fit within the current resource limits.');
-        return;
-      }
-
-      fixedCandidate.recommendedCount -= 1;
-      fixedCandidate.reason = `Fixed request could not fit the current CPU/RAM budget.`;
-      blockers.push(`${fixedCandidate.profileId} was reduced because the fixed request is impossible on this budget.`);
+      blockers.push(
+        runConfig.resourceLimits.allowAutoScaling
+          ? 'The remaining fixed bot counts cannot fit within the current CPU/RAM budget.'
+          : 'Auto scaling is disabled, so requested bot counts cannot be reduced to fit the current CPU/RAM budget.'
+      );
+      return;
     }
   }
 

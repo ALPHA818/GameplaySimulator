@@ -35,6 +35,7 @@ import type {
   SimulationBotStatus,
   SimulationSessionCreateResult,
   SimulationSessionStatusSnapshot,
+  StructuredLogPageRequest,
   StructuredLogReadResult,
   SimulationValidationResult
 } from '../../main/services/simulationService';
@@ -108,7 +109,7 @@ declare global {
         getIssues: (sessionId: string) => Promise<DetectedIssue[]>;
         getLogs: (sessionId: string) => Promise<LogEntry[]>;
         getCoverage: (sessionId: string) => Promise<ContentCoverageSummary>;
-        getStructuredLogs: (sessionId: string) => Promise<StructuredLogReadResult>;
+        getStructuredLogs: (sessionId: string, page?: StructuredLogPageRequest) => Promise<StructuredLogReadResult>;
 	        openEvidence: (sessionId: string, evidencePath: string) => Promise<OpenEvidenceResult>;
 	        openReport: (sessionId: string) => Promise<OpenReportResult>;
 	        openLogs: (sessionId: string) => Promise<OpenLogsResult>;

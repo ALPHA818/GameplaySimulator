@@ -7,6 +7,15 @@ import { BotTestDirectiveSchema } from './botTestDirective';
 
 export const RunModeSchema = z.enum(['parallel', 'sequential', 'hybrid']);
 
+export const SessionNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(120)
+  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
+    message: 'Session name cannot contain control characters.'
+  });
+
 export const ResourceLimitsSchema = z.object({
   maxCpuPercent: z.number().min(1).max(100),
   maxRamPercent: z.number().min(1).max(100),
@@ -25,6 +34,7 @@ export const TechnicalTestingConfigSchema = z.object({
 export const SimulationRunConfigSchema = z
   .object({
     sessionId: z.string().min(1),
+    sessionName: SessionNameSchema.optional(),
     sessionLabel: SessionLabelSchema.optional(),
     gameProfilePath: z.string().min(1),
     adapterType: AdapterTypeSchema,
@@ -33,6 +43,8 @@ export const SimulationRunConfigSchema = z
     maxRuntimeMinutes: z.number().positive().optional(),
     stopOnCriticalIssue: z.boolean(),
     saveScreenshots: z.boolean(),
+    requireScreenshotEvidence: z.boolean().optional(),
+    allowFullDesktopCapture: z.boolean().optional(),
     saveVideo: z.boolean().optional(),
     screenshotEveryNActions: z.number().int().positive().optional(),
     saveActionTimeline: z.boolean(),
@@ -58,6 +70,22 @@ export const SimulationRunConfigSchema = z
     resourceLimits: ResourceLimitsSchema
   })
   .superRefine((config, context) => {
+    if (config.requireScreenshotEvidence && !config.saveScreenshots) {
+      context.addIssue({
+        code: 'custom',
+        path: ['requireScreenshotEvidence'],
+        message: 'Required screenshot evidence needs Save screenshots to be enabled.'
+      });
+    }
+
+    if (config.allowFullDesktopCapture && !config.saveScreenshots) {
+      context.addIssue({
+        code: 'custom',
+        path: ['allowFullDesktopCapture'],
+        message: 'Full-desktop capture consent is only used when Save screenshots is enabled.'
+      });
+    }
+
     const enabledMinimumBots = config.botPools
       .filter((pool) => pool.enabled)
       .reduce((total, pool) => total + pool.minCount, 0);
@@ -71,6 +99,18 @@ export const SimulationRunConfigSchema = z
     }
 
     const directiveIds = new Set<string>();
+    const botPoolProfileIds = new Set<string>();
+    config.botPools.forEach((pool, index) => {
+      if (botPoolProfileIds.has(pool.profileId)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['botPools', index, 'profileId'],
+          message: 'Each bot profile can appear in only one bot pool per run.'
+        });
+      }
+      botPoolProfileIds.add(pool.profileId);
+    });
+
     config.directives?.forEach((directive, index) => {
       if (directive.sessionId !== config.sessionId) {
         context.addIssue({
@@ -92,6 +132,7 @@ export const SimulationRunConfigSchema = z
   });
 
 export type RunMode = z.infer<typeof RunModeSchema>;
+export type SessionName = z.infer<typeof SessionNameSchema>;
 export type ResourceLimits = z.infer<typeof ResourceLimitsSchema>;
 export type TechnicalTestingConfig = z.infer<typeof TechnicalTestingConfigSchema>;
 export type SimulationRunConfig = z.infer<typeof SimulationRunConfigSchema>;

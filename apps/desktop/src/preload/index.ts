@@ -34,6 +34,7 @@ import type {
   SimulationBotStatus,
   SimulationSessionCreateResult,
   SimulationSessionStatusSnapshot,
+  StructuredLogPageRequest,
   StructuredLogReadResult,
   SimulationValidationResult
 } from '../main/services/simulationService';
@@ -163,8 +164,8 @@ const api = {
       ipcRenderer.invoke('simulation:getLogs', sessionId) as Promise<LogEntry[]>,
     getCoverage: (sessionId: string) =>
       ipcRenderer.invoke('simulation:getCoverage', sessionId) as Promise<ContentCoverageSummary>,
-    getStructuredLogs: (sessionId: string) =>
-      ipcRenderer.invoke('simulation:getStructuredLogs', sessionId) as Promise<StructuredLogReadResult>,
+    getStructuredLogs: (sessionId: string, page?: StructuredLogPageRequest) =>
+      ipcRenderer.invoke('simulation:getStructuredLogs', sessionId, page) as Promise<StructuredLogReadResult>,
     openEvidence: (sessionId: string, evidencePath: string) =>
       ipcRenderer.invoke('simulation:openEvidence', sessionId, evidencePath) as Promise<OpenEvidenceResult>,
     openReport: (sessionId: string) =>

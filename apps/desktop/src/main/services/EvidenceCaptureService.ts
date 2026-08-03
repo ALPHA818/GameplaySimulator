@@ -1,7 +1,26 @@
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { basename, extname, isAbsolute, join, resolve } from 'node:path';
-import type { GameAdapter, ScreenshotCapture } from '../../../../../packages/adapters/src';
+import {
+  closeSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  realpathSync,
+  writeFileSync
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { isAbsolute, join, resolve } from 'node:path';
+import {
+  resolveAdapterRequestPolicy,
+  runBoundedAdapterRequest,
+  validateEvidenceImage,
+  type AdapterRequestPolicy,
+  type AdapterRequestPolicyInput,
+  type GameAdapter,
+  type ScreenshotCapture,
+  type ScreenshotCaptureScope
+} from '../../../../../packages/adapters/src';
 import type { GameAction, GameStateSnapshot } from '@core/types';
+import { assertResolvedPathWithin } from '@core/security/pathContainment';
 
 export type EvidenceCaptureKind = 'adapter_screenshot' | 'fallback_svg' | 'skipped' | 'failed';
 
@@ -25,12 +44,15 @@ export interface EvidenceCaptureResult {
   mimeType?: string;
   fallback: boolean;
   sourcePath?: string;
+  captureScope?: ScreenshotCaptureScope;
   message?: string;
 }
 
 export interface EvidenceCaptureServiceOptions {
   adapter?: GameAdapter;
   now?: () => string;
+  requestPolicy?: AdapterRequestPolicyInput;
+  approvedSessionRoot?: string;
 }
 
 function safePathSegment(value: string): string {
@@ -48,32 +70,43 @@ function xmlEscape(value: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function extensionForCapture(capture: ScreenshotCapture): string {
-  if (capture.path) {
-    const extension = extname(capture.path);
+function readBoundedFile(path: string, maximumBytes: number): Buffer {
+  const handle = openSync(path, 'r');
 
-    if (extension) {
-      return extension;
+  try {
+    const stats = fstatSync(handle);
+    if (!stats.isFile()) {
+      throw new Error('Adapter screenshot source is not a regular file.');
     }
+    if (stats.size > maximumBytes) {
+      throw new Error(
+        `Adapter screenshot source is ${stats.size} bytes, exceeding the ${maximumBytes}-byte limit.`
+      );
+    }
+
+    const buffer = Buffer.alloc(maximumBytes + 1);
+    let offset = 0;
+    while (offset <= maximumBytes) {
+      const bytesRead = readSync(
+        handle,
+        buffer,
+        offset,
+        maximumBytes + 1 - offset,
+        offset
+      );
+      if (bytesRead === 0) {
+        break;
+      }
+      offset += bytesRead;
+    }
+
+    if (offset > maximumBytes) {
+      throw new Error(`Adapter screenshot source exceeded the ${maximumBytes}-byte limit while reading.`);
+    }
+    return buffer.subarray(0, offset);
+  } finally {
+    closeSync(handle);
   }
-
-  if (capture.mimeType === 'image/jpeg') {
-    return '.jpg';
-  }
-
-  if (capture.mimeType === 'image/webp') {
-    return '.webp';
-  }
-
-  if (capture.mimeType === 'image/svg+xml') {
-    return '.svg';
-  }
-
-  return '.png';
-}
-
-function isSamePath(left: string, right: string): boolean {
-  return resolve(left) === resolve(right);
 }
 
 function fallbackSvg(input: {
@@ -116,10 +149,16 @@ function fallbackSvg(input: {
 export class EvidenceCaptureService {
   private readonly adapter?: GameAdapter;
   private readonly now: () => string;
+  private readonly requestPolicy: AdapterRequestPolicy;
+  private readonly approvedSessionRoot?: string;
 
   constructor(options: EvidenceCaptureServiceOptions = {}) {
     this.adapter = options.adapter;
     this.now = options.now ?? (() => new Date().toISOString());
+    this.requestPolicy = resolveAdapterRequestPolicy(options.requestPolicy);
+    this.approvedSessionRoot = options.approvedSessionRoot
+      ? resolve(options.approvedSessionRoot)
+      : undefined;
   }
 
   async captureScreenshot(context: EvidenceCaptureContext): Promise<EvidenceCaptureResult> {
@@ -134,68 +173,106 @@ export class EvidenceCaptureService {
       };
     }
 
-    mkdirSync(context.screenshotsDir, { recursive: true });
+    let screenshotsDir = this.approvedSessionRoot
+      ? assertResolvedPathWithin(
+          this.approvedSessionRoot,
+          context.screenshotsDir,
+          'Session screenshot directory',
+          true
+        )
+      : context.screenshotsDir;
+    mkdirSync(screenshotsDir, { recursive: true });
+    if (this.approvedSessionRoot) {
+      screenshotsDir = assertResolvedPathWithin(
+        realpathSync(this.approvedSessionRoot),
+        realpathSync(screenshotsDir),
+        'Resolved session screenshot directory',
+        true
+      );
+    }
+    const boundedContext = {
+      ...context,
+      screenshotsDir
+    };
 
     if (this.adapter?.capabilities.supportsScreenshots && this.adapter.captureScreenshot && context.instanceId) {
       try {
-        const capture = await this.adapter.captureScreenshot(context.instanceId, context.botId);
-        return await this.persistAdapterCapture(context, capture);
+        const capture = await runBoundedAdapterRequest({
+          operation: 'Adapter evidence capture',
+          timeoutMs: this.requestPolicy.timeouts.evidenceMs,
+          request: () => this.adapter!.captureScreenshot!(context.instanceId!, context.botId!)
+        });
+        return await this.persistAdapterCapture(boundedContext, capture);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Adapter screenshot capture failed.';
-        return this.writeFallback(context, message);
+        return this.writeFallback(boundedContext, message);
       }
     }
 
-    return this.writeFallback(context, 'Adapter screenshots are not available for this session.');
+    return this.writeFallback(boundedContext, 'Adapter screenshots are not available for this session.');
   }
 
   private async persistAdapterCapture(
     context: EvidenceCaptureContext,
     capture: ScreenshotCapture
   ): Promise<EvidenceCaptureResult> {
-    const extension = extensionForCapture(capture);
-    const fileName = `${safePathSegment(context.reason)}-${safePathSegment(context.issueId ?? capture.capturedAt)}${extension}`;
-    const outputPath = join(context.screenshotsDir, fileName);
-
-    if (capture.data) {
-      writeFileSync(outputPath, capture.data);
-      return {
-        kind: 'adapter_screenshot',
-        path: outputPath,
-        capturedAt: capture.capturedAt,
-        mimeType: capture.mimeType,
-        fallback: false
-      };
+    if (this.adapter?.adapterType === 'instrumented' && capture.path !== undefined) {
+      throw new Error('Instrumented evidence paths are not accepted.');
     }
 
+    let sourcePath: string | undefined;
     if (capture.path) {
-      const sourcePath = isAbsolute(capture.path) ? capture.path : resolve(capture.path);
-      const targetPath = isSamePath(sourcePath, outputPath)
-        ? sourcePath
-        : join(
-            context.screenshotsDir,
-            `${safePathSegment(context.reason)}-${safePathSegment(context.issueId ?? basename(sourcePath, extname(sourcePath)))}${extension}`
-          );
-
-      if (!existsSync(sourcePath)) {
-        throw new Error(`Adapter screenshot file does not exist: ${sourcePath}`);
+      if (!this.approvedSessionRoot) {
+        throw new Error('Adapter screenshot paths require an approved session root.');
       }
-
-      if (!isSamePath(sourcePath, targetPath)) {
-        copyFileSync(sourcePath, targetPath);
-      }
-
-      return {
-        kind: 'adapter_screenshot',
-        path: targetPath,
-        capturedAt: capture.capturedAt,
-        mimeType: capture.mimeType,
-        fallback: false,
-        sourcePath
-      };
+      const candidatePath = isAbsolute(capture.path) ? capture.path : resolve(capture.path);
+      const containedPath = assertResolvedPathWithin(
+        this.approvedSessionRoot,
+        candidatePath,
+        'Adapter screenshot source path',
+        true
+      );
+      sourcePath = assertResolvedPathWithin(
+        realpathSync(this.approvedSessionRoot),
+        realpathSync(containedPath),
+        'Resolved adapter screenshot source path',
+        true
+      );
     }
 
-    throw new Error('Adapter returned a screenshot without file path or image data.');
+    const rawData = capture.data
+      ? Buffer.from(capture.data)
+      : sourcePath
+        ? readBoundedFile(sourcePath, this.requestPolicy.responseSizeLimits.screenshotBytes)
+        : undefined;
+
+    if (!rawData) {
+      throw new Error('Adapter returned a screenshot without image data.');
+    }
+
+    const image = validateEvidenceImage({
+      data: rawData,
+      claimedMimeType: capture.mimeType,
+      maximumBytes: this.requestPolicy.responseSizeLimits.screenshotBytes
+    });
+    const fileName = `${safePathSegment(context.reason)}-${randomUUID()}${image.extension}`;
+    const outputPath = assertResolvedPathWithin(
+      context.screenshotsDir,
+      join(context.screenshotsDir, fileName),
+      'Screenshot evidence path',
+      false
+    );
+
+    writeFileSync(outputPath, image.data, { flag: 'wx' });
+    return {
+      kind: 'adapter_screenshot',
+      path: outputPath,
+      capturedAt: capture.capturedAt,
+      mimeType: image.mimeType,
+      fallback: false,
+      sourcePath,
+      captureScope: capture.scope
+    };
   }
 
   private async writeFallback(
@@ -203,9 +280,14 @@ export class EvidenceCaptureService {
     message: string
   ): Promise<EvidenceCaptureResult> {
     const capturedAt = this.now();
-    const outputPath = join(
+    const outputPath = assertResolvedPathWithin(
       context.screenshotsDir,
-      `fallback-${safePathSegment(context.reason)}-${safePathSegment(context.issueId ?? capturedAt)}.svg`
+      join(
+        context.screenshotsDir,
+        `fallback-${safePathSegment(context.reason)}-${randomUUID()}.svg`
+      ),
+      'Fallback evidence path',
+      false
     );
     const svg = fallbackSvg({
       sessionId: context.sessionId,
@@ -219,7 +301,7 @@ export class EvidenceCaptureService {
       fallbackReason: message
     });
 
-    writeFileSync(outputPath, svg, 'utf8');
+    writeFileSync(outputPath, svg, { encoding: 'utf8', flag: 'wx' });
 
     return {
       kind: 'fallback_svg',
@@ -227,6 +309,7 @@ export class EvidenceCaptureService {
       capturedAt,
       mimeType: 'image/svg+xml',
       fallback: true,
+      captureScope: 'unsupported',
       message
     };
   }

@@ -167,4 +167,62 @@ describe('core model schemas', () => {
       })
     ).toThrow();
   });
+
+  it('rejects duplicate controls, UI flows, and UI flow steps', () => {
+    const sample = readExampleJson<Record<string, unknown>>(
+      'examples/game-profiles/sample-game-profile.json'
+    );
+    const controls = [
+      {
+        controlId: 'jump',
+        label: 'Jump',
+        inputType: 'keyboard',
+        binding: 'Space',
+        action: 'jump'
+      },
+      {
+        controlId: 'jump',
+        label: 'Second jump',
+        inputType: 'keyboard',
+        binding: 'J',
+        action: 'jump'
+      }
+    ];
+    const duplicateSteps = {
+      flowId: 'first-run',
+      name: 'First run',
+      steps: [
+        { stepId: 'open-menu', actionType: 'open-menu' },
+        { stepId: 'open-menu', actionType: 'confirm-menu' }
+      ]
+    };
+
+    expect(() => GameProfileSchema.parse({ ...sample, controls })).toThrow(/Control IDs must be unique/);
+    expect(() => GameProfileSchema.parse({ ...sample, uiFlows: [duplicateSteps] })).toThrow(
+      /UI flow step IDs must be unique/
+    );
+    expect(() =>
+      GameProfileSchema.parse({
+        ...sample,
+        uiFlows: [
+          { flowId: 'first-run', name: 'First run', steps: [] },
+          { flowId: 'first-run', name: 'First run again', steps: [] }
+        ]
+      })
+    ).toThrow(/UI flow IDs must be unique/);
+  });
+
+  it('rejects duplicate bot-pool profile identities', () => {
+    const sample = readExampleJson<Record<string, unknown>>(
+      'examples/run-configs/sample-run-config.json'
+    );
+    const botPools = sample.botPools as Array<Record<string, unknown>>;
+
+    expect(() =>
+      SimulationRunConfigSchema.parse({
+        ...sample,
+        botPools: [botPools[0], { ...botPools[0] }]
+      })
+    ).toThrow(/only one bot pool/);
+  });
 });

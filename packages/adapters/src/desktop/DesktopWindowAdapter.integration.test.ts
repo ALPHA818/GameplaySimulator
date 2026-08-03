@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -100,5 +101,88 @@ describe('DesktopWindowAdapter integration', () => {
     expect(existsSync(stoppedPath)).toBe(true);
     expect(health.status).toBe('stopped');
     expect(logs.some((log) => log.message.includes('graceful stop signal'))).toBe(true);
+  });
+
+  it('keeps ownership after a launcher hands off to a child and leaves unrelated processes alone', async () => {
+    if (process.platform === 'win32') {
+      return;
+    }
+
+    const tempDir = await mkdtemp(join(tmpdir(), 'gameplay-simulator-launcher-handoff-'));
+    const childPidPath = join(tempDir, 'child-pid.txt');
+    const childStoppedPath = join(tempDir, 'child-stopped.txt');
+    const childPath = join(tempDir, 'owned-child.js');
+    const launcherPath = join(tempDir, 'launcher.js');
+    await writeFile(
+      childPath,
+      [
+        "const fs = require('node:fs');",
+        "fs.writeFileSync(process.env.OWNED_CHILD_PID_PATH, String(process.pid));",
+        "process.on('SIGTERM', () => {",
+        "  fs.writeFileSync(process.env.OWNED_CHILD_STOPPED_PATH, 'stopped');",
+        '  process.exit(0);',
+        '});',
+        'setInterval(() => {}, 1000);'
+      ].join('\n'),
+      'utf8'
+    );
+    await writeFile(
+      launcherPath,
+      [
+        "const { spawn } = require('node:child_process');",
+        "spawn(process.execPath, [process.env.OWNED_CHILD_PATH], {",
+        '  env: process.env,',
+        "  stdio: 'ignore'",
+        '});',
+        'setTimeout(() => process.exit(0), 50);'
+      ].join('\n'),
+      'utf8'
+    );
+    const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore'
+    });
+    const adapter = new DesktopWindowAdapter({
+      dependencyChecker: new DesktopAdapterDependencyChecker({
+        platform: process.platform === 'darwin' ? 'darwin' : 'linux',
+        commandExists: async () => false
+      }),
+      processStopTimeoutMs: 750
+    });
+    adapters.push(adapter);
+
+    try {
+      const instance = await adapter.launchInstance({
+        instanceId: 'launcher-handoff-instance',
+        gameProfileId: 'launcher-handoff-game',
+        launch: {
+          executablePath: process.execPath,
+          workingDirectory: tempDir,
+          arguments: [launcherPath],
+          platform: process.platform === 'darwin' ? 'mac' : 'linux'
+        },
+        maxBots: 1,
+        environment: {
+          OWNED_CHILD_PATH: childPath,
+          OWNED_CHILD_PID_PATH: childPidPath,
+          OWNED_CHILD_STOPPED_PATH: childStoppedPath
+        }
+      });
+      await waitFor(() => existsSync(childPidPath));
+      await waitFor(async () => await adapter.isRunning(instance.instanceId));
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const childPid = Number(await readFile(childPidPath, 'utf8'));
+      expect(childPid).toBeGreaterThan(0);
+      expect(await adapter.isRunning(instance.instanceId)).toBe(true);
+
+      await adapter.stopInstance(instance.instanceId);
+      await waitFor(() => existsSync(childStoppedPath));
+
+      expect(() => process.kill(childPid, 0)).toThrow();
+      expect(unrelated.pid).toBeGreaterThan(0);
+      expect(() => process.kill(unrelated.pid!, 0)).not.toThrow();
+    } finally {
+      unrelated.kill('SIGKILL');
+    }
   });
 });

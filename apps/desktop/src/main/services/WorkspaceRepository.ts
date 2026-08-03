@@ -21,6 +21,7 @@ import {
 
 export interface WorkspaceRepositoryOptions {
   now?: () => Date;
+  maxBackups?: number;
 }
 
 function timestampForPath(date: Date): string {
@@ -32,6 +33,7 @@ export class WorkspaceRepository {
   readonly backupsDirectory: string;
   readonly workspacePath: string;
   private readonly now: () => Date;
+  private readonly maxBackups: number;
   private sequence = 0;
 
   constructor(userDataDirectory: string, options: WorkspaceRepositoryOptions = {}) {
@@ -39,6 +41,7 @@ export class WorkspaceRepository {
     this.backupsDirectory = join(this.workspaceDirectory, 'backups');
     this.workspacePath = join(this.workspaceDirectory, 'workspace-v1.json');
     this.now = options.now ?? (() => new Date());
+    this.maxBackups = Math.max(1, options.maxBackups ?? 10);
   }
 
   load(): WorkspaceLoadResult {
@@ -115,6 +118,7 @@ export class WorkspaceRepository {
       `workspace-v1-backup-${this.nextFileSuffix()}.json`
     );
     copyFileSync(this.workspacePath, backupPath);
+    this.pruneBackups();
     return backupPath;
   }
 
@@ -138,6 +142,17 @@ export class WorkspaceRepository {
 
   private ensureDirectories(): void {
     mkdirSync(this.backupsDirectory, { recursive: true });
+  }
+
+  private pruneBackups(): void {
+    const backups = readdirSync(this.backupsDirectory)
+      .filter((name) => name.startsWith('workspace-v1-backup-') && name.endsWith('.json'))
+      .map((name) => join(this.backupsDirectory, name))
+      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+
+    for (const path of backups.slice(this.maxBackups)) {
+      rmSync(path, { force: true });
+    }
   }
 
   private nextFileSuffix(): string {

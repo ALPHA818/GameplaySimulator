@@ -117,6 +117,7 @@ describe('release E2E: sessions and cleanup', () => {
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-e2e-session-'));
     const server = await startInstrumentedTestServer({
       port: 0,
+      gameId: 'release-instrumented-game',
       sessionId: 'release-full-session'
     });
     const openedPaths: string[] = [];
@@ -142,18 +143,19 @@ describe('release E2E: sessions and cleanup', () => {
         gameProfile: profile,
         botProfiles: [releaseBotProfile]
       });
-      const started = await service.startSession(runConfig.sessionId);
+      const runtimeSessionId = created.sessionId;
+      const started = await service.startSession(runtimeSessionId);
 
       expect(validation.valid).toBe(true);
       expect(created.status.status).toBe('created');
       expect(started.status).toBe('running');
 
       await waitFor(
-        () => service.getSessionStatus(runConfig.sessionId).status === 'stopped',
+        () => service.getSessionStatus(runtimeSessionId).status === 'stopped',
         'the real session to finish'
       );
 
-      const metadata = service.listSessions().find((session) => session.sessionId === runConfig.sessionId);
+      const metadata = service.listSessions().find((session) => session.sessionId === runtimeSessionId);
       expect(metadata).toBeDefined();
       expect(existsSync(metadata!.reportPaths.fullStructuredLogs!)).toBe(true);
       expect((await readFile(metadata!.reportPaths.fullStructuredLogs!, 'utf8')).trim()).not.toBe('');
@@ -169,21 +171,21 @@ describe('release E2E: sessions and cleanup', () => {
       });
       const reopenedMetadata = reopenedService
         .listSessions()
-        .find((session) => session.sessionId === runConfig.sessionId);
-      const reportResult = await reopenedService.openReport(runConfig.sessionId);
+        .find((session) => session.sessionId === runtimeSessionId);
+      const reportResult = await reopenedService.openReport(runtimeSessionId);
       const sessionMetadata = await parseJson(
         join(reopenedMetadata!.reportPaths.sessionDirectory, 'session.json')
       );
 
       expect(reopenedMetadata).toMatchObject({
-        sessionId: runConfig.sessionId,
+        sessionId: runtimeSessionId,
         status: 'stopped',
         gameName: profile.gameName
       });
       expect(reportResult.opened).toBe(true);
       expect(openedPaths).toContain(reportResult.reportPath);
       expect(sessionMetadata).toMatchObject({
-        sessionId: runConfig.sessionId,
+        sessionId: runtimeSessionId,
         status: 'stopped'
       });
       await reopenedService.shutdownAllSessions('release_e2e_complete');
@@ -194,10 +196,84 @@ describe('release E2E: sessions and cleanup', () => {
     }
   });
 
+  it('shares simultaneous quit requests and persists an interrupted terminal session', async () => {
+    const sessionId = 'release-shared-shutdown-session';
+    const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-e2e-shutdown-'));
+    const server = await startInstrumentedTestServer({
+      port: 0,
+      gameId: 'release-instrumented-game',
+      sessionId
+    });
+    const profile = createInstrumentedGameProfile(server.endpoint);
+    const runConfig = createReleaseRunConfig(sessionId, {
+      maxActionsPerBot: 10_000
+    });
+    const service = new SimulationService({
+      reportRoot,
+      systemSnapshot: releaseSystemSnapshot
+    });
+
+    try {
+      const created = service.createSession({
+        runConfig,
+        gameProfile: profile,
+        botProfiles: [releaseBotProfile]
+      });
+      const runtimeSessionId = created.sessionId;
+      await service.startSession(runtimeSessionId);
+
+      const firstShutdown = service.shutdownAllSessions('release_e2e_simultaneous_quit');
+      const secondShutdown = service.shutdownAllSessions('release_e2e_simultaneous_quit');
+
+      expect(secondShutdown).toBe(firstShutdown);
+
+      const snapshots = await firstShutdown;
+      const stoppedSession = snapshots.find(
+        (snapshot) => snapshot.sessionId === runtimeSessionId
+      );
+      const metadata = service.listSessions().find(
+        (session) => session.sessionId === runtimeSessionId
+      );
+      const sessionMetadata = await parseJson(
+        join(metadata!.reportPaths.sessionDirectory, 'session.json')
+      );
+
+      expect(stoppedSession).toMatchObject({
+        sessionId: runtimeSessionId,
+        status: 'failed',
+        stoppedAt: expect.any(String)
+      });
+      expect(sessionMetadata).toMatchObject({
+        sessionId: runtimeSessionId,
+        status: 'failed',
+        stoppedAt: expect.any(String),
+        shutdownReason: 'release_e2e_simultaneous_quit'
+      });
+      expect(
+        service.getBotStatuses(runtimeSessionId).every(
+          (bot) => !['starting', 'running', 'paused', 'recovering'].includes(bot.status)
+        )
+      ).toBe(true);
+      expect(
+        (await service.getInstanceStatuses(runtimeSessionId)).every(
+          (instance) => instance.status === 'stopped'
+        )
+      ).toBe(true);
+    } finally {
+      await service.forceCleanupOwnedProcesses('release_e2e_cleanup').catch(() => undefined);
+      await server.stop().catch(() => undefined);
+      await rm(reportRoot, { recursive: true, force: true });
+    }
+  });
+
   it('applies an existing forced directive and writes its result to the session summary', async () => {
     const sessionId = 'release-directive-session';
     const reportRoot = await mkdtemp(join(tmpdir(), 'gameplay-simulator-e2e-directive-'));
-    const server = await startInstrumentedTestServer({ port: 0, sessionId });
+    const server = await startInstrumentedTestServer({
+      port: 0,
+      gameId: 'release-instrumented-game',
+      sessionId
+    });
     const directive = {
       directiveId: 'release-move-forward',
       sessionId,
@@ -233,19 +309,20 @@ describe('release E2E: sessions and cleanup', () => {
     });
 
     try {
-      service.createSession({
+      const created = service.createSession({
         runConfig,
         gameProfile: profile,
         botProfiles: [releaseBotProfile]
       });
-      await service.startSession(sessionId);
+      const runtimeSessionId = created.sessionId;
+      await service.startSession(runtimeSessionId);
       await waitFor(
-        () => service.getSessionStatus(sessionId).status === 'stopped',
+        () => service.getSessionStatus(runtimeSessionId).status === 'stopped',
         'the directed session to finish'
       );
 
-      const directiveState = service.getDirectiveState(sessionId);
-      const metadata = service.listSessions().find((session) => session.sessionId === sessionId);
+      const directiveState = service.getDirectiveState(runtimeSessionId);
+      const metadata = service.listSessions().find((session) => session.sessionId === runtimeSessionId);
       const summary = await parseJson(
         join(metadata!.reportPaths.sessionDirectory, 'session-summary.json')
       );
@@ -291,14 +368,15 @@ describe('release E2E: sessions and cleanup', () => {
     });
 
     try {
-      service.createSession({
+      const created = service.createSession({
         runConfig,
         gameProfile: profile,
         botProfiles: [releaseBotProfile]
       });
-      const status = await service.startSession(sessionId);
-      const issue = service.getIssues(sessionId)[0];
-      const metadata = service.listSessions().find((session) => session.sessionId === sessionId);
+      const runtimeSessionId = created.sessionId;
+      const status = await service.startSession(runtimeSessionId);
+      const issue = service.getIssues(runtimeSessionId)[0];
+      const metadata = service.listSessions().find((session) => session.sessionId === runtimeSessionId);
       const sessionMetadata = await parseJson(
         join(metadata!.reportPaths.sessionDirectory, 'session.json')
       );
@@ -328,7 +406,7 @@ describe('release E2E: sessions and cleanup', () => {
         'adapter_startup_failed'
       );
       expect(sessionMetadata).toMatchObject({
-        sessionId,
+        sessionId: runtimeSessionId,
         status: 'failed'
       });
     } finally {

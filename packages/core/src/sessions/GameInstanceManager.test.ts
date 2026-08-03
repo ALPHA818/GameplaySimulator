@@ -345,6 +345,120 @@ describe('GameInstanceManager', () => {
     expect(manager.drainEvents().map((event) => event.eventType)).toEqual(['instance_stop']);
   });
 
+  it('does not mark an instance running when resolved launch fails the health gate', async () => {
+    const adapter = new FakeAdapter();
+    adapter.healthOverrides.set('game-instance-001', {
+      instanceId: 'game-instance-001',
+      status: 'failed',
+      checkedAt: '2026-07-02T20:00:30.000Z',
+      message: 'Instrumentation endpoint is unreachable.',
+      details: {
+        connectionState: 'failed'
+      }
+    });
+    const manager = new GameInstanceManager({
+      adapter,
+      runConfig,
+      gameProfile,
+      launchPlans: launchPlans(1),
+      fileSystem
+    });
+
+    await expect(manager.startAllInstances()).rejects.toThrow(
+      /Instrumentation endpoint is unreachable/
+    );
+
+    expect(manager.getInstanceStatus('game-instance-001')).toMatchObject({
+      status: 'failed',
+      connectionState: 'failed'
+    });
+    expect(await adapter.isRunning('game-instance-001')).toBe(false);
+    expect(manager.getLiveInstanceRecord('game-instance-001').adapterInstance).toBeUndefined();
+  });
+
+  it('does not treat health polling during a pending launch as a crash', async () => {
+    let releaseLaunch!: () => void;
+    const launchGate = new Promise<void>((resolveLaunch) => {
+      releaseLaunch = resolveLaunch;
+    });
+    class SlowAdapter extends FakeAdapter {
+      override async launchInstance(config: GameInstanceConfig): Promise<ManagedGameAdapterInstance> {
+        this.launchCalls.push(config);
+        await launchGate;
+        this.running.set(config.instanceId, true);
+        return {
+          instanceId: config.instanceId,
+          gameProfileId: config.gameProfileId,
+          startedAt: '2026-07-02T20:00:01.000Z',
+          metadata: { processId: 4001 }
+        };
+      }
+    }
+    const adapter = new SlowAdapter();
+    const manager = new GameInstanceManager({
+      adapter,
+      runConfig,
+      gameProfile,
+      launchPlans: launchPlans(1),
+      fileSystem
+    });
+
+    const pendingLaunch = manager.startAllInstances();
+    await Promise.resolve();
+    expect(manager.getInstanceStatus('game-instance-001').status).toBe('starting');
+
+    const duringLaunch = await manager.refreshHealth();
+    expect(duringLaunch[0].status).toBe('starting');
+    expect(manager.drainEvents().some((event) => event.eventType === 'instance_crash')).toBe(false);
+
+    releaseLaunch();
+    const launched = await pendingLaunch;
+    expect(launched[0].status).toBe('running');
+  });
+
+  it('does not turn an intentional stop into a crash when a health check finishes late', async () => {
+    let healthCheckStarted!: () => void;
+    let rejectHealthCheck!: (error: Error) => void;
+    const started = new Promise<void>((resolveStarted) => {
+      healthCheckStarted = resolveStarted;
+    });
+    const lateHealth = new Promise<ManagedAdapterHealth>((_resolveHealth, rejectHealth) => {
+      rejectHealthCheck = rejectHealth;
+    });
+    class SlowHealthAdapter extends FakeAdapter {
+      healthCalls = 0;
+
+      override async getHealth(instanceId: string): Promise<ManagedAdapterHealth> {
+        this.healthCalls += 1;
+        if (this.healthCalls === 1) {
+          return super.getHealth(instanceId);
+        }
+        healthCheckStarted();
+        return lateHealth;
+      }
+    }
+    const adapter = new SlowHealthAdapter();
+    const manager = new GameInstanceManager({
+      adapter,
+      runConfig,
+      gameProfile,
+      launchPlans: launchPlans(1),
+      fileSystem
+    });
+
+    await manager.startAllInstances();
+    manager.drainEvents();
+    const pendingHealth = manager.refreshHealth();
+    await started;
+    const stopped = await manager.stopInstance('game-instance-001');
+    rejectHealthCheck(new Error('Health request aborted because the instance is stopping.'));
+    const refreshed = await pendingHealth;
+
+    expect(stopped.status).toBe('stopped');
+    expect(refreshed[0].status).toBe('stopped');
+    expect(manager.drainEvents().map((event) => event.eventType)).toEqual(['instance_stop']);
+  });
+
   it('copies seed save folders and passes the isolated path through launch arguments', async () => {
     const sourceDir = join(tmpdir(), `gameplay-simulator-seed-${Date.now()}`);
     const rootDir = join(tmpdir(), `gameplay-simulator-saves-${Date.now()}`);
