@@ -158,7 +158,7 @@ describe('release packaging configuration', () => {
     expect(standardUserSmoke).toContain('launch-standard-user-smoke.ps1');
     expect(standardUserSmoke).toContain("-File `\"$launcherPath`\"");
     expect(standardUserSmoke).not.toContain('-EncodedCommand');
-    expect(standardUserSmoke).toContain('if ($childProcess.HasExited)');
+    expect(standardUserSmoke).toContain('$childProcess.ExitCode -ne 0');
     expect(standardUserSmoke).toContain('AddSeconds(180)');
     expect(standardUserSmoke).toContain('Get-OwnedProcessTreeIds');
     expect(standardUserSmoke).not.toContain("Name -like 'GameplaySimulator*.exe'");
