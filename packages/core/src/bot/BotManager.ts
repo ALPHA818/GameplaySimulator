@@ -447,23 +447,23 @@ export class BotManager {
       });
   }
 
-  private handleStatusChange(botId: string, status: RuntimeBotSnapshot, memory: BotMemory): void | Promise<void> {
+  private async handleStatusChange(botId: string, status: RuntimeBotSnapshot, memory: BotMemory): Promise<void> {
     const record = this.records.get(botId);
 
     if (!record) {
-      return undefined;
+      return;
     }
 
-    if (!ACTIVE_STATUSES.has(status.status)) {
-      this.notifyIdleIfNeeded();
-    }
-
-    return this.onStatusChange?.({
+    await this.onStatusChange?.({
       plan: record.plan,
       profile: record.profile,
       status,
       memory
     });
+
+    if (!ACTIVE_STATUSES.has(status.status)) {
+      this.notifyIdleIfNeeded();
+    }
   }
 
   private notifyIdleIfNeeded(): void {

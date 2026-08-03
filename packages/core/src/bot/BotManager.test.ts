@@ -233,6 +233,48 @@ describe('BotManager', () => {
     ]);
   });
 
+  it('waits for terminal status persistence before reporting the manager idle', async () => {
+    const adapter = new ManagerTestAdapter();
+    let releaseTerminalStatus: (() => void) | undefined;
+    let markTerminalStatusStarted: (() => void) | undefined;
+    const terminalStatusGate = new Promise<void>((resolve) => {
+      releaseTerminalStatus = resolve;
+    });
+    const terminalStatusStarted = new Promise<void>((resolve) => {
+      markTerminalStatusStarted = resolve;
+    });
+    let terminalStatusPersisted = false;
+    let idleObservedPersistedStatus = false;
+    const manager = new BotManager({
+      sessionId: 'session-manager',
+      runConfig: runConfig('parallel'),
+      launchPlans: [plan('explorer-001', 'explorer', 1)],
+      botProfiles: profiles,
+      adapter,
+      now: () => '2026-07-04T10:00:00.000Z',
+      sleep: async () => {},
+      onStatusChange: async ({ status }) => {
+        if (status.status !== 'completed') {
+          return;
+        }
+        markTerminalStatusStarted?.();
+        await terminalStatusGate;
+        terminalStatusPersisted = true;
+      },
+      onIdle: () => {
+        idleObservedPersistedStatus = terminalStatusPersisted;
+      }
+    });
+
+    manager.startAll();
+    await terminalStatusStarted;
+    expect(idleObservedPersistedStatus).toBe(false);
+    releaseTerminalStatus?.();
+    await manager.whenIdle();
+
+    expect(idleObservedPersistedStatus).toBe(true);
+  });
+
   it('limits active bots in hybrid mode', async () => {
     const adapter = new ManagerTestAdapter();
     const tracker = runningTracker();
