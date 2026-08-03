@@ -115,8 +115,7 @@ async function startGamePage() {
 
     observedState.pageLoads += 1;
     response.writeHead(200, {
-      'content-type': 'text/html; charset=utf-8',
-      connection: 'close'
+      'content-type': 'text/html; charset=utf-8'
     });
     response.end(`<!doctype html>
 <html>
@@ -147,12 +146,21 @@ async function startGamePage() {
         }
         window.packagedTestState.actionCount += 1;
         window.packagedTestState.currentScreen = action.type;
-        const response = await fetch('/test-action', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ type: action.type })
-        });
-        if (!response.ok) {
+        let actionResponse;
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          try {
+            actionResponse = await fetch('/test-action', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ type: action.type })
+            });
+            if (actionResponse.ok) break;
+          } catch {
+            // A freshly launched Windows Chromium can briefly reset its first loopback request.
+          }
+          await new Promise((resolveRetry) => setTimeout(resolveRetry, attempt * 100));
+        }
+        if (!actionResponse?.ok) {
           return { status: 'failed', message: 'The test game could not record the action.' };
         }
         return { status: 'succeeded', message: 'Packaged Chromium action completed.' };
