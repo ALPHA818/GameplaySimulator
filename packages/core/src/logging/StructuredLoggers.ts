@@ -3,6 +3,8 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync
 } from 'node:fs';
@@ -274,8 +276,21 @@ function ensureDirectory(path: string): void {
   mkdirSync(path, { recursive: true });
 }
 
+let atomicWriteSequence = 0;
+
+function writeTextAtomically(path: string, value: string): void {
+  atomicWriteSequence += 1;
+  const temporaryPath = `${path}.tmp-${process.pid}-${atomicWriteSequence}`;
+  try {
+    writeFileSync(temporaryPath, value, { encoding: 'utf8', flag: 'wx' });
+    renameSync(temporaryPath, path);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
 function writeJson(path: string, value: unknown): void {
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  writeTextAtomically(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function safePathSegment(value: string): string {
@@ -1337,8 +1352,8 @@ export class SessionLogger {
       `HTML report: ${this.htmlReportPath}`
     ];
 
-    writeFileSync(this.summaryPath, `${lines.join('\n')}\n`, 'utf8');
-    writeFileSync(
+    writeTextAtomically(this.summaryPath, `${lines.join('\n')}\n`);
+    writeTextAtomically(
       this.htmlReportPath,
       [
         '<!doctype html>',
@@ -1355,8 +1370,7 @@ export class SessionLogger {
         '</main>',
         '</body>',
         '</html>'
-      ].join('\n'),
-      'utf8'
+      ].join('\n')
     );
     copyIfExists(this.summaryPath, join(this.reportsDir, 'session-summary.md'));
     copyIfExists(this.htmlReportPath, join(this.reportsDir, 'session-report.html'));
@@ -1555,7 +1569,7 @@ export class BotLogger {
       `Issues log: ${this.issuesPath}`
     ];
 
-    writeFileSync(this.reportPath, `${lines.join('\n')}\n`, 'utf8');
+    writeTextAtomically(this.reportPath, `${lines.join('\n')}\n`);
   }
 
   getActionSummary(): BotActionSummary {
@@ -1686,7 +1700,7 @@ export class IssueLogger {
         : ['', 'Action timeline evidence was disabled for this session.'])
     ];
 
-    writeFileSync(issuePath, `${lines.join('\n')}\n`, 'utf8');
+    writeTextAtomically(issuePath, `${lines.join('\n')}\n`);
     return issuePath;
   }
 }
