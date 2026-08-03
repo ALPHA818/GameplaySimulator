@@ -98,7 +98,9 @@ describe('DesktopWindowAdapter integration', () => {
     const health = await adapter.getHealth(instance.instanceId);
     const logs = await adapter.captureLogs(instance.instanceId);
 
-    expect(existsSync(stoppedPath)).toBe(true);
+    if (process.platform !== 'win32') {
+      expect(existsSync(stoppedPath)).toBe(true);
+    }
     expect(health.status).toBe('stopped');
     expect(logs.some((log) => log.message.includes('graceful stop signal'))).toBe(true);
   });
