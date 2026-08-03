@@ -1,16 +1,14 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { StructuredRunLogger } from '../../packages/core/src/logging/StructuredLoggers';
+import { removeTemporaryDirectory } from './releaseFixtures';
 
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, {
-    recursive: true,
-    force: true
-  })));
+  await Promise.all(temporaryRoots.splice(0).map(removeTemporaryDirectory));
 });
 
 describe('long-session persistence', () => {

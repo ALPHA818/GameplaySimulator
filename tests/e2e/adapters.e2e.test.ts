@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Browser } from 'playwright';
@@ -16,6 +16,7 @@ import {
 import {
   createGameAction,
   processIsAlive,
+  removeTemporaryDirectory,
   startBrowserTestPage,
   waitFor
 } from './releaseFixtures';
@@ -94,7 +95,7 @@ describe('release E2E: real adapters', () => {
     } finally {
       await adapter.forceStopAll().catch(() => undefined);
       await pageServer.stop().catch(() => undefined);
-      await rm(screenshotDirectory, { recursive: true, force: true });
+      await removeTemporaryDirectory(screenshotDirectory);
     }
 
     expect(pageServer.server.listening).toBe(false);
@@ -218,7 +219,7 @@ describe('release E2E: real adapters', () => {
       if (processId > 0 && processIsAlive(processId)) {
         process.kill(processId, 'SIGKILL');
       }
-      await rm(tempDirectory, { recursive: true, force: true });
+      await removeTemporaryDirectory(tempDirectory);
     }
   });
 });

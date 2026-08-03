@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -21,6 +21,7 @@ import {
   createInstrumentedGameProfile,
   createReleaseRunConfig,
   processIsAlive,
+  removeTemporaryDirectory,
   releaseBotProfile,
   releaseSystemSnapshot,
   waitFor
@@ -192,7 +193,7 @@ describe('release E2E: sessions and cleanup', () => {
     } finally {
       await service.shutdownAllSessions('release_e2e_cleanup').catch(() => []);
       await server.stop().catch(() => undefined);
-      await rm(reportRoot, { recursive: true, force: true });
+      await removeTemporaryDirectory(reportRoot);
     }
   });
 
@@ -262,7 +263,7 @@ describe('release E2E: sessions and cleanup', () => {
     } finally {
       await service.forceCleanupOwnedProcesses('release_e2e_cleanup').catch(() => undefined);
       await server.stop().catch(() => undefined);
-      await rm(reportRoot, { recursive: true, force: true });
+      await removeTemporaryDirectory(reportRoot);
     }
   });
 
@@ -347,7 +348,7 @@ describe('release E2E: sessions and cleanup', () => {
     } finally {
       await service.shutdownAllSessions('release_e2e_cleanup').catch(() => []);
       await server.stop().catch(() => undefined);
-      await rm(reportRoot, { recursive: true, force: true });
+      await removeTemporaryDirectory(reportRoot);
     }
   });
 
@@ -414,7 +415,7 @@ describe('release E2E: sessions and cleanup', () => {
       if (adapter.processId && processIsAlive(adapter.processId)) {
         process.kill(adapter.processId, 'SIGKILL');
       }
-      await rm(reportRoot, { recursive: true, force: true });
+      await removeTemporaryDirectory(reportRoot);
     }
   });
 });

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -10,6 +10,7 @@ import {
   WorkspaceDataSchema
 } from '@core/config/workspaceData';
 import { WorkspaceRepository } from '../../apps/desktop/src/main/services/WorkspaceRepository';
+import { removeTemporaryDirectory } from './releaseFixtures';
 
 describe('release E2E: workspace persistence', () => {
   it('reloads custom game and bot profiles after recreating the repository', async () => {
@@ -73,7 +74,7 @@ describe('release E2E: workspace persistence', () => {
       expect(reloaded.data.gameProfiles).toEqual([gameProfile]);
       expect(reloaded.data.customBotProfiles).toEqual([botProfile]);
     } finally {
-      await rm(userDataDirectory, { recursive: true, force: true });
+      await removeTemporaryDirectory(userDataDirectory);
     }
   });
 });
