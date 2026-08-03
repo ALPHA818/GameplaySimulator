@@ -159,6 +159,7 @@ export class Bot {
   private stopRequested = false;
   private pauseRequested = false;
   private terminalStatus?: Extract<BotStatus, 'failed' | 'stopped'>;
+  private terminalMessage?: string;
   private runPromise: Promise<void> | null = null;
   status: BotStatus = 'queued';
 
@@ -205,6 +206,7 @@ export class Bot {
       this.stopRequested = false;
       this.pauseRequested = false;
       this.terminalStatus = undefined;
+      this.terminalMessage = undefined;
       this.runPromise = this.runLoop().finally(() => {
         this.runPromise = null;
       });
@@ -231,6 +233,7 @@ export class Bot {
     this.stopRequested = true;
     this.pauseRequested = false;
     this.terminalStatus = 'stopped';
+    this.terminalMessage = 'Stop requested.';
     this.setStatus('stopped', 'Stop requested.');
   }
 
@@ -238,6 +241,7 @@ export class Bot {
     this.stopRequested = true;
     this.pauseRequested = false;
     this.terminalStatus = 'failed';
+    this.terminalMessage = message;
     this.setStatus('failed', message);
   }
 
@@ -376,6 +380,10 @@ export class Bot {
         );
         await this.emitStatus();
 
+        if (this.terminalStatus) {
+          return;
+        }
+
         const directiveWaitAfterMs =
           typeof action.payload.directiveWaitAfterMs === 'number' &&
           Number.isFinite(action.payload.directiveWaitAfterMs)
@@ -429,11 +437,14 @@ export class Bot {
     }
 
     this.status = status;
-    this.memory.progressState = message ?? this.memory.progressState;
+    this.memory.progressState = this.terminalMessage ?? message ?? this.memory.progressState;
     await this.emitStatus();
   }
 
   private async emitStatus(): Promise<void> {
+    if (this.terminalMessage) {
+      this.memory.progressState = this.terminalMessage;
+    }
     await this.onStatusChange?.(this.getStatusSnapshot(), this.memory);
   }
 
