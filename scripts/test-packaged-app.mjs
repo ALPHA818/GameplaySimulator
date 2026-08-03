@@ -6,7 +6,7 @@ import { constants, createReadStream } from 'node:fs';
 import { platform as osPlatform, release as osRelease, tmpdir, version as osVersion } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { _electron as electron } from 'playwright';
+import { chromium, _electron as electron } from 'playwright';
 import {
   assertExpectedPackagedState,
   assertSessionReportContainsAction,
@@ -662,10 +662,94 @@ async function launchApplication(executablePath, userDataPath) {
   delete env.ELECTRON_DISABLE_SANDBOX;
   delete env.APPIMAGE_EXTRACT_AND_RUN;
 
+  if (process.platform === 'win32') {
+    return launchWindowsPortableApplication(executablePath, userDataPath, env);
+  }
+
   return electron.launch({
     executablePath,
     env
   });
+}
+
+async function reserveLoopbackPort() {
+  const server = createServer();
+  await new Promise((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(0, '127.0.0.1', resolveListen);
+  });
+  const address = server.address();
+  await new Promise((resolveClose, rejectClose) => {
+    server.close((error) => error ? rejectClose(error) : resolveClose());
+  });
+  if (!address || typeof address === 'string') {
+    throw new Error('Could not reserve a loopback port for the packaged Windows UI test.');
+  }
+  return address.port;
+}
+
+async function launchWindowsPortableApplication(executablePath, userDataPath, env) {
+  const debugPort = await reserveLoopbackPort();
+  const launcher = spawn(
+    executablePath,
+    [`--remote-debugging-address=127.0.0.1`, `--remote-debugging-port=${debugPort}`],
+    {
+      env,
+      stdio: 'ignore',
+      windowsHide: false
+    }
+  );
+  let launchError;
+  launcher.once('error', (error) => {
+    launchError = error;
+  });
+  launcher.once('exit', (code) => {
+    if (code !== null && code !== 0) {
+      launchError = new Error(`The Windows portable launcher exited with code ${code}.`);
+    }
+  });
+
+  await waitForCondition(async () => {
+    if (launchError) {
+      throw launchError;
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:${debugPort}/json/version`);
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }, 'the distributed Windows portable renderer to expose its test-only DevTools endpoint', 180_000);
+
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
+  let closed = false;
+
+  return {
+    async firstWindow() {
+      return waitForCondition(
+        async () => browser.contexts().flatMap((context) => context.pages())[0],
+        'the distributed Windows portable application window',
+        30_000
+      );
+    },
+    async close() {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      const pages = browser.contexts().flatMap((context) => context.pages());
+      await Promise.allSettled(pages.map((page) => page.close({ runBeforeUnload: true })));
+      await browser.close().catch(() => undefined);
+      await waitForCondition(async () => {
+        try {
+          const response = await fetch(`http://127.0.0.1:${debugPort}/json/version`);
+          return !response.ok;
+        } catch {
+          return true;
+        }
+      }, 'the distributed Windows portable application to close', 30_000);
+    }
+  };
 }
 
 async function waitForCondition(check, description, timeoutMs = 20_000) {

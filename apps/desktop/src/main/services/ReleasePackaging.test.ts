@@ -125,6 +125,10 @@ describe('release packaging configuration', () => {
     expect(packagedSmoke).toContain("getByRole('button', { name: 'Summary report'");
     expect(packagedSmoke).toContain('GameplaySimulator Portable Path With Spaces');
     expect(packagedSmoke).toContain('expectedPortableName');
+    expect(packagedSmoke).toContain('launchWindowsPortableApplication');
+    expect(packagedSmoke).toContain('chromium.connectOverCDP');
+    expect(packagedSmoke).toContain('remote-debugging-address=127.0.0.1');
+    expect(packagedSmoke).toContain("if (process.platform === 'win32')");
     expect(packagedSmoke).toContain('windowsLaunchIdentity');
     expect(packagedSmoke).toContain('active-shutdown session');
     expect(packagedSmoke).toContain('startInstrumentedExample');
