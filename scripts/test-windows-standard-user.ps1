@@ -68,7 +68,7 @@ exit `$LASTEXITCODE
   }
 
   $marker = Get-Content -Raw -LiteralPath $markerPath | ConvertFrom-Json
-  if ($marker.rendererLoaded -ne $true -or $marker.user -notlike "*\$testUser") {
+  if ($marker.rendererLoaded -ne $true -or $marker.user -ine $testUser) {
     throw "The standard-user readiness marker was invalid: $($marker | ConvertTo-Json -Compress)"
   }
   $ownedProcessIds = @(Get-CimInstance Win32_Process | Where-Object {

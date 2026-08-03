@@ -1,5 +1,6 @@
 import { app, BrowserWindow, shell } from 'electron';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { registerAppIpc } from './ipc/app';
@@ -170,7 +171,8 @@ app.whenReady().then(() => {
       const markerPath = join(paths.userDataRoot, 'standard-user-release-smoke.json');
       writeFileSync(markerPath, `${JSON.stringify({
         readyAt: new Date().toISOString(),
-        user: `${process.env.USERDOMAIN ?? ''}\\${process.env.USERNAME ?? ''}`,
+        user: userInfo().username,
+        environmentUser: `${process.env.USERDOMAIN ?? ''}\\${process.env.USERNAME ?? ''}`,
         userDataPath: paths.userDataRoot,
         rendererLoaded: true
       }, null, 2)}\n`, 'utf8');

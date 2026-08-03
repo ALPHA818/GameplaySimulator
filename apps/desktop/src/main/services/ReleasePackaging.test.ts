@@ -149,6 +149,11 @@ describe('release packaging configuration', () => {
     expect(standardUserSmoke).not.toContain('-EncodedCommand');
     expect(standardUserSmoke).toContain('$childProcess.ExitCode -ne 0');
     expect(standardUserSmoke).toContain('standardUserLaunch = \'passed\'');
+    const electronMain = readFileSync(
+      resolve(projectRoot, 'apps/desktop/src/main/index.ts'),
+      'utf8'
+    );
+    expect(electronMain).toContain('user: userInfo().username');
   });
 
   it('runs validation and native package smoke tests on Linux and Windows CI', () => {
