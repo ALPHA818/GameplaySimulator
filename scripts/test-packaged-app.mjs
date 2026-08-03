@@ -613,12 +613,18 @@ function instrumentedRunConfig() {
     adapterType: 'instrumented',
     startupFlowId: undefined,
     startupFlowTimeoutMs: undefined,
+    actionDelayMs: 250,
     maxActionsPerBot: 1,
     saveScreenshots: false,
     screenshotEveryNActions: undefined,
     showBotGameplay: false,
     observationMode: 'background',
     showActionInformation: false,
+    resourceLimits: {
+      ...runConfig().resourceLimits,
+      maxCpuPercent: 100,
+      maxRamPercent: 100
+    },
     directives: [
       {
         directiveId: 'packaged-instrumented-move-forward',
@@ -1153,6 +1159,7 @@ try {
       instrumented: {
         runtimeSessionId: instrumentedSessionId,
         createdStatus: instrumentedCreated.status,
+        viabilityReport: instrumentedCreated.viabilityReport,
         started: instrumentedStarted,
         status: instrumentedStatus,
         botStatuses: instrumentedBots,
