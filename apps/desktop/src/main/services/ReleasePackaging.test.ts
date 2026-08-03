@@ -131,6 +131,8 @@ describe('release packaging configuration', () => {
     expect(packagedSmoke).toContain("if (process.platform === 'win32')");
     expect(packagedSmoke).toContain('diagnosticLogs');
     expect(packagedSmoke).toContain('adapter_launch_failed');
+    expect(packagedSmoke).toContain('removeTemporaryDirectory');
+    expect(packagedSmoke).toContain("maxRetries: process.platform === 'win32' ? 20 : 0");
     expect(packagedSmoke).toContain('windowsLaunchIdentity');
     expect(packagedSmoke).toContain('active-shutdown session');
     expect(packagedSmoke).toContain('startInstrumentedExample');

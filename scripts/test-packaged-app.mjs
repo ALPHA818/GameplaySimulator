@@ -767,6 +767,15 @@ async function waitForCondition(check, description, timeoutMs = 20_000) {
   throw new Error(`Timed out waiting for ${description}. Last value: ${JSON.stringify(lastValue)}`);
 }
 
+async function removeTemporaryDirectory(directory) {
+  await rm(directory, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === 'win32' ? 20 : 0,
+    retryDelay: 250
+  });
+}
+
 async function findPackagedChromiumProcesses() {
   if (process.platform === 'win32') {
     const command = [
@@ -1593,8 +1602,8 @@ try {
   await fifthApplication?.close().catch(() => undefined);
   await gamePage.close().catch(() => undefined);
   await instrumentedExample.close().catch(() => undefined);
-  await rm(userDataPath, { recursive: true, force: true });
+  await removeTemporaryDirectory(userDataPath);
   if (portableCopyRoot) {
-    await rm(portableCopyRoot, { recursive: true, force: true });
+    await removeTemporaryDirectory(portableCopyRoot);
   }
 }
