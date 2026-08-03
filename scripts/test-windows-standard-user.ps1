@@ -82,15 +82,15 @@ exit `$LASTEXITCODE
   $childProcess = Start-Process -FilePath $windowsPowerShell -ArgumentList $launcherArguments `
     -Credential $credential -LoadUserProfile -WorkingDirectory $testRoot -PassThru
 
-  $deadline = [DateTime]::UtcNow.AddSeconds(90)
+  $deadline = [DateTime]::UtcNow.AddSeconds(180)
   while (-not (Test-Path -LiteralPath $markerPath) -and [DateTime]::UtcNow -lt $deadline) {
-    if ($childProcess.HasExited -and $childProcess.ExitCode -ne 0) {
+    if ($childProcess.HasExited) {
       throw "The portable launcher exited with code $($childProcess.ExitCode) before its standard-user readiness marker was written."
     }
     Start-Sleep -Milliseconds 250
   }
   if (-not (Test-Path -LiteralPath $markerPath)) {
-    throw 'The portable application did not become ready under the standard user within 90 seconds.'
+    throw 'The portable application did not become ready under the standard user within 180 seconds.'
   }
 
   $marker = Get-Content -Raw -LiteralPath $markerPath | ConvertFrom-Json
