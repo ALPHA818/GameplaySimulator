@@ -8,13 +8,13 @@ The version committed at `8bdf676` and tagged locally as `v0.1.0` used broad "wo
 
 | Blocker | Behavior at `8bdf676` | Current correction | Fix commit |
 | --- | --- | --- | --- |
-| `maxRuntimeMinutes` | Accepted by the UI but did not enforce a session deadline. | Uses an active-runtime deadline, excludes paused time, logs `max_runtime_reached`, and finalizes normally. | **Not committed - release blocker** |
-| `runUntilStopped` | Did not prevent normal bot action limits from ending a run. | Keeps bot runtime active after ordinary action limits while retaining the hard runtime and safety stops. | **Not committed - release blocker** |
-| `saveActionTimeline` | Did not reliably prevent action timeline artifacts or report paths. | Gates action timeline writes and omits disabled paths from reports. | **Not committed - release blocker** |
-| `saveStateSnapshots` | Did not reliably prevent persisted state snapshots or report paths. | Keeps runtime state transient while gating snapshot files and report paths. | **Not committed - release blocker** |
-| `allowAutoScaling` | Resource allocation could reduce requested auto pools even when disabled. | Preserves exact requested counts or returns a blocker when disabled; reduction is allowed only when enabled. | **Not committed - release blocker** |
+| `maxRuntimeMinutes` | Accepted by the UI but did not enforce a session deadline. | Uses an active-runtime deadline, excludes paused time, logs `max_runtime_reached`, and finalizes normally. | `c071b1f50d6c8c624bec790a8466c6f263aa89b8` |
+| `runUntilStopped` | Did not prevent normal bot action limits from ending a run. | Keeps bot runtime active after ordinary action limits while retaining the hard runtime and safety stops. | `c071b1f50d6c8c624bec790a8466c6f263aa89b8` |
+| `saveActionTimeline` | Did not reliably prevent action timeline artifacts or report paths. | Gates action timeline writes and omits disabled paths from reports. | `c071b1f50d6c8c624bec790a8466c6f263aa89b8` |
+| `saveStateSnapshots` | Did not reliably prevent persisted state snapshots or report paths. | Keeps runtime state transient while gating snapshot files and report paths. | `c071b1f50d6c8c624bec790a8466c6f263aa89b8` |
+| `allowAutoScaling` | Resource allocation could reduce requested auto pools even when disabled. | Preserves exact requested counts or returns a blocker when disabled; reduction is allowed only when enabled. | `c071b1f50d6c8c624bec790a8466c6f263aa89b8` |
 
-Before release, every `Not committed` value above must be replaced by the exact commit containing the tested fix. A worktree result or local test run is not a commit reference.
+Commit `c071b1f50d6c8c624bec790a8466c6f263aa89b8` contains the fixes exercised by the local Node 22 source, E2E, package, sandbox, controlled-browser, instrumented, desktop-process, and permitted Hexcraft validations. Clean Linux and Windows CI must still pass on the final documentation commit before tagging.
 
 Status meanings:
 
