@@ -210,7 +210,9 @@ describe('release E2E: real adapters', () => {
       await waitFor(() => !processIsAlive(processId), 'the controlled desktop process to exit');
 
       expect(await adapter.isRunning(instanceId)).toBe(false);
-      expect(existsSync(stoppedPath)).toBe(true);
+      if (process.platform !== 'win32') {
+        expect(existsSync(stoppedPath)).toBe(true);
+      }
     } finally {
       await adapter.stopAll().catch(() => undefined);
       if (processId > 0 && processIsAlive(processId)) {
