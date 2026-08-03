@@ -286,6 +286,18 @@ export class BotManager {
     return true;
   }
 
+  failBot(botId: string, message: string): boolean {
+    const record = this.records.get(botId);
+
+    if (!record || TERMINAL_STATUSES.has(record.bot.status)) {
+      return false;
+    }
+
+    record.bot.fail(message);
+    this.notifyIdleIfNeeded();
+    return true;
+  }
+
   stopBotPool(profileId: string): number {
     let stoppedCount = 0;
 

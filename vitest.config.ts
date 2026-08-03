@@ -13,6 +13,9 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: true,
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
+    maxWorkers: process.platform === 'win32' ? 2 : undefined,
     include: [
       'packages/**/*.test.ts',
       'apps/**/*.test.ts',

@@ -158,6 +158,7 @@ export class Bot {
   private readonly onDirectiveStateObserved?: BotOptions['onDirectiveStateObserved'];
   private stopRequested = false;
   private pauseRequested = false;
+  private terminalStatus?: Extract<BotStatus, 'failed' | 'stopped'>;
   private runPromise: Promise<void> | null = null;
   status: BotStatus = 'queued';
 
@@ -203,6 +204,7 @@ export class Bot {
     if (!this.runPromise) {
       this.stopRequested = false;
       this.pauseRequested = false;
+      this.terminalStatus = undefined;
       this.runPromise = this.runLoop().finally(() => {
         this.runPromise = null;
       });
@@ -228,7 +230,15 @@ export class Bot {
   stop(): void {
     this.stopRequested = true;
     this.pauseRequested = false;
+    this.terminalStatus = 'stopped';
     this.setStatus('stopped', 'Stop requested.');
+  }
+
+  fail(message: string): void {
+    this.stopRequested = true;
+    this.pauseRequested = false;
+    this.terminalStatus = 'failed';
+    this.setStatus('failed', message);
   }
 
   getStatusSnapshot(): RuntimeBotSnapshot {
@@ -414,6 +424,10 @@ export class Bot {
   }
 
   private async setStatus(status: BotStatus, message?: string): Promise<void> {
+    if (this.terminalStatus && status !== this.terminalStatus) {
+      return;
+    }
+
     this.status = status;
     this.memory.progressState = message ?? this.memory.progressState;
     await this.emitStatus();

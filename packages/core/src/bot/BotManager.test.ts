@@ -294,6 +294,36 @@ describe('BotManager', () => {
     await manager.whenIdle();
   });
 
+  it('keeps an adapter failure terminal while the bot loop unwinds', async () => {
+    vi.useFakeTimers();
+
+    const manager = new BotManager({
+      sessionId: 'session-manager',
+      runConfig: runConfig('parallel', {
+        runUntilStopped: true,
+        actionDelayMs: 1000,
+        maxActionsPerBot: undefined
+      }),
+      launchPlans: [plan('explorer-001', 'explorer', 1)],
+      botProfiles: profiles,
+      adapter: new ManagerTestAdapter(),
+      now: () => '2026-07-04T10:00:00.000Z'
+    });
+
+    manager.startAll();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(manager.failBot('explorer-001', 'Game instance connection lost.')).toBe(true);
+    expect(manager.getStatusSnapshots()[0]).toMatchObject({
+      status: 'failed',
+      message: 'Game instance connection lost.'
+    });
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await manager.whenIdle();
+    expect(manager.getStatusSnapshots()[0].status).toBe('failed');
+  });
+
   it('ignores the ordinary per-bot action limit when run until stopped is enabled', async () => {
     vi.useFakeTimers();
 

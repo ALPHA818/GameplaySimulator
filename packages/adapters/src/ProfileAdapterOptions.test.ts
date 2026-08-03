@@ -1,4 +1,5 @@
 import type { GameProfile, SimulationRunConfig } from '@core/types';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createAdapterOptionsFromGameProfile } from './ProfileAdapterOptions';
 
@@ -504,7 +505,7 @@ describe('createAdapterOptionsFromGameProfile', () => {
       launch: { platform: 'browser', url: 'http://localhost:5173', arguments: [] },
       adapter: { ...unityProfile.adapter, type: 'browser' }
     };
-    const runsRoot = '/tmp/gameplay-simulator-user-data/runs';
+    const runsRoot = resolve('tmp', 'gameplay-simulator-user-data', 'runs');
 
     const result = createAdapterOptionsFromGameProfile(
       profile,
@@ -514,7 +515,7 @@ describe('createAdapterOptionsFromGameProfile', () => {
     );
 
     expect(result.screenshotDirectory).toBe(
-      '/tmp/gameplay-simulator-user-data/runs/session-session-options/adapter-screenshots'
+      join(runsRoot, 'session-session-options', 'adapter-screenshots')
     );
     expect(result.options.browser?.screenshotDirectory).toBe(result.screenshotDirectory);
   });
