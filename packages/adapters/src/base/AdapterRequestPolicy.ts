@@ -40,7 +40,7 @@ export const defaultAdapterRequestPolicy: AdapterRequestPolicy = {
     availableActionsMs: 5_000,
     performActionMs: 10_000,
     evidenceMs: 10_000,
-    shutdownMs: 5_000
+    shutdownMs: 15_000
   },
   responseSizeLimits: {
     healthBytes: 64 * 1024,

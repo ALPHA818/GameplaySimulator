@@ -134,6 +134,7 @@ interface DesktopInstanceRuntime {
   ownedProcessIds: Set<number>;
   liveProcessIds: Set<number>;
   ownershipTimer?: NodeJS.Timeout;
+  ownershipRefreshPromise?: Promise<void>;
   processInfo: DesktopProcessInfo;
   windowInfo?: DesktopWindowInfo;
   lastHeartbeatAt?: string;
@@ -707,7 +708,7 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
     this.desktopInstances.set(config.instanceId, runtime);
     runtime.ownershipTimer = setInterval(() => {
       void this.refreshOwnedProcessIds(runtime);
-    }, 200);
+    }, process.platform === 'win32' ? 2_000 : 200);
     runtime.ownershipTimer.unref();
     await this.refreshOwnedProcessIds(runtime);
 
@@ -1224,6 +1225,23 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
   }
 
   private async refreshOwnedProcessIds(runtime: DesktopInstanceRuntime): Promise<void> {
+    if (runtime.ownershipRefreshPromise) {
+      await runtime.ownershipRefreshPromise;
+      return;
+    }
+
+    const refreshPromise = this.performOwnedProcessRefresh(runtime);
+    runtime.ownershipRefreshPromise = refreshPromise;
+    try {
+      await refreshPromise;
+    } finally {
+      if (runtime.ownershipRefreshPromise === refreshPromise) {
+        runtime.ownershipRefreshPromise = undefined;
+      }
+    }
+  }
+
+  private async performOwnedProcessRefresh(runtime: DesktopInstanceRuntime): Promise<void> {
     try {
       const processes = await listSystemProcesses();
       if (runtime.processGroupId !== undefined) {
@@ -1311,14 +1329,18 @@ export class DesktopWindowAdapter extends BaseGameAdapter {
   ): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      await this.refreshOwnedProcessIds(runtime);
+      if (process.platform !== 'win32') {
+        await this.refreshOwnedProcessIds(runtime);
+      }
       if (this.liveOwnedProcessIds(runtime).length === 0) {
         return true;
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
 
-    await this.refreshOwnedProcessIds(runtime);
+    if (process.platform !== 'win32') {
+      await this.refreshOwnedProcessIds(runtime);
+    }
     return this.liveOwnedProcessIds(runtime).length === 0;
   }
 

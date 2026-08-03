@@ -184,6 +184,7 @@ describe('release packaging configuration', () => {
 
     expect(packagingScript).toContain('rmSync(outputDirectory');
     expect(packagingScript).toContain('packageMetadata.version');
+    expect(packagingScript).toContain("'--publish', 'never'");
     expect(packagingScript).toContain('.sha256');
     expect(packagingScript).toContain('SHA256SUMS-');
     expect(packagingScript).toContain('verify-release-artifacts.mjs');

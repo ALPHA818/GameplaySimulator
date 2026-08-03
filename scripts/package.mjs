@@ -84,11 +84,11 @@ await runNode(buildCli, ['run', 'build']);
 await runNode(playwrightPreparation);
 
 if (mode === 'package') {
-  await runNode(builderCli, ['--dir']);
+  await runNode(builderCli, ['--dir', '--publish', 'never']);
 } else if (mode === 'linux') {
-  await runNode(builderCli, ['--linux', 'AppImage']);
+  await runNode(builderCli, ['--linux', 'AppImage', '--publish', 'never']);
 } else {
-  await runNode(builderCli, ['--win', 'portable']);
+  await runNode(builderCli, ['--win', 'portable', '--publish', 'never']);
 }
 
 if (process.platform === 'linux') {
