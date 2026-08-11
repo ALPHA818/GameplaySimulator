@@ -3187,6 +3187,7 @@ export class SimulationService {
       this.clearRuntimeDeadline(record);
       this.clearInstanceHealthTimer(sessionId);
       record.botManager.stopAll();
+      await record.botManager.whenIdle();
       record.observationManager.stopFollowing();
       record.adapterShutdownFailed = true;
       record.status = 'failed';
@@ -5161,6 +5162,7 @@ export class SimulationService {
     });
     record.label = statusLabel(record);
     record.botManager.stopAll();
+    await record.botManager.whenIdle();
     await this.stopObservationTracking(record);
 
     try {
@@ -5338,6 +5340,7 @@ export class SimulationService {
     this.clearSessionTimer(record.request.runConfig.sessionId);
     this.clearRuntimeDeadline(record);
     record.botManager.stopAll();
+    await record.botManager.whenIdle();
     record.status = 'failed';
     record.stoppedAt = timestamp;
     record.botStatuses = record.botStatuses.map((bot) => ({
@@ -5519,11 +5522,12 @@ export class SimulationService {
     await runStage('stop accepting directives', () => {
       record.acceptingDirectives = false;
     });
-    await runStage('stop bot loops', () => {
+    await runStage('stop bot loops', async () => {
       this.clearSessionTimer(sessionId);
       this.clearRuntimeDeadline(record);
       this.clearInstanceHealthTimer(sessionId);
       record.botManager.stopAll();
+      await record.botManager.whenIdle();
     });
     await runStage('stop observation', () => this.stopObservationTracking(record));
     await runStage('abort adapter requests', () => record.gameAdapter?.abortActiveRequests?.());
