@@ -327,7 +327,7 @@ export class BotManager {
   }
 
   isIdle(): boolean {
-    return this.activeCount() === 0 && this.nextQueuedRecord() === undefined;
+    return this.activeCount() === 0 && (this.stopped || this.nextQueuedRecord() === undefined);
   }
 
   whenIdle(): Promise<void> {
