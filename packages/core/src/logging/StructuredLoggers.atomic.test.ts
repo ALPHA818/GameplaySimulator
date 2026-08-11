@@ -1,4 +1,5 @@
 import { mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { renameWithTransientRetry, writeTextAtomically } from './StructuredLoggers';
@@ -6,7 +7,7 @@ import { renameWithTransientRetry, writeTextAtomically } from './StructuredLogge
 const temporaryDirectories: string[] = [];
 
 function makeDirectory(): string {
-  const directory = mkdtempSync(join(process.env.TMPDIR ?? '/tmp', 'gameplay-atomic-'));
+  const directory = mkdtempSync(join(tmpdir(), 'gameplay-atomic-'));
   temporaryDirectories.push(directory);
   return directory;
 }
