@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -345,6 +345,7 @@ describe('release E2E: sessions and cleanup', () => {
           })
         ])
       );
+      expect((await readdir(metadata!.reportPaths.sessionDirectory)).filter((name) => name.includes('.tmp-'))).toEqual([]);
     } finally {
       await service.shutdownAllSessions('release_e2e_cleanup').catch(() => []);
       await server.stop().catch(() => undefined);

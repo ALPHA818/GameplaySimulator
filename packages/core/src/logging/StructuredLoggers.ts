@@ -278,12 +278,67 @@ function ensureDirectory(path: string): void {
 
 let atomicWriteSequence = 0;
 
-function writeTextAtomically(path: string, value: string): void {
+export interface RenameWithTransientRetryOptions {
+  maxAttempts?: number;
+  retryDelaysMs?: number[];
+  rename?: typeof renameSync;
+  sleep?: (milliseconds: number) => void;
+}
+
+function isTransientRenameError(error: unknown): boolean {
+  if (!error || typeof error !== 'object' || !('code' in error)) {
+    return false;
+  }
+
+  const code = (error as { code?: unknown }).code;
+  return code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
+}
+
+function sleepSynchronously(milliseconds: number): void {
+  if (milliseconds <= 0) {
+    return;
+  }
+
+  const signal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(signal, 0, 0, milliseconds);
+}
+
+export function renameWithTransientRetry(
+  source: string,
+  destination: string,
+  options: RenameWithTransientRetryOptions = {}
+): void {
+  const maxAttempts = Math.max(1, options.maxAttempts ?? 4);
+  const retryDelaysMs = options.retryDelaysMs ?? [20, 50, 100];
+  const rename = options.rename ?? renameSync;
+  const sleep = options.sleep ?? sleepSynchronously;
+  let latestError: unknown;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      rename(source, destination);
+      return;
+    } catch (error) {
+      latestError = error;
+      if (!isTransientRenameError(error) || attempt === maxAttempts - 1) {
+        throw error;
+      }
+
+      sleep(retryDelaysMs[Math.min(attempt, retryDelaysMs.length - 1)] ?? 0);
+    }
+  }
+
+  throw latestError;
+}
+
+export interface AtomicWriteOptions extends RenameWithTransientRetryOptions {}
+
+export function writeTextAtomically(path: string, value: string, options: AtomicWriteOptions = {}): void {
   atomicWriteSequence += 1;
   const temporaryPath = `${path}.tmp-${process.pid}-${atomicWriteSequence}`;
   try {
     writeFileSync(temporaryPath, value, { encoding: 'utf8', flag: 'wx' });
-    renameSync(temporaryPath, path);
+    renameWithTransientRetry(temporaryPath, path, options);
   } finally {
     rmSync(temporaryPath, { force: true });
   }

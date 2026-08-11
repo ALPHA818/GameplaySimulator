@@ -10,6 +10,7 @@ export class SerializedDebouncedTask {
   private maxWaitTimer?: NodeJS.Timeout;
   private pendingTask?: () => void | Promise<void>;
   private running: Promise<void> = Promise.resolve();
+  private storedErrors: unknown[] = [];
 
   constructor(options: SerializedDebouncedTaskOptions = {}) {
     this.delayMs = options.delayMs ?? 2_000;
@@ -38,6 +39,12 @@ export class SerializedDebouncedTask {
       }
       await this.running;
     } while (this.pendingTask);
+
+    if (this.storedErrors.length > 0) {
+      const [error] = this.storedErrors;
+      this.storedErrors = [];
+      throw error;
+    }
   }
 
   cancel(): void {
@@ -56,7 +63,10 @@ export class SerializedDebouncedTask {
     this.running = this.running
       .catch(() => undefined)
       .then(task)
-      .then(() => undefined);
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        this.storedErrors.push(error);
+      });
   }
 
   private clearTimers(): void {
