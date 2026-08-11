@@ -5340,7 +5340,6 @@ export class SimulationService {
     this.clearSessionTimer(record.request.runConfig.sessionId);
     this.clearRuntimeDeadline(record);
     record.botManager.stopAll();
-    await record.botManager.whenIdle();
     record.status = 'failed';
     record.stoppedAt = timestamp;
     record.botStatuses = record.botStatuses.map((bot) => ({

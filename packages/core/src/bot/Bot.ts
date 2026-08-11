@@ -161,6 +161,7 @@ export class Bot {
   private terminalStatus?: Extract<BotStatus, 'failed' | 'stopped'>;
   private terminalMessage?: string;
   private runPromise: Promise<void> | null = null;
+  private readonly stopWaiters = new Set<() => void>();
   status: BotStatus = 'queued';
 
   constructor(options: BotOptions) {
@@ -234,6 +235,9 @@ export class Bot {
     this.pauseRequested = false;
     this.terminalStatus = 'stopped';
     this.terminalMessage = 'Stop requested.';
+    for (const resolve of [...this.stopWaiters]) {
+      resolve();
+    }
     this.setStatus('stopped', 'Stop requested.');
   }
 
@@ -242,6 +246,9 @@ export class Bot {
     this.pauseRequested = false;
     this.terminalStatus = 'failed';
     this.terminalMessage = message;
+    for (const resolve of [...this.stopWaiters]) {
+      resolve();
+    }
     this.setStatus('failed', message);
   }
 
@@ -281,7 +288,7 @@ export class Bot {
 
         if (this.pauseRequested) {
           await this.setStatus('waiting', 'Paused.');
-          await this.sleep(Math.max(50, this.actionDelayMs));
+          await this.wait(Math.max(50, this.actionDelayMs));
           continue;
         }
 
@@ -321,7 +328,7 @@ export class Bot {
         if (availableActions.length === 0 && !this.shouldRunConfiguredUiJourney()) {
           await this.setStatus('waiting', 'No available actions; retrying.');
           await this.log('warn', 'No available actions were reported; retrying before declaring the bot stuck.');
-          await this.sleep(Math.max(50, this.actionDelayMs));
+          await this.wait(Math.max(50, this.actionDelayMs));
           continue;
         }
 
@@ -390,7 +397,7 @@ export class Bot {
             ? Math.max(0, action.payload.directiveWaitAfterMs)
             : 0;
         if (directiveWaitAfterMs > 0) {
-          await this.sleep(directiveWaitAfterMs);
+          await this.wait(directiveWaitAfterMs);
         }
 
         if (this.shouldCompleteUiJourney(action, result)) {
@@ -410,12 +417,12 @@ export class Bot {
 
         if (result.status === 'failed' || result.status === 'timed_out') {
           await this.setStatus('waiting', result.message ?? `Action ${result.status}; retrying.`);
-          await this.sleep(Math.max(50, this.actionDelayMs));
+          await this.wait(Math.max(50, this.actionDelayMs));
           continue;
         }
 
         if (this.actionDelayMs > 0) {
-          await this.sleep(this.actionDelayMs);
+          await this.wait(this.actionDelayMs);
         }
       }
 
@@ -439,6 +446,28 @@ export class Bot {
     this.status = status;
     this.memory.progressState = this.terminalMessage ?? message ?? this.memory.progressState;
     await this.emitStatus();
+  }
+
+  private async wait(milliseconds: number): Promise<void> {
+    if (this.stopRequested) {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const settle = (): void => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        this.stopWaiters.delete(settle);
+        resolve();
+      };
+
+      this.stopWaiters.add(settle);
+      void this.sleep(milliseconds).then(settle, settle);
+    });
   }
 
   private async emitStatus(): Promise<void> {
@@ -557,7 +586,7 @@ export class Bot {
         }
 
         if (this.actionDelayMs > 0) {
-          await this.sleep(this.actionDelayMs);
+          await this.wait(this.actionDelayMs);
         }
       }
 
